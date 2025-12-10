@@ -1,0 +1,30 @@
+# Основные зависимости
+PyQt6>=6.6.0
+sounddevice>=0.4.6
+numpy>=1.26
+faster-whisper>=1.0.1
+huggingface-hub>=0.20.0
+pyperclip>=1.8.2
+
+# Кросс-платформенные хоткеи и ввод (для macOS и Linux)
+pynput>=1.7.6
+
+# Windows-специфичные (только для Windows, keyboard использует Windows API напрямую)
+keyboard>=0.13.5; sys_platform == 'win32'
+
+# macOS-специфичные (только для macOS)
+pyobjc-framework-Cocoa>=9.0; sys_platform == 'darwin'
+pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'
+
+# Для сборки (выберите один из вариантов)
+# PyInstaller - простая сборка
+pyinstaller>=6.0.0
+
+# Nuitka - компиляция в нативный код (защита от декомпиляции)
+# Рекомендуется для production сборок
+nuitka>=2.0
+ordered-set>=4.1.0
+zstandard>=0.22.0
+
+# Опционально: для загрузки конфигурации из .env файла
+python-dotenv>=1.0.0

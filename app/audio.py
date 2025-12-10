@@ -1,0 +1,205 @@
+"""
+Запись аудио с поддержкой callback для уровня громкости (waveform).
+"""
+
+import queue
+import tempfile
+import threading
+import wave
+from pathlib import Path
+from typing import Callable, List, Optional
+
+import numpy as np
+import sounddevice as sd
+
+
+# Callback для уровня громкости: принимает список нормализованных значений [0.0-1.0]
+LevelCallback = Callable[[List[float]], None]
+
+
+class AudioRecorder:
+    def __init__(self, samplerate: int = 16000, channels: int = 1) -> None:
+        self.samplerate = samplerate
+        self.channels = channels
+        self.dtype = "int16"
+        self._stream: Optional[sd.RawInputStream] = None
+        self._writer_thread: Optional[threading.Thread] = None
+        self._queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
+        self._tmp_path: Optional[Path] = None
+        self._running = threading.Event()
+        self._level_callback: Optional[LevelCallback] = None
+        self._level_history: List[float] = []
+        self._history_max_len = 32  # Количество баров для waveform
+
+        # Для мониторинга микрофона (без записи)
+        self._monitor_stream: Optional[sd.RawInputStream] = None
+        self._monitoring = threading.Event()
+        self._monitor_callback: Optional[LevelCallback] = None
+
+    def list_input_devices(self) -> List[str]:
+        devices = []
+        for idx, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] > 0:
+                devices.append(f"{idx}: {dev['name']}")
+        return devices
+
+    def _callback(self, indata, frames, time, status) -> None:  # type: ignore[override]
+        if status:
+            # Non-critical statuses are ignored; errors will surface on stop if fatal.
+            pass
+
+        data = bytes(indata)
+        self._queue.put(data)
+
+        # Вычисляем уровень громкости для waveform
+        if self._level_callback:
+            try:
+                # Конвертируем bytes в numpy array
+                audio_data = np.frombuffer(data, dtype=np.int16)
+                # RMS (Root Mean Square) для получения уровня громкости
+                if len(audio_data) > 0:
+                    rms = np.sqrt(np.mean(audio_data.astype(np.float32) ** 2))
+                    # Нормализуем к [0, 1] (int16 max = 32767)
+                    # Уменьшаем делитель для большей чувствительности к тихим звукам
+                    normalized = min(1.0, rms / 2000)
+
+                    # Добавляем в историю
+                    self._level_history.append(normalized)
+                    if len(self._level_history) > self._history_max_len:
+                        self._level_history.pop(0)
+
+                    # Отправляем копию истории в callback
+                    self._level_callback(self._level_history.copy())
+            except Exception:
+                pass  # Игнорируем ошибки в callback
+
+    def start(
+        self,
+        device: Optional[int] = None,
+        level_callback: Optional[LevelCallback] = None,
+    ) -> None:
+        if self._running.is_set():
+            return
+
+        self._level_callback = level_callback
+        self._level_history = []
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        self._tmp_path = Path(tmp.name)
+        tmp.close()
+
+        try:
+            self._stream = sd.RawInputStream(
+                samplerate=self.samplerate,
+                blocksize=1024,  # Меньший размер блока для более частых обновлений
+                device=device,
+                dtype=self.dtype,
+                channels=self.channels,
+                callback=self._callback,
+            )
+        except sd.PortAudioError as e:
+            self._tmp_path.unlink(missing_ok=True)
+            self._tmp_path = None
+            raise RuntimeError(f"Не удалось открыть устройство записи: {e}") from e
+
+        self._running.set()
+
+        def _writer() -> None:
+            assert self._tmp_path is not None
+            with wave.open(str(self._tmp_path), "wb") as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(np.dtype(self.dtype).itemsize)
+                wf.setframerate(self.samplerate)
+                while True:
+                    chunk = self._queue.get()
+                    if chunk is None:
+                        break
+                    wf.writeframes(chunk)
+
+        self._writer_thread = threading.Thread(target=_writer, daemon=True)
+        self._writer_thread.start()
+        self._stream.start()
+
+    def stop(self, timeout: float = 5.0) -> Optional[Path]:
+        if not self._running.is_set():
+            return None
+        self._running.clear()
+        self._level_callback = None
+
+        if self._stream:
+            self._stream.stop()
+            self._stream.close()
+        self._queue.put(None)
+        if self._writer_thread:
+            self._writer_thread.join(timeout=timeout)
+            if self._writer_thread.is_alive():
+                # Поток завис, но файл может быть частично записан
+                pass
+        path = self._tmp_path
+        self._tmp_path = None
+        return path
+
+    @property
+    def recording(self) -> bool:
+        return self._running.is_set()
+
+    # === Мониторинг микрофона (без записи) ===
+
+    def _monitor_callback_fn(self, indata, frames, time, status) -> None:
+        """Callback для мониторинга уровня микрофона."""
+        if not self._monitor_callback:
+            return
+        try:
+            audio_data = np.frombuffer(bytes(indata), dtype=np.int16)
+            if len(audio_data) > 0:
+                rms = np.sqrt(np.mean(audio_data.astype(np.float32) ** 2))
+                # Нормализуем к [0, 1]
+                normalized = min(1.0, rms / 2000)
+                self._monitor_callback([normalized])
+        except Exception:
+            pass
+
+    def start_monitoring(
+        self,
+        device: Optional[int] = None,
+        level_callback: Optional[LevelCallback] = None,
+    ) -> bool:
+        """Начать мониторинг уровня микрофона без записи."""
+        if self._monitoring.is_set():
+            return True
+
+        self._monitor_callback = level_callback
+
+        try:
+            self._monitor_stream = sd.RawInputStream(
+                samplerate=self.samplerate,
+                blocksize=2048,
+                device=device,
+                dtype=self.dtype,
+                channels=self.channels,
+                callback=self._monitor_callback_fn,
+            )
+            self._monitoring.set()
+            self._monitor_stream.start()
+            return True
+        except sd.PortAudioError:
+            self._monitor_stream = None
+            return False
+
+    def stop_monitoring(self) -> None:
+        """Остановить мониторинг микрофона."""
+        if not self._monitoring.is_set():
+            return
+        self._monitoring.clear()
+        self._monitor_callback = None
+        if self._monitor_stream:
+            try:
+                self._monitor_stream.stop()
+                self._monitor_stream.close()
+            except Exception:
+                pass
+            self._monitor_stream = None
+
+    @property
+    def monitoring(self) -> bool:
+        return self._monitoring.is_set()
