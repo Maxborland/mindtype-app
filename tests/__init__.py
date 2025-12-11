@@ -1,0 +1,2 @@
+# MindType Tests Package
+

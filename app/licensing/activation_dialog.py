@@ -4,7 +4,9 @@
 Поддерживает онлайн валидацию с обработкой ошибок.
 """
 
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+import webbrowser
+
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QUrl
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -16,7 +18,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
 )
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QDesktopServices
+
+# URL для покупки лицензии
+PURCHASE_URL = "https://mindtype.space/#pricing"
+SUPPORT_EMAIL = "help@mindtype.space"
 
 from .license_manager import LicenseManager, LicenseStatus, LicenseInfo, ValidationResult
 from .key_validator import KeyValidator
@@ -239,6 +245,21 @@ class LicenseActivationDialog(QDialog):
         self._message_label.setVisible(False)
         layout.addWidget(self._message_label)
 
+        # Кнопка покупки лицензии
+        self._buy_btn = QPushButton(self._t("buy_license_button"))
+        self._buy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #000000;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+            }
+        """)
+        self._buy_btn.clicked.connect(self._on_buy_license)
+        layout.addWidget(self._buy_btn)
+
         # Кнопки
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(12)
@@ -263,6 +284,16 @@ class LicenseActivationDialog(QDialog):
 
         layout.addLayout(buttons_layout)
 
+        # Кнопка поддержки
+        support_layout = QHBoxLayout()
+        support_layout.addStretch()
+        self._support_btn = QPushButton(self._t("contact_support"))
+        self._support_btn.setStyleSheet("font-size: 10px;")
+        self._support_btn.clicked.connect(self._on_contact_support)
+        support_layout.addWidget(self._support_btn)
+        support_layout.addStretch()
+        layout.addLayout(support_layout)
+
         # Информация об устройстве
         self._device_info = QLabel()
         self._device_info.setObjectName("deviceInfo")
@@ -282,6 +313,8 @@ class LicenseActivationDialog(QDialog):
         self._continue_btn.setText(self._t("continue_trial"))
         self._activate_btn.setText(self._t("activate"))
         self._deactivate_btn.setText(self._t("deactivate"))
+        self._buy_btn.setText(self._t("buy_license_button"))
+        self._support_btn.setText(self._t("contact_support"))
         self._update_status()
 
     def _update_status(self):
@@ -321,6 +354,7 @@ class LicenseActivationDialog(QDialog):
             self._key_input.setEnabled(False)
             self._key_input.setText("")
             self._activate_btn.setVisible(False)
+            self._buy_btn.setVisible(False)  # Скрываем кнопку покупки
 
         elif info.status == LicenseStatus.TRIAL:
             self._status_label.setText(f"[!] {self._t('trial_mode')}")
@@ -336,6 +370,7 @@ class LicenseActivationDialog(QDialog):
             self._deactivate_btn.setVisible(False)
             self._key_input.setEnabled(True)
             self._activate_btn.setVisible(True)
+            self._buy_btn.setVisible(True)  # Показываем кнопку покупки
 
         elif info.status == LicenseStatus.TRIAL_EXPIRED:
             self._status_label.setText(f"✗ {self._t('trial_expired')}")
@@ -346,6 +381,7 @@ class LicenseActivationDialog(QDialog):
             self._deactivate_btn.setVisible(False)
             self._key_input.setEnabled(True)
             self._activate_btn.setVisible(True)
+            self._buy_btn.setVisible(True)  # Показываем кнопку покупки
 
         # Обновляем стиль статуса
         self._status_label.style().unpolish(self._status_label)
@@ -477,10 +513,270 @@ class LicenseActivationDialog(QDialog):
         if info.is_active:
             self.accept()
 
+    def _on_buy_license(self):
+        """Открыть страницу покупки лицензии."""
+        QDesktopServices.openUrl(QUrl(PURCHASE_URL))
+
+    def _on_contact_support(self):
+        """Открыть почтовый клиент для связи с поддержкой."""
+        QDesktopServices.openUrl(QUrl(f"mailto:{SUPPORT_EMAIL}"))
+
     def should_block_app(self) -> bool:
         """Проверить, должно ли приложение быть заблокировано."""
         info = self._manager.get_license_info()
         return info.status == LicenseStatus.TRIAL_EXPIRED
+
+
+class TrialExpiredDialog(QDialog):
+    """
+    Блокирующий диалог при истечении trial.
+    Не имеет кнопки закрытия и требует активации лицензии.
+    """
+
+    license_activated = pyqtSignal()
+
+    def __init__(self, license_manager: LicenseManager, translate_func=None, parent=None):
+        super().__init__(parent)
+        self._manager = license_manager
+        self._t = translate_func or (lambda x: x)
+        self._activation_worker = None
+        self._setup_ui()
+
+    def set_translate_func(self, func):
+        """Установить функцию перевода."""
+        self._t = func
+        self._update_texts()
+
+    def _setup_ui(self):
+        """Настроить UI блокирующего диалога."""
+        self.setWindowTitle(self._t("trial_blocked_title"))
+        self.setFixedSize(400, 350)
+        self.setModal(True)
+
+        # Убираем кнопку закрытия
+        self.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.CustomizeWindowHint |
+            Qt.WindowType.WindowTitleHint
+        )
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #ffffff;
+                color: #000000;
+                font-family: "MS Sans Serif", "Geneva", "Arial", sans-serif;
+            }
+            QLabel {
+                color: #000000;
+                background: transparent;
+            }
+            QLabel#title {
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QLabel#message {
+                font-size: 12px;
+                padding: 10px;
+                border: 2px solid #cc0000;
+                background-color: #ffeeee;
+            }
+            QLineEdit {
+                background-color: #ffffff;
+                border: 2px solid;
+                border-top-color: #808080;
+                border-left-color: #808080;
+                border-right-color: #ffffff;
+                border-bottom-color: #ffffff;
+                padding: 8px;
+                font-size: 14px;
+                font-family: monospace;
+            }
+            QPushButton {
+                background-color: #dddddd;
+                border: 2px solid;
+                border-top-color: #ffffff;
+                border-left-color: #ffffff;
+                border-right-color: #000000;
+                border-bottom-color: #000000;
+                padding: 6px 16px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #eeeeee;
+            }
+            QPushButton#primary {
+                background-color: #000000;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton#primary:hover {
+                background-color: #333333;
+            }
+            QProgressBar {
+                background-color: #ffffff;
+                border: 2px solid #808080;
+                height: 16px;
+            }
+            QProgressBar::chunk {
+                background-color: #000000;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        # Иконка и заголовок
+        self._title_label = QLabel(self._t("trial_blocked_title"))
+        self._title_label.setObjectName("title")
+        self._title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._title_label)
+
+        # Сообщение
+        self._message_label = QLabel(self._t("trial_blocked_message"))
+        self._message_label.setObjectName("message")
+        self._message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._message_label.setWordWrap(True)
+        layout.addWidget(self._message_label)
+
+        # Кнопка покупки
+        self._buy_btn = QPushButton(self._t("buy_license_button"))
+        self._buy_btn.setObjectName("primary")
+        self._buy_btn.clicked.connect(self._on_buy_license)
+        layout.addWidget(self._buy_btn)
+
+        # Разделитель
+        separator = QLabel("— или —")
+        separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        separator.setStyleSheet("color: #808080; font-size: 11px;")
+        layout.addWidget(separator)
+
+        # Поле ввода ключа
+        self._key_label = QLabel(self._t("enter_license_key"))
+        layout.addWidget(self._key_label)
+
+        self._key_input = QLineEdit()
+        self._key_input.setPlaceholderText("XXXX-XXXX-XXXX-XXXX")
+        self._key_input.setMaxLength(19)
+        self._key_input.textChanged.connect(self._on_key_changed)
+        layout.addWidget(self._key_input)
+
+        # Прогресс
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setVisible(False)
+        layout.addWidget(self._progress)
+
+        # Сообщение об ошибке
+        self._error_label = QLabel()
+        self._error_label.setStyleSheet("color: #cc0000; font-size: 11px;")
+        self._error_label.setVisible(False)
+        layout.addWidget(self._error_label)
+
+        # Кнопка активации
+        self._activate_btn = QPushButton(self._t("activate"))
+        self._activate_btn.setEnabled(False)
+        self._activate_btn.clicked.connect(self._on_activate)
+        layout.addWidget(self._activate_btn)
+
+        # Кнопка поддержки
+        self._support_btn = QPushButton(self._t("contact_support"))
+        self._support_btn.setStyleSheet("font-size: 10px;")
+        self._support_btn.clicked.connect(self._on_contact_support)
+        layout.addWidget(self._support_btn)
+
+        layout.addStretch()
+
+    def _update_texts(self):
+        """Обновить тексты."""
+        self.setWindowTitle(self._t("trial_blocked_title"))
+        self._title_label.setText(self._t("trial_blocked_title"))
+        self._message_label.setText(self._t("trial_blocked_message"))
+        self._buy_btn.setText(self._t("buy_license_button"))
+        self._key_label.setText(self._t("enter_license_key"))
+        self._activate_btn.setText(self._t("activate"))
+        self._support_btn.setText(self._t("contact_support"))
+
+    def _on_key_changed(self, text: str):
+        """Обработчик изменения ключа."""
+        clean = text.upper().replace("-", "").replace(" ", "")
+        clean = "".join(c for c in clean if c.isalnum())[:16]
+
+        formatted = ""
+        for i, c in enumerate(clean):
+            if i > 0 and i % 4 == 0:
+                formatted += "-"
+            formatted += c
+
+        if formatted != text:
+            self._key_input.blockSignals(True)
+            self._key_input.setText(formatted)
+            self._key_input.blockSignals(False)
+
+        is_valid = KeyValidator.validate(formatted)
+        self._activate_btn.setEnabled(is_valid)
+        self._error_label.setVisible(False)
+
+    def _on_buy_license(self):
+        """Открыть страницу покупки."""
+        QDesktopServices.openUrl(QUrl(PURCHASE_URL))
+
+    def _on_contact_support(self):
+        """Открыть почту поддержки."""
+        QDesktopServices.openUrl(QUrl(f"mailto:{SUPPORT_EMAIL}"))
+
+    def _on_activate(self):
+        """Активировать лицензию."""
+        key = self._key_input.text()
+        self._progress.setVisible(True)
+        self._activate_btn.setEnabled(False)
+        self._error_label.setVisible(False)
+
+        self._activation_worker = ActivationWorker(self._manager, key)
+        self._activation_worker.finished.connect(self._on_activation_finished)
+        self._activation_worker.start()
+
+    def _on_activation_finished(self, result, message: str, data):
+        """Обработчик завершения активации."""
+        self._progress.setVisible(False)
+
+        if result == ValidationResult.SUCCESS:
+            self.license_activated.emit()
+            QMessageBox.information(
+                self,
+                self._t("license_activation"),
+                self._t("activation_success")
+            )
+            self.accept()
+        else:
+            self._activate_btn.setEnabled(KeyValidator.validate(self._key_input.text()))
+            error_messages = {
+                ValidationResult.INVALID_KEY: self._t("invalid_key"),
+                ValidationResult.NOT_FOUND: self._t("license_not_found"),
+                ValidationResult.EXPIRED: self._t("license_expired_error"),
+                ValidationResult.DEACTIVATED: self._t("license_deactivated_error"),
+                ValidationResult.DEVICE_LIMIT: self._t("device_limit_error"),
+                ValidationResult.NETWORK_ERROR: self._t("network_error"),
+                ValidationResult.RATE_LIMITED: self._t("rate_limited"),
+                ValidationResult.SERVER_ERROR: self._t("server_error"),
+            }
+            self._error_label.setText(error_messages.get(result, message))
+            self._error_label.setVisible(True)
+
+    def closeEvent(self, event):
+        """Предотвращаем закрытие диалога."""
+        # Разрешаем закрытие только если лицензия активна
+        info = self._manager.get_license_info()
+        if info.status != LicenseStatus.VALID:
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+    def reject(self):
+        """Предотвращаем закрытие по Escape."""
+        info = self._manager.get_license_info()
+        if info.status == LicenseStatus.VALID:
+            super().reject()
 
 
 class LicenseStatusWidget(QFrame):

@@ -37,7 +37,7 @@ from .config import ConfigManager, DEFAULT_MODELS_DIR
 from .hotkeys import HotkeyListener, HotkeyRecorder
 from .inserter import insert_text, focus_manager
 from .licensing import LicenseManager, LicenseStatus
-from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusWidget
+from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusWidget, TrialExpiredDialog
 from .overlay import OverlayWidget
 from .transcriber import Transcriber
 from .translations import (
@@ -1455,6 +1455,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.update_progress, row, 0, 1, 2)
         row += 1
 
+        # Кнопка поддержки
+        self.support_label = QLabel(self._t("contact_support"))
+        self.support_btn = QPushButton("help@mindtype.space")
+        self.support_btn.setStyleSheet("font-size: 11px;")
+        self.support_btn.clicked.connect(self._on_contact_support)
+        layout.addWidget(self.support_label, row, 0)
+        layout.addWidget(self.support_btn, row, 1)
+        row += 1
+
         layout.setRowStretch(row, 1)
         return tab
 
@@ -1864,6 +1873,9 @@ class MainWindow(QMainWindow):
         if self.updater.status != UpdateStatus.AVAILABLE:
             self.check_update_btn.setText(self._t("check_updates"))
 
+        # Поддержка
+        self.support_label.setText(self._t("contact_support"))
+
     def _setup_focus_manager(self) -> None:
         """Настроить менеджер фокуса с handle нашего окна."""
         hwnd = int(self.winId())
@@ -2019,6 +2031,13 @@ class MainWindow(QMainWindow):
 
     def _handle_hotkey_press(self) -> None:
         """Обработчик нажатия хоткея (Qt thread)."""
+        # Проверяем лицензию перед записью
+        info = self.license_manager.get_license_info()
+        if info.status == LicenseStatus.TRIAL_EXPIRED:
+            # Показываем блокирующий диалог
+            self._show_trial_expired_dialog()
+            return
+
         # Если идёт транскрипция - отменяем её
         if self._transcription_in_progress:
             self._cancel_transcription()
@@ -2241,7 +2260,22 @@ class MainWindow(QMainWindow):
 
     def _show_license_dialog(self) -> None:
         """Показать диалог активации лицензии."""
-        dialog = LicenseActivationDialog(
+        info = self.license_manager.get_license_info()
+
+        if info.status == LicenseStatus.TRIAL_EXPIRED:
+            self._show_trial_expired_dialog()
+        else:
+            dialog = LicenseActivationDialog(
+                self.license_manager,
+                translate_func=self._t,
+                parent=self
+            )
+            dialog.license_activated.connect(self._on_license_activated)
+            dialog.exec()
+
+    def _show_trial_expired_dialog(self) -> None:
+        """Показать блокирующий диалог истёкшего trial."""
+        dialog = TrialExpiredDialog(
             self.license_manager,
             translate_func=self._t,
             parent=self
@@ -2253,6 +2287,12 @@ class MainWindow(QMainWindow):
         """Обработчик активации лицензии."""
         self.license_status_widget.refresh()
         self._add_journal_entry("success", "license_active", is_translatable=True)
+
+    def _on_contact_support(self) -> None:
+        """Открыть почтовый клиент для связи с поддержкой."""
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl("mailto:help@mindtype.space"))
 
     def _check_for_updates(self) -> None:
         """Проверить наличие обновлений."""
@@ -2400,11 +2440,20 @@ def main() -> None:
     has_access, info = license_manager.check_access()
 
     if not has_access:
-        # Показываем диалог активации
-        dialog = LicenseActivationDialog(license_manager)
-        result = dialog.exec()
-        if dialog.should_block_app():
-            sys.exit(1)
+        if info.status == LicenseStatus.TRIAL_EXPIRED:
+            # Показываем блокирующий диалог (нельзя закрыть)
+            dialog = TrialExpiredDialog(license_manager)
+            result = dialog.exec()
+            # Если диалог закрылся без активации - выходим
+            final_info = license_manager.get_license_info()
+            if final_info.status != LicenseStatus.VALID:
+                sys.exit(1)
+        else:
+            # Показываем обычный диалог активации
+            dialog = LicenseActivationDialog(license_manager)
+            result = dialog.exec()
+            if dialog.should_block_app():
+                sys.exit(1)
 
     window = MainWindow()
     window.show()

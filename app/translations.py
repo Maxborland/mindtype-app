@@ -286,6 +286,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_ready": "Обновление готово к установке",
         "update_error": "Ошибка обновления",
         "current_version": "Текущая версия",
+
+        # Новые ключи для покупки и поддержки
+        "buy_license_button": "Купить лицензию",
+        "contact_support": "Связаться с поддержкой",
+        "trial_blocked_title": "Пробный период истёк",
+        "trial_blocked_message": "Пробный период закончился.\nДля продолжения работы приобретите лицензию.",
+        "open_purchase_page": "Открыть страницу покупки",
     },
     "en": {
         # Headers / Navigation
@@ -447,6 +454,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "update_ready": "Update ready to install",
         "update_error": "Update error",
         "current_version": "Current version",
+
+        # New keys for purchase and support
+        "buy_license_button": "Buy License",
+        "contact_support": "Contact Support",
+        "trial_blocked_title": "Trial Expired",
+        "trial_blocked_message": "Your trial period has ended.\nPlease purchase a license to continue.",
+        "open_purchase_page": "Open Purchase Page",
     },
     "de": {
         "settings": "Einstellungen",
