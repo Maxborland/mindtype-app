@@ -76,6 +76,10 @@ class ConfigManager:
         merged = _default_config()
         merged.update(data)
 
+        # Fix legacy "[OK] model" format from older versions
+        if "model_size" in merged and merged["model_size"].startswith("[OK] "):
+            merged["model_size"] = merged["model_size"].replace("[OK] ", "")
+
         # In compiled mode, verify model exists or fallback to available one
         if getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__"):
             model_size = merged.get("model_size", "tiny")

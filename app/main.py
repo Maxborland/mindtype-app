@@ -1,3 +1,9 @@
+# MindType - AI Speech-to-Text Desktop Application
+# Copyright (c) 2024-2025 Butakov Maksim Vladimirovich. All rights reserved.
+# Author: Butakov Maksim Vladimirovich <info@mindtype.space>
+#
+# This software is the confidential and proprietary information of the Author.
+
 import sys
 import traceback
 from datetime import datetime
@@ -1654,7 +1660,7 @@ class MainWindow(QMainWindow):
         # Настройки
         self.ui_lang_box.currentIndexChanged.connect(self._on_ui_lang_change)
         self.trans_lang_box.currentIndexChanged.connect(self._on_trans_lang_change)
-        self.model_box.currentTextChanged.connect(lambda v: self.config.update(model_size=v))
+        self.model_box.currentIndexChanged.connect(self._on_model_change)
         self.compute_box.currentTextChanged.connect(lambda v: self.config.update(compute_type=v))
         self.device_box.currentTextChanged.connect(lambda v: self.config.update(device=v))
         self.mic_box.currentTextChanged.connect(self._on_mic_change)
@@ -1766,6 +1772,12 @@ class MainWindow(QMainWindow):
         lang = self.trans_lang_box.itemData(index)
         if lang:
             self.config.update(language=lang)
+
+    def _on_model_change(self, index: int) -> None:
+        """Обработчик изменения модели."""
+        model = self.model_box.itemData(index)
+        if model:
+            self.config.update(model_size=model)
 
     def _on_beam_change(self, value: int) -> None:
         """Обработчик изменения beam size."""

@@ -4,6 +4,7 @@ from typing import Callable, Iterable, Optional, Tuple
 import ctranslate2
 from faster_whisper import WhisperModel
 from huggingface_hub import HfApi
+import sys
 
 # Маппинг имён моделей на repo_id huggingface
 _MODEL_REPO_MAP = {
@@ -51,6 +52,42 @@ def _get_repo_id(model_size: str) -> str:
     return f"Systran/faster-whisper-{model_size}"
 
 
+def _patch_faster_whisper_assets_path_for_compiled() -> None:
+    """
+    In Nuitka/PyInstaller builds, faster_whisper may report __file__ as an absolute
+    build-time path, causing assets (Silero VAD ONNX) lookup to fail. We patch the
+    assets path to be relative to the executable folder if the bundled asset exists.
+    """
+    is_compiled = getattr(sys, "frozen", False) or hasattr(sys, "__compiled__")
+    if not is_compiled:
+        return
+
+    base_dir = Path(sys.executable).resolve().parent
+    assets_dir = base_dir / "faster_whisper" / "assets"
+    onnx_path = assets_dir / "silero_vad_v6.onnx"
+    if not onnx_path.exists():
+        return
+
+    try:
+        import faster_whisper.utils as fw_utils
+        import faster_whisper.vad as fw_vad
+    except Exception:
+        return
+
+    def _get_assets_path() -> str:
+        return str(assets_dir)
+
+    # Patch both: vad imports get_assets_path by value (`from ...utils import get_assets_path`)
+    fw_utils.get_assets_path = _get_assets_path  # type: ignore[assignment]
+    fw_vad.get_assets_path = _get_assets_path  # type: ignore[assignment]
+
+    # Ensure cached model doesn't keep old path.
+    try:
+        fw_vad.get_vad_model.cache_clear()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 class Transcriber:
     def __init__(self) -> None:
         self.model_size: Optional[str] = None
@@ -69,6 +106,7 @@ class Transcriber:
         models_dir: Optional[str] = None,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> None:
+        _patch_faster_whisper_assets_path_for_compiled()
         dev = _pick_device(device)
         target_dir = Path(models_dir) if models_dir else None
         if target_dir:
