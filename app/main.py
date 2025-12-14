@@ -15,11 +15,12 @@ if sys.platform == "win32":
     import ctypes
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MindType.App.1.0")
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt, QRectF
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt, QRectF, QUrl, QSize
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -27,6 +28,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -36,15 +38,23 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush, QDesktopServices, QDragEnterEvent, QDropEvent
 
 from .audio import AudioRecorder
 from .config import ConfigManager, DEFAULT_MODELS_DIR
+from .file_transcriber import (
+    FileTranscriptionQueue,
+    FileTask,
+    FileStatus,
+    ALL_EXTENSIONS,
+    is_supported_file,
+)
 from .hotkeys import HotkeyListener, HotkeyRecorder
 from .inserter import insert_text, focus_manager
 from .licensing import LicenseManager, LicenseStatus
 from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusWidget, TrialExpiredDialog
 from .overlay import OverlayWidget
+from .report_generator import ReportGenerator
 from .transcriber import Transcriber
 from .translations import (
     get_text,
@@ -997,12 +1007,577 @@ class MicLevelWidget(QWidget):
         painter.drawRoundedRect(0, 0, w - 1, h - 1, radius, radius)
 
 
+class PromptCustomizationDialog(QMainWindow):
+    """Диалог настройки промптов для AI саммаризации."""
+
+    def __init__(self, config_manager, translate_func=None, parent=None):
+        super().__init__(parent)
+        self._t = translate_func or (lambda x: x)
+        self.config = config_manager
+
+        self.setWindowTitle(self._t("customize_prompts"))
+        self.setFixedSize(700, 500)
+
+        # Загружаем дефолтные промпты
+        from .summarizer import SYSTEM_PROMPT, SHORT_PROMPT, EXTRACTION_PROMPT, AGGREGATION_PROMPT
+        self._default_prompts = {
+            "system": SYSTEM_PROMPT,
+            "short": SHORT_PROMPT,
+            "extraction": EXTRACTION_PROMPT,
+            "aggregation": AGGREGATION_PROMPT,
+        }
+
+        self._build_ui()
+        self._load_prompts()
+
+    def _build_ui(self):
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # Заголовок
+        title = QLabel(self._t("prompt_settings"))
+        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(title)
+
+        # Табы для разных промптов
+        self.prompt_tabs = QTabWidget()
+        self.prompt_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #000000;
+                background-color: #ffffff;
+            }
+            QTabBar::tab {
+                background-color: #e0e0e0;
+                border: 1px solid #000000;
+                padding: 4px 12px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #ffffff;
+                border-bottom: none;
+            }
+        """)
+
+        # Создаём вкладки для каждого промпта
+        self.prompt_editors = {}
+
+        prompt_names = [
+            ("system", self._t("prompt_system")),
+            ("short", self._t("prompt_short")),
+            ("extraction", self._t("prompt_extraction")),
+            ("aggregation", self._t("prompt_aggregation")),
+        ]
+
+        from PyQt6.QtWidgets import QTextEdit
+
+        for key, name in prompt_names:
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            tab_layout.setContentsMargins(8, 8, 8, 8)
+
+            # Описание
+            desc = QLabel(self._get_prompt_description(key))
+            desc.setWordWrap(True)
+            desc.setStyleSheet("color: #666666; font-size: 11px; margin-bottom: 8px;")
+            tab_layout.addWidget(desc)
+
+            # Редактор
+            editor = QTextEdit()
+            editor.setStyleSheet("""
+                QTextEdit {
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 11px;
+                    border: 1px solid #808080;
+                    background-color: #ffffff;
+                }
+            """)
+            tab_layout.addWidget(editor)
+
+            # Кнопка сброса
+            reset_btn = QPushButton(self._t("reset_to_default"))
+            reset_btn.clicked.connect(lambda checked, k=key: self._reset_prompt(k))
+            tab_layout.addWidget(reset_btn)
+
+            self.prompt_editors[key] = editor
+            self.prompt_tabs.addTab(tab, name)
+
+        layout.addWidget(self.prompt_tabs)
+
+        # Кнопки
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        save_btn = QPushButton(self._t("save"))
+        save_btn.setStyleSheet("font-weight: bold;")
+        save_btn.clicked.connect(self._save_prompts)
+        buttons_layout.addWidget(save_btn)
+
+        cancel_btn = QPushButton(self._t("cancel"))
+        cancel_btn.clicked.connect(self.close)
+        buttons_layout.addWidget(cancel_btn)
+
+        layout.addLayout(buttons_layout)
+
+        self.setCentralWidget(central)
+
+    def _get_prompt_description(self, key: str) -> str:
+        descriptions = {
+            "system": "Системный промпт задаёт роль и правила для модели. Используется во всех запросах.",
+            "short": "Промпт для коротких транскрипций (< 800 токенов). Генерирует саммари за один запрос.",
+            "extraction": "Промпт для извлечения фактов из чанков длинных транскрипций.",
+            "aggregation": "Промпт для объединения извлечённых фактов в финальное саммари.",
+        }
+        return descriptions.get(key, "")
+
+    def _load_prompts(self):
+        """Загрузить промпты из конфига или использовать дефолтные."""
+        saved = self.config.config.get("custom_prompts", {})
+
+        for key, editor in self.prompt_editors.items():
+            text = saved.get(key, self._default_prompts.get(key, ""))
+            editor.setPlainText(text)
+
+    def _reset_prompt(self, key: str):
+        """Сбросить промпт к дефолтному."""
+        if key in self.prompt_editors and key in self._default_prompts:
+            self.prompt_editors[key].setPlainText(self._default_prompts[key])
+
+    def _save_prompts(self):
+        """Сохранить промпты в конфиг."""
+        custom_prompts = {}
+        for key, editor in self.prompt_editors.items():
+            text = editor.toPlainText().strip()
+            # Сохраняем только если отличается от дефолта
+            if text and text != self._default_prompts.get(key, ""):
+                custom_prompts[key] = text
+
+        self.config.update(custom_prompts=custom_prompts)
+        self.close()
+
+
+class DropZoneWidget(QFrame):
+    """Зона drag-and-drop для файлов в стиле Classic Mac OS."""
+    files_dropped = pyqtSignal(list)  # List[Path]
+    clicked = pyqtSignal()
+
+    def __init__(self, translate_func=None, parent=None):
+        super().__init__(parent)
+        self._translate = translate_func or (lambda x: x)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(100)
+        self._build_ui()
+
+    def set_translate_func(self, func):
+        self._translate = func
+        self._update_texts()
+
+    def _create_folder_icon(self) -> QPixmap:
+        """Создать пиксельную иконку папки в стиле Classic Mac OS."""
+        size = 32
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QColor(0, 0, 0, 0))
+
+        painter = QPainter(pixmap)
+        black = QColor(0, 0, 0)
+
+        # Папка - классический стиль
+        # Верхняя вкладка
+        painter.fillRect(4, 6, 10, 4, black)
+        # Основной прямоугольник (рамка)
+        painter.fillRect(2, 10, 28, 2, black)  # верх
+        painter.fillRect(2, 26, 28, 2, black)  # низ
+        painter.fillRect(2, 10, 2, 18, black)  # лево
+        painter.fillRect(28, 10, 2, 18, black)  # право
+        # Внутренняя часть (белая)
+        painter.fillRect(4, 12, 24, 14, QColor(255, 255, 255))
+        # Линии внутри папки
+        painter.fillRect(6, 16, 20, 2, black)
+        painter.fillRect(6, 22, 14, 2, black)
+
+        painter.end()
+        return pixmap
+
+    def _build_ui(self):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 2px solid;
+                border-top-color: #808080;
+                border-left-color: #808080;
+                border-right-color: #ffffff;
+                border-bottom-color: #ffffff;
+            }
+            QFrame:hover {
+                background-color: #f0f0f0;
+            }
+        """)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(4)
+
+        # Пиксельная иконка папки
+        icon_label = QLabel()
+        icon_label.setPixmap(self._create_folder_icon())
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setStyleSheet("border: none; background: transparent;")
+        layout.addWidget(icon_label)
+
+        # Основной текст
+        self._main_label = QLabel(self._translate("drag_drop_files"))
+        self._main_label.setStyleSheet("font-weight: bold; font-size: 12px; border: none; background: transparent;")
+        self._main_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._main_label)
+
+        # Подсказка
+        self._sub_label = QLabel(self._translate("or_click_to_select"))
+        self._sub_label.setStyleSheet("font-size: 11px; color: #808080; border: none; background: transparent;")
+        self._sub_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._sub_label)
+
+        # Форматы
+        self._formats_label = QLabel(self._translate("supported_formats"))
+        self._formats_label.setStyleSheet("font-size: 10px; color: #808080; border: none; background: transparent;")
+        self._formats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._formats_label.setWordWrap(True)
+        layout.addWidget(self._formats_label)
+
+    def _update_texts(self):
+        self._main_label.setText(self._translate("drag_drop_files"))
+        self._sub_label.setText(self._translate("or_click_to_select"))
+        self._formats_label.setText(self._translate("supported_formats"))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            # Проверяем, есть ли поддерживаемые файлы
+            for url in event.mimeData().urls():
+                path = Path(url.toLocalFile())
+                if is_supported_file(path):
+                    event.acceptProposedAction()
+                    self.setStyleSheet("""
+                        QFrame {
+                            background-color: #dddddd;
+                            border: 2px solid #000000;
+                        }
+                    """)
+                    return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 2px solid;
+                border-top-color: #808080;
+                border-left-color: #808080;
+                border-right-color: #ffffff;
+                border-bottom-color: #ffffff;
+            }
+            QFrame:hover {
+                background-color: #f0f0f0;
+            }
+        """)
+
+    def dropEvent(self, event: QDropEvent):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 2px solid;
+                border-top-color: #808080;
+                border-left-color: #808080;
+                border-right-color: #ffffff;
+                border-bottom-color: #ffffff;
+            }
+            QFrame:hover {
+                background-color: #f0f0f0;
+            }
+        """)
+
+        files = []
+        for url in event.mimeData().urls():
+            path = Path(url.toLocalFile())
+            if path.is_file() and is_supported_file(path):
+                files.append(path)
+            elif path.is_dir():
+                # Рекурсивно ищем файлы в папке
+                for ext in ALL_EXTENSIONS:
+                    files.extend(path.rglob(f"*{ext}"))
+
+        if files:
+            self.files_dropped.emit(files)
+            event.acceptProposedAction()
+
+
+class FileQueueItemWidget(QFrame):
+    """Элемент очереди файлов."""
+    remove_clicked = pyqtSignal(object)  # FileTask
+    open_clicked = pyqtSignal(object)  # FileTask
+
+    def __init__(self, task: FileTask, translate_func=None, parent=None):
+        super().__init__(parent)
+        self.task = task
+        self._translate = translate_func or (lambda x: x)
+        self._close_icon = self._create_close_icon()
+        self._open_icon = self._create_open_icon()
+        self._build_ui()
+        self.update_status()
+
+    def _create_close_icon(self) -> QIcon:
+        """Пиксельная ч/б иконка-крестик."""
+        size = 12
+        pm = QPixmap(size, size)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        pen = QPen(QColor(0, 0, 0))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.drawLine(2, 2, size - 3, size - 3)
+        p.drawLine(size - 3, 2, 2, size - 3)
+        p.end()
+        return QIcon(pm)
+
+    def _create_open_icon(self) -> QIcon:
+        """Пиксельная ч/б иконка 'открыть'."""
+        w, h = 12, 12
+        pm = QPixmap(w, h)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        black = QColor(0, 0, 0)
+        # Стрелка вправо в квадратных скобках: [>]
+        p.fillRect(2, 2, 2, 8, black)      # левая скобка
+        p.fillRect(8, 4, 2, 4, black)      # основание стрелки
+        p.fillRect(6, 5, 2, 2, black)      # середина
+        p.fillRect(10, 5, 2, 2, black)     # наконечник
+        p.end()
+        return QIcon(pm)
+
+    def set_translate_func(self, func):
+        self._translate = func
+        self.update_status()
+
+    def _create_file_icon(self, is_video: bool) -> QPixmap:
+        """Создать пиксельную иконку файла."""
+        size = 20
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QColor(0, 0, 0, 0))
+
+        painter = QPainter(pixmap)
+        black = QColor(0, 0, 0)
+
+        # Документ с уголком
+        painter.fillRect(2, 0, 14, 2, black)   # верх
+        painter.fillRect(2, 18, 16, 2, black)  # низ
+        painter.fillRect(2, 0, 2, 20, black)   # лево
+        painter.fillRect(16, 4, 2, 16, black)  # право
+        # Уголок
+        painter.fillRect(14, 0, 2, 2, black)
+        painter.fillRect(16, 2, 2, 2, black)
+        painter.fillRect(14, 2, 2, 2, black)
+
+        # Внутренние линии (контент)
+        if is_video:
+            # Треугольник play
+            painter.fillRect(7, 6, 2, 8, black)
+            painter.fillRect(9, 7, 2, 6, black)
+            painter.fillRect(11, 8, 2, 4, black)
+        else:
+            # Ноты
+            painter.fillRect(6, 6, 2, 8, black)
+            painter.fillRect(12, 8, 2, 6, black)
+            painter.fillRect(4, 12, 4, 2, black)
+            painter.fillRect(10, 12, 4, 2, black)
+
+        painter.end()
+        return pixmap
+
+    def _build_ui(self):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 1px solid #000000;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+
+        # Иконка типа файла (пиксельная)
+        icon_label = QLabel()
+        icon_label.setPixmap(self._create_file_icon(self.task.is_video))
+        icon_label.setFixedWidth(24)
+        icon_label.setStyleSheet("border: none;")
+        layout.addWidget(icon_label)
+
+        # Информация о файле
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+
+        # Имя файла
+        self._name_label = QLabel(self.task.file_name)
+        self._name_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        info_layout.addWidget(self._name_label)
+
+        # Статус
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet("font-size: 11px; color: #808080;")
+        info_layout.addWidget(self._status_label)
+
+        layout.addLayout(info_layout, stretch=1)
+
+        # Прогресс-бар
+        self._progress = QProgressBar()
+        self._progress.setFixedWidth(80)
+        self._progress.setFixedHeight(16)
+        self._progress.setRange(0, 100)
+        self._progress.setTextVisible(False)
+        layout.addWidget(self._progress)
+
+        # Кнопка открыть/удалить
+        self._action_btn = QPushButton("×")
+        self._action_btn.setFixedSize(24, 24)
+        self._action_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 16px;
+                font-weight: bold;
+                border: 1px solid #000000;
+                background: #ffffff;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: #000000;
+                color: #ffffff;
+            }
+        """)
+        self._action_btn.setText("")
+        self._action_btn.setIconSize(QSize(12, 12))
+        self._action_btn.clicked.connect(self._on_action_clicked)
+        layout.addWidget(self._action_btn)
+
+    def _on_action_clicked(self):
+        if self.task.status == FileStatus.COMPLETED:
+            self.open_clicked.emit(self.task)
+        elif self.task.status in (FileStatus.PENDING, FileStatus.ERROR, FileStatus.CANCELLED):
+            self.remove_clicked.emit(self.task)
+
+    def update_status(self):
+        """Обновить отображение статуса."""
+        status_map = {
+            FileStatus.PENDING: ("status_pending", "#808080"),
+            FileStatus.EXTRACTING: ("status_extracting", "#0066cc"),
+            FileStatus.TRANSCRIBING: ("status_transcribing", "#0066cc"),
+            FileStatus.SUMMARIZING: ("status_summarizing", "#9900cc"),
+            FileStatus.GENERATING: ("status_generating", "#0066cc"),
+            FileStatus.COMPLETED: ("status_completed", "#008800"),
+            FileStatus.ERROR: ("status_error", "#cc0000"),
+            FileStatus.CANCELLED: ("status_cancelled", "#808080"),
+        }
+
+        key, color = status_map.get(self.task.status, ("status_pending", "#808080"))
+        status_text = self._translate(key)
+
+        if self.task.status == FileStatus.ERROR and self.task.error_message:
+            status_text += f": {self.task.error_message[:50]}"
+
+        self._status_label.setText(status_text)
+        self._status_label.setStyleSheet(f"font-size: 11px; color: {color};")
+
+        # Прогресс
+        self._progress.setValue(self.task.progress)
+
+        # Кнопка
+        if self.task.status == FileStatus.COMPLETED:
+            self._action_btn.setIcon(self._open_icon)
+            self._action_btn.setToolTip(self._translate("open_folder"))
+        else:
+            self._action_btn.setIcon(self._close_icon)
+            self._action_btn.setToolTip(self._translate("remove_from_queue"))
+
+        # Прогресс-бар visibility
+        self._progress.setVisible(self.task.status in (
+            FileStatus.EXTRACTING,
+            FileStatus.TRANSCRIBING,
+            FileStatus.SUMMARIZING,
+            FileStatus.GENERATING,
+            FileStatus.PENDING,
+        ))
+
+
+class FileTranscriptionWorker(QThread):
+    """Воркер для транскрибции файлов."""
+    task_progress = pyqtSignal(object)  # FileTask
+    task_completed = pyqtSignal(object)  # FileTask
+    all_completed = pyqtSignal()
+
+    def __init__(
+        self,
+        queue: FileTranscriptionQueue,
+        output_dir: Path,
+        output_format: str,
+        ui_language: str,
+    ):
+        super().__init__()
+        self.queue = queue
+        self.output_dir = output_dir
+        self.output_format = output_format
+        self.ui_language = ui_language
+        self._report_generator = ReportGenerator(ui_language)
+
+    def run(self):
+        # Устанавливаем callbacks
+        def on_progress(task: FileTask):
+            self.task_progress.emit(task)
+
+        def on_completed(task: FileTask):
+            # Генерируем отчёт если успешно
+            if task.status == FileStatus.COMPLETED and task.result:
+                try:
+                    task.status = FileStatus.GENERATING
+                    task.progress = 95
+                    self.task_progress.emit(task)
+
+                    self._report_generator.generate(
+                        task.result,
+                        self.output_dir,
+                        self.output_format,
+                    )
+
+                    task.status = FileStatus.COMPLETED
+                    task.progress = 100
+                except Exception as e:
+                    task.status = FileStatus.ERROR
+                    task.error_message = str(e)
+
+            self.task_completed.emit(task)
+
+        self.queue._on_progress = on_progress
+        self.queue._on_completed = on_completed
+
+        # Запускаем очередь
+        self.queue.start()
+
+        # Ждём завершения
+        while self.queue.is_running:
+            self.msleep(100)
+
+        self.all_completed.emit()
+
+
 class MainWindow(QMainWindow):
     hotkey_press_signal = pyqtSignal()
     hotkey_release_signal = pyqtSignal()
     hotkey_recorded_signal = pyqtSignal(str)
     waveform_signal = pyqtSignal(list)
     mic_level_signal = pyqtSignal(float)
+    thinking_signal = pyqtSignal(str)  # Для AI thinking output
 
     def __init__(self) -> None:
         super().__init__()
@@ -1059,6 +1634,14 @@ class MainWindow(QMainWindow):
         # Системный трей
         self.tray_icon: Optional[QSystemTrayIcon] = None
         self._setup_tray()
+
+        # Инициализация переменных для вкладки файлов
+        self._file_tasks: List[FileTask] = []
+        # key = resolved Path to input file
+        self._file_widgets: dict[Path, "FileQueueItemWidget"] = {}
+        self._file_queue: Optional[FileTranscriptionQueue] = None
+        self._file_worker: Optional[FileTranscriptionWorker] = None
+        self._output_dir = Path.home() / "Documents" / "MindType Transcriptions"
 
         self._build_ui()
         self._connect_signals()
@@ -1299,6 +1882,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_basic_tab(), self._t("basic"))
         self.tabs.addTab(self._build_additional_tab(), self._t("additional"))
+        self.tabs.addTab(self._build_files_tab(), self._t("files_tab"))
         self.tabs.addTab(self._build_history_tab(), self._t("history"))
         main_layout.addWidget(self.tabs)
 
@@ -1607,6 +2191,202 @@ class MainWindow(QMainWindow):
 
         return tab
 
+    def _build_files_tab(self) -> QWidget:
+        """Построить вкладку транскрибции файлов."""
+        tab = QWidget()
+        tab.setStyleSheet("background-color: #ffffff;")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(12)
+
+        # === Зона Drag & Drop ===
+        self.drop_zone = DropZoneWidget(translate_func=self._t)
+        self.drop_zone.files_dropped.connect(self._on_files_dropped)
+        self.drop_zone.clicked.connect(self._on_select_files_clicked)
+        layout.addWidget(self.drop_zone)
+
+        # === Настройки вывода ===
+        settings_layout = QGridLayout()
+        settings_layout.setSpacing(8)
+
+        # Формат вывода
+        self.output_format_label = QLabel(self._t("output_format"))
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem(self._t("format_html"), "html")
+        self.output_format_combo.addItem(self._t("format_pdf"), "pdf")
+        self.output_format_combo.addItem(self._t("format_both"), "both")
+        settings_layout.addWidget(self.output_format_label, 0, 0)
+        settings_layout.addWidget(self.output_format_combo, 0, 1)
+
+        # Папка сохранения
+        self.output_folder_label = QLabel(self._t("output_folder"))
+        output_folder_row = QHBoxLayout()
+        self.output_folder_edit = QLineEdit()
+        self.output_folder_edit.setReadOnly(True)
+        # По умолчанию - папка "Документы"
+        default_output = Path.home() / "Documents" / "MindType Transcriptions"
+        self.output_folder_edit.setText(str(default_output))
+        self._output_dir = default_output
+
+        self.browse_folder_btn = QPushButton(self._t("browse"))
+        self.browse_folder_btn.clicked.connect(self._on_browse_output_folder)
+        output_folder_row.addWidget(self.output_folder_edit)
+        output_folder_row.addWidget(self.browse_folder_btn)
+        settings_layout.addWidget(self.output_folder_label, 1, 0)
+        settings_layout.addLayout(output_folder_row, 1, 1)
+
+        # Включить суммаризацию
+        self.enable_summary_checkbox = QCheckBox(self._t("enable_summary"))
+        self.enable_summary_checkbox.setChecked(True)
+        self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
+        settings_layout.addWidget(self.enable_summary_checkbox, 2, 0)
+
+        # Включить thinking mode
+        self.enable_thinking_checkbox = QCheckBox(self._t("enable_thinking"))
+        self.enable_thinking_checkbox.setChecked(True)
+        self.enable_thinking_checkbox.setToolTip(self._t("enable_thinking_tooltip"))
+        settings_layout.addWidget(self.enable_thinking_checkbox, 2, 1)
+
+        # Кнопка настройки промптов
+        self.customize_prompts_btn = QPushButton(self._t("customize_prompts"))
+        self.customize_prompts_btn.clicked.connect(self._on_customize_prompts)
+        settings_layout.addWidget(self.customize_prompts_btn, 3, 0, 1, 2)
+
+        layout.addLayout(settings_layout)
+
+        # === Очередь файлов ===
+        queue_header = QHBoxLayout()
+        self.queue_title_label = QLabel(self._t("processing_queue"))
+        self.queue_title_label.setStyleSheet("font-weight: bold;")
+        queue_header.addWidget(self.queue_title_label)
+        queue_header.addStretch()
+
+        self.clear_queue_btn = QPushButton(self._t("clear_queue"))
+        self.clear_queue_btn.clicked.connect(self._on_clear_queue)
+        queue_header.addWidget(self.clear_queue_btn)
+
+        layout.addLayout(queue_header)
+
+        # Список файлов
+        self._file_queue_scroll = QScrollArea()
+        self._file_queue_scroll.setWidgetResizable(True)
+        self._file_queue_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._file_queue_scroll.setStyleSheet("QScrollArea { border: 1px solid #000000; }")
+
+        self._file_queue_content = QWidget()
+        self._file_queue_content.setStyleSheet("background-color: #ffffff;")
+        self._file_queue_layout = QVBoxLayout(self._file_queue_content)
+        self._file_queue_layout.setContentsMargins(4, 4, 4, 4)
+        self._file_queue_layout.setSpacing(4)
+
+        # Placeholder
+        self._no_files_label = QLabel(self._t("no_files_in_queue"))
+        self._no_files_label.setStyleSheet("color: #808080; padding: 20px;")
+        self._no_files_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._file_queue_layout.addWidget(self._no_files_label)
+        self._file_queue_layout.addStretch()
+
+        self._file_queue_scroll.setWidget(self._file_queue_content)
+        layout.addWidget(self._file_queue_scroll, stretch=1)
+
+        # === Блок AI Thinking (Classic Mac OS style) ===
+        self._thinking_frame = QFrame()
+        self._thinking_frame.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 2px solid #000000;
+            }
+        """)
+        self._thinking_frame.setVisible(False)  # Скрыт по умолчанию
+        thinking_layout = QVBoxLayout(self._thinking_frame)
+        thinking_layout.setContentsMargins(0, 0, 0, 0)
+        thinking_layout.setSpacing(0)
+
+        # Заголовок окна (Classic Mac style)
+        thinking_header_frame = QFrame()
+        thinking_header_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
+                border: none;
+                padding: 2px 4px;
+            }
+        """)
+        thinking_header_frame.setFixedHeight(22)
+        thinking_header = QHBoxLayout(thinking_header_frame)
+        thinking_header.setContentsMargins(8, 2, 4, 2)
+
+        self._thinking_title = QLabel("AI Thinking")
+        self._thinking_title.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        thinking_header.addWidget(self._thinking_title)
+        thinking_header.addStretch()
+
+        # Кнопка закрытия (Classic Mac style)
+        close_thinking_btn = QPushButton()
+        close_thinking_btn.setFixedSize(12, 12)
+        close_thinking_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffffff;
+                border: 1px solid #000000;
+            }
+            QPushButton:hover {
+                background-color: #c0c0c0;
+            }
+        """)
+        close_thinking_btn.clicked.connect(lambda: self._thinking_frame.setVisible(False))
+        thinking_header.addWidget(close_thinking_btn)
+        thinking_layout.addWidget(thinking_header_frame)
+
+        # Текстовое поле для вывода (Classic Mac style)
+        from PyQt6.QtWidgets import QTextEdit
+        self._thinking_output = QTextEdit()
+        self._thinking_output.setReadOnly(True)
+        self._thinking_output.setMinimumHeight(100)
+        self._thinking_output.setMaximumHeight(150)
+        self._thinking_output.setStyleSheet("""
+            QTextEdit {
+                background-color: #ffffff;
+                color: #000000;
+                border: none;
+                border-top: 1px solid #808080;
+                font-family: "Geneva", "VT323", "Courier New", monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        thinking_layout.addWidget(self._thinking_output)
+
+        # Буфер для накопления текста
+        self._thinking_buffer = ""
+
+        layout.addWidget(self._thinking_frame)
+
+        # === Кнопки управления ===
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        self.start_processing_btn = QPushButton(self._t("start_processing"))
+        self.start_processing_btn.setStyleSheet("font-weight: bold;")
+        self.start_processing_btn.clicked.connect(self._on_start_processing)
+        self.start_processing_btn.setEnabled(False)
+        buttons_layout.addWidget(self.start_processing_btn)
+
+        self.stop_processing_btn = QPushButton(self._t("stop_processing"))
+        self.stop_processing_btn.clicked.connect(self._on_stop_processing)
+        self.stop_processing_btn.setEnabled(False)
+        self.stop_processing_btn.setVisible(False)
+        buttons_layout.addWidget(self.stop_processing_btn)
+
+        layout.addLayout(buttons_layout)
+
+        return tab
+
     def _on_ui_language_changed(self, idx: int) -> None:
         """Сменить язык интерфейса."""
         code = self.ui_lang_box.currentData()
@@ -1679,6 +2459,9 @@ class MainWindow(QMainWindow):
 
         # Сигналы уровня микрофона
         self.mic_level_signal.connect(self._update_mic_level)
+
+        # Сигнал AI thinking
+        self.thinking_signal.connect(self._update_thinking_output)
 
         # Отмена транскрипции через overlay
         self.overlay.cancelled.connect(self._cancel_transcription)
@@ -1759,6 +2542,37 @@ class MainWindow(QMainWindow):
         # Мониторинг микрофона убран из нового UI
         pass
 
+    def _update_thinking_output(self, text: str) -> None:
+        """Обновить блок AI thinking (Qt thread)."""
+        if not hasattr(self, '_thinking_frame'):
+            return
+
+        # Показываем блок если скрыт
+        if not self._thinking_frame.isVisible():
+            self._thinking_frame.setVisible(True)
+            self._thinking_output.clear()
+            self._thinking_buffer = ""
+
+        # Накапливаем текст в буфер
+        self._thinking_buffer += text
+
+        # Выводим только полные строки (или специальные маркеры)
+        if "\n" in self._thinking_buffer or text.startswith("["):
+            # Разбиваем на строки
+            lines = self._thinking_buffer.split("\n")
+
+            # Выводим все полные строки кроме последней (она может быть неполной)
+            for line in lines[:-1]:
+                if line.strip():
+                    self._thinking_output.append(line)
+
+            # Оставляем последнюю неполную строку в буфере
+            self._thinking_buffer = lines[-1]
+
+        # Прокручиваем вниз
+        scrollbar = self._thinking_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
     def _on_ui_lang_change(self, index: int) -> None:
         """Обработчик изменения языка интерфейса."""
         lang = self.ui_lang_box.itemData(index)
@@ -1821,7 +2635,8 @@ class MainWindow(QMainWindow):
         # Вкладки
         self.tabs.setTabText(0, self._t("basic"))
         self.tabs.setTabText(1, self._t("additional"))
-        self.tabs.setTabText(2, self._t("history"))
+        self.tabs.setTabText(2, self._t("files_tab"))
+        self.tabs.setTabText(3, self._t("history"))
 
         # Основная вкладка
         self.audio_input_label.setText(self._t("audio_input"))
@@ -1865,6 +2680,31 @@ class MainWindow(QMainWindow):
         idx = self.overlay_position_box.findData(current_pos)
         if idx >= 0:
             self.overlay_position_box.setCurrentIndex(idx)
+
+        # Вкладка файлов
+        self.drop_zone.set_translate_func(self._t)
+        self.output_format_label.setText(self._t("output_format"))
+        self.output_folder_label.setText(self._t("output_folder"))
+        self.browse_folder_btn.setText(self._t("browse"))
+        self.queue_title_label.setText(self._t("processing_queue"))
+        self.clear_queue_btn.setText(self._t("clear_queue"))
+        self.start_processing_btn.setText(self._t("start_processing"))
+        self.stop_processing_btn.setText(self._t("stop_processing"))
+        self._no_files_label.setText(self._t("no_files_in_queue"))
+
+        # Обновляем формат комбобокса
+        current_format = self.output_format_combo.currentData()
+        self.output_format_combo.clear()
+        self.output_format_combo.addItem(self._t("format_html"), "html")
+        self.output_format_combo.addItem(self._t("format_pdf"), "pdf")
+        self.output_format_combo.addItem(self._t("format_both"), "both")
+        idx = self.output_format_combo.findData(current_format)
+        if idx >= 0:
+            self.output_format_combo.setCurrentIndex(idx)
+
+        # Обновляем виджеты файлов
+        for widget in self._file_widgets.values():
+            widget.set_translate_func(self._t)
 
         # История транскрипций
         self.transcription_history.set_translate_func(self._t)
@@ -2423,8 +3263,262 @@ class MainWindow(QMainWindow):
             self.check_update_btn.clicked.connect(self._check_for_updates)
             self._add_journal_entry("error", "update_error", text=error, is_translatable=True)
 
+    # === Обработчики вкладки "Файлы" ===
+
+    def _task_key(self, path: Path) -> Path:
+        """Нормализованный ключ для задач/виджетов (абсолютный путь)."""
+        try:
+            return path.resolve()
+        except Exception:
+            return path.absolute()
+
+    def _on_files_dropped(self, files: list) -> None:
+        """Обработчик drop файлов."""
+        existing = {self._task_key(t.file_path) for t in self._file_tasks}
+        for file_path in files:
+            key = self._task_key(file_path)
+            if key not in existing:
+                task = FileTask(file_path=file_path)
+                self._file_tasks.append(task)
+                self._add_file_widget(task)
+                existing.add(key)
+
+        self._update_file_queue_ui()
+
+    def _on_select_files_clicked(self) -> None:
+        """Открыть диалог выбора файлов."""
+        extensions = " ".join(f"*{ext}" for ext in ALL_EXTENSIONS)
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            self._t("select_files"),
+            str(Path.home()),
+            f"Media Files ({extensions})"
+        )
+
+        if files:
+            self._on_files_dropped([Path(f) for f in files])
+
+    def _on_browse_output_folder(self) -> None:
+        """Открыть диалог выбора папки вывода."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            self._t("output_folder"),
+            str(self._output_dir)
+        )
+
+        if folder:
+            self._output_dir = Path(folder)
+            self.output_folder_edit.setText(folder)
+
+    def _on_customize_prompts(self) -> None:
+        """Открыть диалог настройки промптов."""
+        dialog = PromptCustomizationDialog(self.config, translate_func=self._t, parent=self)
+        dialog.show()
+
+    def _on_clear_queue(self) -> None:
+        """Очистить очередь файлов."""
+        # Удаляем только pending, error, cancelled
+        self._file_tasks = [
+            t for t in self._file_tasks
+            if t.status not in (FileStatus.PENDING, FileStatus.ERROR, FileStatus.CANCELLED)
+        ]
+        self._rebuild_file_queue_ui()
+
+    def _on_start_processing(self) -> None:
+        """Начать обработку файлов."""
+        if not self._file_tasks:
+            return
+
+        pending_tasks = [t for t in self._file_tasks if t.status == FileStatus.PENDING]
+        if not pending_tasks:
+            return
+
+        # Создаём директорию вывода
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Запоминаем параметры запуска, чтобы понимать, что авто-открывать
+        self._file_processing_batch_size = len(pending_tasks)
+        self._file_output_format = self.output_format_combo.currentData()
+        self._last_completed_task: Optional[FileTask] = None
+
+        # Создаём очередь
+        cfg = self.config.config
+        enable_thinking = self.enable_thinking_checkbox.isChecked()
+        # Получаем кастомные промпты из конфига
+        custom_prompts = self.config.config.get("custom_prompts", None)
+
+        self._file_queue = FileTranscriptionQueue(
+            transcriber=self.transcriber,
+            model_size=cfg.get("model_size", "large-v3"),
+            compute_type=cfg.get("compute_type", "int8"),
+            device=cfg.get("device", "auto"),
+            language=cfg.get("language", "ru"),
+            beam_size=int(cfg.get("beam_size", 5)),
+            vad_filter=bool(cfg.get("vad_filter", True)),
+            models_dir=self.models_dir,
+            enable_summary=self.enable_summary_checkbox.isChecked(),
+            on_thinking=lambda text: self.thinking_signal.emit(text) if enable_thinking else None,
+            enable_thinking=enable_thinking,
+            custom_prompts=custom_prompts,
+        )
+
+        # Добавляем файлы
+        for task in pending_tasks:
+            self._file_queue._tasks.append(task)
+            self._file_queue._queue.put(task)
+
+        # Создаём и запускаем воркер
+        self._file_worker = FileTranscriptionWorker(
+            queue=self._file_queue,
+            output_dir=self._output_dir,
+            output_format=self.output_format_combo.currentData(),
+            ui_language=self._ui_lang,
+        )
+        self._file_worker.task_progress.connect(self._on_file_task_progress)
+        self._file_worker.task_completed.connect(self._on_file_task_completed)
+        self._file_worker.all_completed.connect(self._on_all_files_completed)
+        self._file_worker.start()
+
+        # Обновляем UI
+        self.start_processing_btn.setEnabled(False)
+        self.start_processing_btn.setVisible(False)
+        self.stop_processing_btn.setEnabled(True)
+        self.stop_processing_btn.setVisible(True)
+        self.drop_zone.setEnabled(False)
+
+    def _on_stop_processing(self) -> None:
+        """Остановить обработку."""
+        if self._file_queue:
+            self._file_queue.cancel()
+
+        self.stop_processing_btn.setEnabled(False)
+
+    def _on_file_task_progress(self, task: FileTask) -> None:
+        """Обновление прогресса задачи."""
+        key = self._task_key(task.file_path)
+        widget = self._file_widgets.get(key)
+        if widget:
+            widget.update_status()
+
+    def _on_file_task_completed(self, task: FileTask) -> None:
+        """Задача завершена."""
+        key = self._task_key(task.file_path)
+        widget = self._file_widgets.get(key)
+        if widget:
+            widget.update_status()
+
+        if task.status == FileStatus.COMPLETED:
+            self._last_completed_task = task
+            # Если обрабатываем один файл — открываем отчёт автоматически
+            if getattr(self, "_file_processing_batch_size", 0) == 1:
+                self._auto_open_transcription(task)
+
+    def _on_all_files_completed(self) -> None:
+        """Все файлы обработаны."""
+        self.start_processing_btn.setEnabled(True)
+        self.start_processing_btn.setVisible(True)
+        self.stop_processing_btn.setEnabled(False)
+        self.stop_processing_btn.setVisible(False)
+        self.drop_zone.setEnabled(True)
+
+        # Показываем уведомление
+        completed = sum(1 for t in self._file_tasks if t.status == FileStatus.COMPLETED)
+        total = len(self._file_tasks)
+
+        if completed > 0:
+            QMessageBox.information(
+                self,
+                self._t("processing_complete"),
+                f"{self._t('files_processed')}: {completed}/{total}\n\n{self._output_dir}"
+            )
+
+            # Если файлов было несколько — открываем папку результатов
+            if getattr(self, "_file_processing_batch_size", 0) > 1:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._output_dir)))
+            # Если файл был один и отчёт не открылся по какой-то причине — откроем хотя бы папку
+            elif getattr(self, "_file_processing_batch_size", 0) == 1 and not self._last_completed_task:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._output_dir)))
+
+    def _auto_open_transcription(self, task: FileTask) -> None:
+        """Авто-открытие сгенерированного отчёта (HTML/PDF) для одного файла."""
+        try:
+            base_name = task.file_path.stem + "_transcription"
+            html_path = self._output_dir / f"{base_name}.html"
+            pdf_path = self._output_dir / f"{base_name}.pdf"
+
+            fmt = getattr(self, "_file_output_format", "html")
+
+            # При "both" открываем HTML (быстрее предпросмотр); при "pdf" — PDF если есть, иначе HTML.
+            if fmt == "pdf":
+                target = pdf_path if pdf_path.exists() else html_path
+            elif fmt == "both":
+                target = html_path if html_path.exists() else (pdf_path if pdf_path.exists() else html_path)
+            else:
+                target = html_path if html_path.exists() else pdf_path
+
+            if target and target.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._output_dir)))
+        except Exception:
+            # Не блокируем UI, если открыть не удалось
+            pass
+
+    def _add_file_widget(self, task: FileTask) -> None:
+        """Добавить виджет файла в список."""
+        widget = FileQueueItemWidget(task, translate_func=self._t)
+        widget.remove_clicked.connect(self._on_remove_file_task)
+        widget.open_clicked.connect(self._on_open_file_result)
+
+        self._file_widgets[self._task_key(task.file_path)] = widget
+
+        # Вставляем перед stretch
+        idx = self._file_queue_layout.count() - 1
+        self._file_queue_layout.insertWidget(idx, widget)
+
+    def _on_remove_file_task(self, task: FileTask) -> None:
+        """Удалить задачу из очереди."""
+        key = self._task_key(task.file_path)
+        widget = self._file_widgets.pop(key, None)
+        if widget:
+            widget.deleteLater()
+
+        if task in self._file_tasks:
+            self._file_tasks.remove(task)
+
+        self._update_file_queue_ui()
+
+    def _on_open_file_result(self, task: FileTask) -> None:
+        """Открыть папку с результатом."""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._output_dir)))
+
+    def _update_file_queue_ui(self) -> None:
+        """Обновить UI очереди."""
+        has_files = len(self._file_tasks) > 0
+        has_pending = any(t.status == FileStatus.PENDING for t in self._file_tasks)
+
+        self._no_files_label.setVisible(not has_files)
+        self.start_processing_btn.setEnabled(has_pending)
+
+    def _rebuild_file_queue_ui(self) -> None:
+        """Полностью перестроить UI очереди."""
+        # Удаляем все виджеты
+        for widget in self._file_widgets.values():
+            widget.deleteLater()
+        self._file_widgets.clear()
+
+        # Добавляем заново
+        for task in self._file_tasks:
+            self._add_file_widget(task)
+
+        self._update_file_queue_ui()
+
     def closeEvent(self, event) -> None:
         """Закрытие приложения или сворачивание в трей."""
+        # Останавливаем обработку файлов если запущена
+        if self._file_queue and self._file_queue.is_running:
+            self._file_queue.cancel()
+
         # Если трей доступен и не нажат Exit - сворачиваем в трей
         if self.tray_icon and not self._really_quit:
             event.ignore()

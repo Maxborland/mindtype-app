@@ -17,6 +17,7 @@ sys.modules['huggingface_hub'] = MagicMock()
 from app.transcriber import (
     Transcriber,
     _pick_device,
+    _cuda_is_usable,
     _get_repo_id,
     _MODEL_REPO_MAP,
 )
@@ -37,30 +38,23 @@ class TestPickDevice:
 
     def test_pick_device_auto_with_cuda(self):
         """Тест автовыбора CUDA если доступна."""
-        with patch('app.transcriber.ctranslate2') as mock_ct2:
-            mock_ct2.get_device_count.return_value = 1
-
+        with patch('app.transcriber._cuda_is_usable', return_value=True):
             result = _pick_device("auto")
-
             assert result == "cuda"
 
     def test_pick_device_auto_without_cuda(self):
         """Тест автовыбора CPU если CUDA недоступна."""
-        with patch('app.transcriber.ctranslate2') as mock_ct2:
-            mock_ct2.get_device_count.return_value = 0
-
+        with patch('app.transcriber._cuda_is_usable', return_value=False):
             result = _pick_device("auto")
-
             assert result == "cpu"
 
     def test_pick_device_auto_with_exception(self):
         """Тест автовыбора CPU при ошибке проверки CUDA."""
         with patch('app.transcriber.ctranslate2') as mock_ct2:
             mock_ct2.get_device_count.side_effect = Exception("CUDA error")
-
-            result = _pick_device("auto")
-
-            assert result == "cpu"
+            result = _cuda_is_usable()
+            assert result is False
+            assert _pick_device("auto") == "cpu"
 
 
 class TestGetRepoId:

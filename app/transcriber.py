@@ -5,6 +5,7 @@ import ctranslate2
 from faster_whisper import WhisperModel
 from huggingface_hub import HfApi
 import sys
+import ctypes
 
 # Маппинг имён моделей на repo_id huggingface
 _MODEL_REPO_MAP = {
@@ -27,14 +28,51 @@ _MODEL_REPO_MAP = {
 }
 
 
+def _cuda_is_usable() -> bool:
+    """
+    Проверить, что CUDA реально пригодна к использованию.
+
+    На Windows частая ситуация: CUDA-устройство есть, но не хватает cuDNN DLL
+    (например, cudnn_ops64_9.dll). Тогда auto-режим должен падать обратно на CPU,
+    чтобы приложение не падало при попытке загрузить модель на GPU.
+    """
+    def _cuda_device_count() -> int:
+        # ctranslate2 API differs by version
+        if hasattr(ctranslate2, "get_device_count"):
+            return int(ctranslate2.get_device_count("cuda"))  # type: ignore[attr-defined]
+        if hasattr(ctranslate2, "get_cuda_device_count"):
+            return int(ctranslate2.get_cuda_device_count())  # type: ignore[attr-defined]
+        return 0
+
+    try:
+        if _cuda_device_count() <= 0:
+            return False
+    except Exception:
+        return False
+
+    if sys.platform != "win32":
+        return True
+
+    candidates = [
+        "cudnn_ops64_9.dll",
+        "cudnn64_9.dll",
+        "cudnn_ops_infer64_8.dll",
+        "cudnn64_8.dll",
+    ]
+    for dll in candidates:
+        try:
+            ctypes.WinDLL(dll)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _pick_device(preferred: str) -> str:
     if preferred != "auto":
         return preferred
-    try:
-        if ctranslate2.get_device_count("cuda") > 0:
-            return "cuda"
-    except Exception:
-        pass
+    if _cuda_is_usable():
+        return "cuda"
     return "cpu"
 
 
@@ -134,15 +172,41 @@ class Transcriber:
                 if progress_callback:
                     progress_callback(f"Используем локальную модель: {local_model_path}", 50, 100)
 
-        self.model = WhisperModel(
-            model_source,
-            device=dev,
-            compute_type=compute_type,
-            cpu_threads=cpu_threads,
-            num_workers=num_workers,
-            download_root=str(target_dir) if target_dir else None,
-            local_files_only=False,
-        )
+        try:
+            self.model = WhisperModel(
+                model_source,
+                device=dev,
+                compute_type=compute_type,
+                cpu_threads=cpu_threads,
+                num_workers=num_workers,
+                download_root=str(target_dir) if target_dir else None,
+                local_files_only=False,
+            )
+        except Exception as e:
+            msg = str(e)
+            cudnn_like = ("cudnn" in msg.lower()) or ("cannot load symbol" in msg.lower())
+
+            # Если auto выбрал CUDA, но на системе нет cuDNN DLL — откатываемся на CPU.
+            if device == "auto" and dev == "cuda" and cudnn_like:
+                if progress_callback:
+                    progress_callback("CUDA недоступна (cuDNN не найдена). Переходим на CPU...", 10, 100)
+                dev = "cpu"
+                self.model = WhisperModel(
+                    model_source,
+                    device=dev,
+                    compute_type=compute_type,
+                    cpu_threads=cpu_threads,
+                    num_workers=num_workers,
+                    download_root=str(target_dir) if target_dir else None,
+                    local_files_only=False,
+                )
+            else:
+                if dev == "cuda" and cudnn_like:
+                    raise RuntimeError(
+                        "Не удалось запустить CUDA: не найдены библиотеки cuDNN "
+                        "(например, cudnn_ops64_9.dll). Выберите CPU или установите CUDA/cuDNN."
+                    ) from e
+                raise
         self.model_size = model_size
         self.compute_type = compute_type
         self.device = dev
@@ -275,5 +339,57 @@ class Transcriber:
                 continue
             full_text = (full_text + " " + part).strip()
             yield full_text, detected_lang, prob
+
+    def transcribe_with_timestamps(
+        self,
+        audio_path: Path,
+        language: str,
+        beam_size: int,
+        vad_filter: bool,
+        word_timestamps: bool = False,
+    ) -> Tuple[list, Optional[str], float]:
+        """
+        Транскрибция с получением сегментов и их таймкодов.
+
+        Returns:
+            Tuple[list, Optional[str], float]: (segments, detected_language, probability)
+            segments - список словарей с полями:
+                - start: float (время начала в секундах)
+                - end: float (время конца в секундах)
+                - text: str (текст сегмента)
+                - words: list (если word_timestamps=True)
+        """
+        if not self.model:
+            raise RuntimeError("Модель не загружена")
+
+        lang = None if language == "auto" else language
+        segments_iter, info = self.model.transcribe(
+            str(audio_path),
+            beam_size=beam_size,
+            language=lang,
+            task="transcribe",
+            vad_filter=vad_filter,
+            word_timestamps=word_timestamps,
+        )
+
+        detected_lang = info.language if info else None
+        prob = info.language_probability if info else 0.0
+
+        segments_list = []
+        for seg in segments_iter:
+            segment_data = {
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text.strip(),
+            }
+            if word_timestamps and hasattr(seg, 'words') and seg.words:
+                segment_data["words"] = [
+                    {"word": w.word, "start": w.start, "end": w.end}
+                    for w in seg.words
+                ]
+            if segment_data["text"]:  # Пропускаем пустые сегменты
+                segments_list.append(segment_data)
+
+        return segments_list, detected_lang, prob
 
 

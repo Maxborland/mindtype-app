@@ -18,13 +18,15 @@ pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'
 
 # Для сборки (выберите один из вариантов)
 # PyInstaller - простая сборка
-pyinstaller>=6.0.0
 
 # Nuitka - компиляция в нативный код (защита от декомпиляции)
 # Рекомендуется для production сборок
-nuitka>=2.0
+nuitka>=2.8.0
 ordered-set>=4.1.0
 zstandard>=0.22.0
 
 # Опционально: для загрузки конфигурации из .env файла
 python-dotenv>=1.0.0
+
+# LLM для локальной суммаризации (Qwen3)
+llama-cpp-python>=0.3.0

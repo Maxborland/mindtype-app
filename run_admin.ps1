@@ -3,12 +3,13 @@ $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptPath
 
 # Активируем venv и добавляем CUDA пути
-$venvActivate = Join-Path $scriptPath ".venv\Scripts\Activate.ps1"
-$cudnnPath = Join-Path $scriptPath ".venv\Lib\site-packages\nvidia\cudnn\bin"
-$cublasPath = Join-Path $scriptPath ".venv\Lib\site-packages\nvidia\cublas\bin"
+$venvActivate = Join-Path $scriptPath "venv\Scripts\Activate.ps1"
+$cudnnPath = Join-Path $scriptPath "venv\Lib\site-packages\nvidia\cudnn\bin"
+$cublasPath = Join-Path $scriptPath "venv\Lib\site-packages\nvidia\cublas\bin"
+$cudaRuntimePath = Join-Path $scriptPath "venv\Lib\site-packages\nvidia\cuda_runtime\bin"
 
 # Добавляем CUDA пути в PATH
-$env:PATH = "$cudnnPath;$cublasPath;$env:PATH"
+$env:PATH = "$cudnnPath;$cublasPath;$cudaRuntimePath;$env:PATH"
 
 # Активируем виртуальное окружение
 & $venvActivate
