@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -31,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSlider,
     QSystemTrayIcon,
@@ -1107,6 +1109,12 @@ class PromptCustomizationDialog(QMainWindow):
 
         # Кнопки
         buttons_layout = QHBoxLayout()
+
+        # Кнопка сброса всех промптов
+        reset_all_btn = QPushButton(self._t("reset_all_prompts"))
+        reset_all_btn.clicked.connect(self._reset_all_prompts)
+        buttons_layout.addWidget(reset_all_btn)
+
         buttons_layout.addStretch()
 
         save_btn = QPushButton(self._t("save"))
@@ -1143,6 +1151,17 @@ class PromptCustomizationDialog(QMainWindow):
         """Сбросить промпт к дефолтному."""
         if key in self.prompt_editors and key in self._default_prompts:
             self.prompt_editors[key].setPlainText(self._default_prompts[key])
+
+    def _reset_all_prompts(self):
+        """Сбросить все промпты к дефолтным и сохранить."""
+        for key, editor in self.prompt_editors.items():
+            if key in self._default_prompts:
+                editor.setPlainText(self._default_prompts[key])
+        # Очищаем кастомные промпты в конфиге
+        self.config.update(custom_prompts={})
+        # Показываем сообщение
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "Готово", "Все промпты сброшены к значениям PM-ассистента.")
 
     def _save_prompts(self):
         """Сохранить промпты в конфиг."""
@@ -2187,6 +2206,175 @@ class MainWindow(QMainWindow):
         overlay_row += 1
 
         layout.addWidget(overlay_section)
+
+        # === Секция AI Provider (OpenRouter) ===
+        ai_section = QWidget()
+        ai_layout = QGridLayout(ai_section)
+        ai_layout.setContentsMargins(0, 0, 0, 0)
+        ai_layout.setSpacing(8)
+        ai_layout.setColumnStretch(1, 1)
+
+        ai_row = 0
+
+        # Заголовок секции
+        self.ai_section_label = QLabel(self._t("ai_provider"))
+        self.ai_section_label.setStyleSheet("font-weight: bold;")
+        ai_layout.addWidget(self.ai_section_label, ai_row, 0, 1, 2)
+        ai_row += 1
+
+        # Провайдер (radio buttons)
+        provider_row = QHBoxLayout()
+        self.provider_local_radio = QRadioButton(self._t("provider_local"))
+        self.provider_openrouter_radio = QRadioButton(self._t("provider_openrouter"))
+        self.provider_local_radio.setChecked(True)
+
+        # Стилизация radio под System 7
+        radio_style = """
+            QRadioButton { spacing: 6px; }
+            QRadioButton::indicator {
+                width: 14px; height: 14px;
+                border: 2px solid #000000;
+                border-radius: 8px;
+                background-color: #ffffff;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #000000;
+                border: 3px solid #ffffff;
+                outline: 2px solid #000000;
+            }
+        """
+        self.provider_local_radio.setStyleSheet(radio_style)
+        self.provider_openrouter_radio.setStyleSheet(radio_style)
+        provider_row.addWidget(self.provider_local_radio)
+        provider_row.addWidget(self.provider_openrouter_radio)
+        provider_row.addStretch()
+        ai_layout.addLayout(provider_row, ai_row, 0, 1, 2)
+        ai_row += 1
+
+        # API ключ
+        self.api_key_label = QLabel(self._t("openrouter_api_key"))
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setPlaceholderText("sk-or-...")
+        self.api_key_edit.setStyleSheet("""
+            QLineEdit {
+                border: 2px solid #000000;
+                padding: 4px 8px;
+                background-color: #ffffff;
+                font-family: 'Consolas', 'Monaco', monospace;
+            }
+        """)
+        ai_layout.addWidget(self.api_key_label, ai_row, 0)
+        ai_layout.addWidget(self.api_key_edit, ai_row, 1)
+        ai_row += 1
+
+        # Выбор модели с поиском
+        self.model_select_label = QLabel(self._t("openrouter_model"))
+        model_row = QHBoxLayout()
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)  # Editable для поиска
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.lineEdit().setPlaceholderText(self._t("search_model"))
+        self.model_combo.setStyleSheet("""
+            QComboBox {
+                border: 2px solid #000000;
+                padding: 4px 8px;
+                background-color: #ffffff;
+                min-width: 250px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                border-left: 2px solid #000000;
+                width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                border: 2px solid #000000;
+                background-color: #ffffff;
+                selection-background-color: #000000;
+                selection-color: #ffffff;
+            }
+        """)
+        self.model_combo.addItem(self._t("select_model"), "")
+
+        self.refresh_models_btn = QPushButton(self._t("refresh_models"))
+        self.refresh_models_btn.setStyleSheet("""
+            QPushButton {
+                border: 2px solid #000000;
+                padding: 4px 12px;
+                background-color: #ffffff;
+                border-top-color: #ffffff;
+                border-left-color: #ffffff;
+                border-right-color: #808080;
+                border-bottom-color: #808080;
+            }
+            QPushButton:pressed {
+                border-top-color: #808080;
+                border-left-color: #808080;
+                border-right-color: #ffffff;
+                border-bottom-color: #ffffff;
+            }
+            QPushButton:disabled { color: #808080; }
+        """)
+        self.refresh_models_btn.clicked.connect(self._on_refresh_models)
+
+        model_row.addWidget(self.model_combo, stretch=1)
+        model_row.addWidget(self.refresh_models_btn)
+        ai_layout.addWidget(self.model_select_label, ai_row, 0)
+        ai_layout.addLayout(model_row, ai_row, 1)
+        ai_row += 1
+
+        # Reasoning mode
+        reasoning_row = QHBoxLayout()
+        self.reasoning_checkbox = QCheckBox(self._t("reasoning_mode"))
+        self.reasoning_checkbox.setToolTip(self._t("reasoning_tooltip"))
+        self.reasoning_checkbox.stateChanged.connect(self._on_reasoning_changed)
+        reasoning_row.addWidget(self.reasoning_checkbox)
+
+        # Effort комбобокс
+        self.effort_label = QLabel(self._t("reasoning_effort"))
+        self.effort_combo = QComboBox()
+        self.effort_combo.addItem(self._t("effort_low"), "low")
+        self.effort_combo.addItem(self._t("effort_medium"), "medium")
+        self.effort_combo.addItem(self._t("effort_high"), "high")
+        self.effort_combo.setCurrentIndex(1)  # medium по умолчанию
+        self.effort_combo.setStyleSheet("""
+            QComboBox {
+                border: 2px solid #000000;
+                padding: 2px 6px;
+                background-color: #ffffff;
+                min-width: 80px;
+            }
+        """)
+        self.effort_combo.currentIndexChanged.connect(self._on_effort_changed)
+        reasoning_row.addWidget(self.effort_label)
+        reasoning_row.addWidget(self.effort_combo)
+        reasoning_row.addStretch()
+        ai_layout.addLayout(reasoning_row, ai_row, 0, 1, 2)
+        ai_row += 1
+
+        # Загрузка сохранённых настроек провайдера
+        cfg = self.config.config
+        if cfg.get("summary_provider") == "openrouter":
+            self.provider_openrouter_radio.setChecked(True)
+        self.api_key_edit.setText(cfg.get("openrouter_api_key", ""))
+        saved_model = cfg.get("openrouter_model", "")
+        if saved_model:
+            self.model_combo.addItem(saved_model, saved_model)
+            self.model_combo.setCurrentIndex(1)
+
+        # Загрузка reasoning настроек
+        self.reasoning_checkbox.setChecked(cfg.get("openrouter_reasoning", False))
+        effort = cfg.get("openrouter_reasoning_effort", "medium")
+        effort_idx = self.effort_combo.findData(effort)
+        if effort_idx >= 0:
+            self.effort_combo.setCurrentIndex(effort_idx)
+
+        # Обновляем доступность полей при переключении
+        self.provider_local_radio.toggled.connect(self._on_provider_changed)
+        self.provider_openrouter_radio.toggled.connect(self._on_provider_changed)
+        self._on_provider_changed()  # Установить начальное состояние
+
+        layout.addWidget(ai_section)
         layout.addStretch()
 
         return tab
@@ -3310,6 +3498,121 @@ class MainWindow(QMainWindow):
             self._output_dir = Path(folder)
             self.output_folder_edit.setText(folder)
 
+    def _on_provider_changed(self) -> None:
+        """Обработать изменение провайдера AI."""
+        is_openrouter = self.provider_openrouter_radio.isChecked()
+
+        # Включаем/выключаем поля OpenRouter
+        self.api_key_label.setEnabled(is_openrouter)
+        self.api_key_edit.setEnabled(is_openrouter)
+        self.model_select_label.setEnabled(is_openrouter)
+        self.model_combo.setEnabled(is_openrouter)
+        self.refresh_models_btn.setEnabled(is_openrouter)
+        self.reasoning_checkbox.setEnabled(is_openrouter)
+        self.effort_label.setEnabled(is_openrouter and self.reasoning_checkbox.isChecked())
+        self.effort_combo.setEnabled(is_openrouter and self.reasoning_checkbox.isChecked())
+
+        # Сохраняем выбор
+        provider = "openrouter" if is_openrouter else "local"
+        self.config.update(summary_provider=provider)
+
+    def _on_reasoning_changed(self, state: int) -> None:
+        """Обработать изменение reasoning mode."""
+        is_enabled = state == 2  # Qt.CheckState.Checked
+        self.effort_label.setEnabled(is_enabled)
+        self.effort_combo.setEnabled(is_enabled)
+        self.config.update(openrouter_reasoning=is_enabled)
+
+    def _on_effort_changed(self, index: int) -> None:
+        """Сохранить выбранный effort."""
+        effort = self.effort_combo.currentData()
+        if effort:
+            self.config.update(openrouter_reasoning_effort=effort)
+
+    def _on_refresh_models(self) -> None:
+        """Загрузить полный список моделей из OpenRouter."""
+        api_key = self.api_key_edit.text().strip()
+        if not api_key:
+            QMessageBox.warning(
+                self,
+                self._t("error"),
+                self._t("api_key_required")
+            )
+            return
+
+        # Сохраняем ключ
+        self.config.update(openrouter_api_key=api_key)
+
+        # Показываем индикатор загрузки
+        self.refresh_models_btn.setEnabled(False)
+        self.refresh_models_btn.setText(self._t("loading_models"))
+        QApplication.processEvents()
+
+        try:
+            from .openrouter import OpenRouterClient, OpenRouterError, OpenRouterAuthError
+            from PyQt6.QtCore import QStringListModel
+            from PyQt6.QtWidgets import QCompleter
+
+            client = OpenRouterClient(api_key)
+            models = client.fetch_models()  # Все модели, не только рекомендованные
+
+            # Сохраняем модели для фильтрации
+            self._openrouter_models = models
+
+            # Очищаем и заполняем комбобокс
+            self.model_combo.clear()
+            self.model_combo.addItem(self._t("select_model"), "")
+
+            model_names = []
+            for model in models:
+                display = f"{model.id} — ${model.pricing_input:.2f}/{model.pricing_output:.2f}"
+                self.model_combo.addItem(display, model.id)
+                model_names.append(display)
+
+            # Добавляем completer для поиска
+            completer = QCompleter(model_names, self)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self.model_combo.setCompleter(completer)
+
+            # Восстанавливаем сохранённый выбор
+            saved_model = self.config.config.get("openrouter_model", "")
+            if saved_model:
+                idx = self.model_combo.findData(saved_model)
+                if idx >= 0:
+                    self.model_combo.setCurrentIndex(idx)
+
+            # Подключаем сохранение при выборе
+            self.model_combo.currentIndexChanged.connect(self._on_model_selected)
+
+        except OpenRouterAuthError:
+            QMessageBox.critical(
+                self,
+                self._t("error"),
+                self._t("invalid_api_key")
+            )
+        except OpenRouterError as e:
+            QMessageBox.critical(
+                self,
+                self._t("error"),
+                f"{self._t('api_error')}: {e}"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                self._t("error"),
+                str(e)
+            )
+        finally:
+            self.refresh_models_btn.setEnabled(True)
+            self.refresh_models_btn.setText(self._t("refresh_models"))
+
+    def _on_model_selected(self, index: int) -> None:
+        """Сохранить выбранную модель."""
+        model_id = self.model_combo.currentData()
+        if model_id:
+            self.config.update(openrouter_model=model_id)
+
     def _on_customize_prompts(self) -> None:
         """Открыть диалог настройки промптов."""
         dialog = PromptCustomizationDialog(self.config, translate_func=self._t, parent=self)
@@ -3360,6 +3663,19 @@ class MainWindow(QMainWindow):
             on_thinking=lambda text: self.thinking_signal.emit(text) if enable_thinking else None,
             enable_thinking=enable_thinking,
             custom_prompts=custom_prompts,
+            # OpenRouter настройки
+            summary_provider=cfg.get("summary_provider", "local"),
+            openrouter_api_key=cfg.get("openrouter_api_key", ""),
+            openrouter_model=cfg.get("openrouter_model", ""),
+            openrouter_reasoning=cfg.get("openrouter_reasoning", False),
+            openrouter_reasoning_effort=cfg.get("openrouter_reasoning_effort", "medium"),
+            # Постобработка (диаризация, пунктуация и т.д.)
+            enable_postprocessing=cfg.get("enable_postprocessing", True),
+            postprocessing_diarization=cfg.get("postprocessing_diarization", True),
+            postprocessing_punctuation=cfg.get("postprocessing_punctuation", True),
+            postprocessing_fillers=cfg.get("postprocessing_fillers", True),
+            postprocessing_normalize=cfg.get("postprocessing_normalize", True),
+            postprocessing_correct=cfg.get("postprocessing_correct", True),
         )
 
         # Добавляем файлы

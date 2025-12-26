@@ -1,0 +1,131 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            artifact_name: MindType-Windows-Setup.exe
+            build_script: .\build\build_windows_nuitka.ps1
+          - os: ubuntu-latest
+            artifact_name: MindType-Linux.AppImage
+            build_script: ./build/build_linux.sh
+          - os: macos-latest
+            artifact_name: MindType-macOS.dmg
+            build_script: ./build/build_macos.sh
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nuitka ordered-set zstandard
+
+      - name: Build with Nuitka (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          ${{ matrix.build_script }} -Version ${{ github.ref_name }} -Clean
+
+      - name: Build with Nuitka (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse0 libasound2 libportaudio2
+          chmod +x ${{ matrix.build_script }}
+          ${{ matrix.build_script }} ${{ github.ref_name }} --clean
+
+      - name: Build with Nuitka (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          chmod +x ${{ matrix.build_script }}
+          ${{ matrix.build_script }} ${{ github.ref_name }} --clean
+
+      - name: Rename artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $SetupFile = Get-ChildItem "dist\MindType-*-Setup.exe" | Select-Object -First 1
+          Move-Item $SetupFile.FullName "dist\${{ matrix.artifact_name }}"
+
+      - name: Rename artifacts (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mv dist/MindType-*.AppImage dist/${{ matrix.artifact_name }}
+
+      - name: Rename artifacts (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mv dist/MindType-*.dmg dist/${{ matrix.artifact_name }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-build
+          path: dist/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare Release Files
+        run: |
+          mkdir release
+          find artifacts -name "*.exe" -exec cp {} release/ \;
+          find artifacts -name "*.AppImage" -exec cp {} release/ \;
+          find artifacts -name "*.dmg" -exec cp {} release/ \;
+
+          # Generate version.json
+          VERSION=${GITHUB_REF_NAME#v}
+          cat > release/version.json << EOF
+          {
+            "version": "$VERSION",
+            "release_notes": "MindType version $VERSION",
+            "platforms": {
+              "windows": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MindType-Windows-Setup.exe",
+              "linux": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MindType-Linux.AppImage",
+              "macos": "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MindType-macOS.dmg"
+            }
+          }
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*
+          body: |
+            Automated release for version ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

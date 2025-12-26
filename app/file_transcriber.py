@@ -3,6 +3,8 @@
 Поддерживает пакетную обработку и извлечение аудио из видео.
 """
 
+import logging
+import os
 import tempfile
 import subprocess
 import shutil
@@ -13,6 +15,26 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 import threading
 import queue
+
+# Настройка логирования в файл
+def _setup_logger():
+    logger = logging.getLogger("file_transcriber")
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+
+        # Файл логов в %APPDATA%/MindType/file_transcriber.log
+        log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "file_transcriber.log"
+
+        handler = logging.FileHandler(log_file, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s"
+        ))
+        logger.addHandler(handler)
+    return logger
+
+logger = _setup_logger()
 
 # Поддерживаемые форматы
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus'}
@@ -25,6 +47,7 @@ class FileStatus(Enum):
     PENDING = "pending"
     EXTRACTING = "extracting"  # Извлечение аудио из видео
     TRANSCRIBING = "transcribing"
+    PROCESSING = "processing"  # Постобработка транскрипции
     SUMMARIZING = "summarizing"  # Суммаризация через LLM
     GENERATING = "generating"  # Генерация отчёта
     COMPLETED = "completed"
@@ -33,11 +56,29 @@ class FileStatus(Enum):
 
 
 @dataclass
+class SpeakerStats:
+    """Статистика спикера."""
+    speaker_id: str  # "SPEAKER_00", "SPEAKER_01", ...
+    speaker_name: str  # Кастомное имя или то же что speaker_id
+    total_duration: float  # Общее время говорения в секундах
+    segment_count: int  # Количество реплик
+    word_count: int  # Количество слов
+
+    @property
+    def duration_formatted(self) -> str:
+        """Форматированное время говорения."""
+        minutes = int(self.total_duration // 60)
+        secs = int(self.total_duration % 60)
+        return f"{minutes}:{secs:02d}"
+
+
+@dataclass
 class TranscriptionSegment:
     """Сегмент транскрипции с таймкодами."""
     start: float
     end: float
     text: str
+    speaker: Optional[str] = None  # ID спикера (SPEAKER_00, SPEAKER_01, ...)
     words: List[dict] = field(default_factory=list)
 
     @property
@@ -74,6 +115,12 @@ class TranscriptionResult:
     # Результат суммаризации (опционально)
     summary: Optional[str] = None
     summary_metrics: Optional[dict] = None
+    # Результат постобработки (опционально)
+    processed_text: Optional[str] = None
+    processing_stats: Optional[dict] = None
+    # Статистика спикеров (опционально)
+    speaker_stats: Optional[List[SpeakerStats]] = None
+    num_speakers: int = 0
 
     @property
     def full_text(self) -> str:
@@ -81,9 +128,24 @@ class TranscriptionResult:
         return " ".join(seg.text for seg in self.segments if seg.text)
 
     @property
+    def text_for_summary(self) -> str:
+        """Текст для суммаризации (обработанный или оригинальный)."""
+        return self.processed_text if self.processed_text else self.full_text
+
+    @property
     def has_summary(self) -> bool:
         """Есть ли саммари."""
         return self.summary is not None and len(self.summary) > 0
+
+    @property
+    def has_processing(self) -> bool:
+        """Была ли постобработка."""
+        return self.processed_text is not None
+
+    @property
+    def has_speakers(self) -> bool:
+        """Есть ли разметка спикеров."""
+        return self.num_speakers > 1 and self.speaker_stats is not None
 
     @property
     def duration_formatted(self) -> str:
@@ -96,6 +158,10 @@ class TranscriptionResult:
         elif minutes > 0:
             return f"{minutes}м {secs}с"
         return f"{secs}с"
+
+    def get_speaker_segments(self, speaker_id: str) -> List[TranscriptionSegment]:
+        """Получить все сегменты конкретного спикера."""
+        return [seg for seg in self.segments if seg.speaker == speaker_id]
 
 
 @dataclass
@@ -279,6 +345,19 @@ class FileTranscriptionQueue:
         on_thinking: Optional[ThinkingCallback] = None,  # Callback для AI thinking
         enable_thinking: bool = True,  # Включить режим размышлений
         custom_prompts: Optional[Dict[str, str]] = None,  # Кастомные промпты
+        # OpenRouter настройки
+        summary_provider: str = "local",  # "local" или "openrouter"
+        openrouter_api_key: str = "",
+        openrouter_model: str = "",
+        openrouter_reasoning: bool = False,
+        openrouter_reasoning_effort: str = "medium",
+        # Постобработка транскрипций
+        enable_postprocessing: bool = False,
+        postprocessing_diarization: bool = True,
+        postprocessing_punctuation: bool = True,
+        postprocessing_fillers: bool = True,
+        postprocessing_normalize: bool = True,
+        postprocessing_correct: bool = True,
     ):
         self.transcriber = transcriber
         self.model_size = model_size
@@ -291,6 +370,26 @@ class FileTranscriptionQueue:
         self.enable_summary = enable_summary
         self.enable_thinking = enable_thinking
         self.custom_prompts = custom_prompts
+        self.summary_provider = summary_provider
+        self.openrouter_api_key = openrouter_api_key
+        self.openrouter_model = openrouter_model
+        self.openrouter_reasoning = openrouter_reasoning
+        self.openrouter_reasoning_effort = openrouter_reasoning_effort
+
+        # Настройки постобработки
+        self.enable_postprocessing = enable_postprocessing
+        self.postprocessing_diarization = postprocessing_diarization
+        self.postprocessing_punctuation = postprocessing_punctuation
+        self.postprocessing_fillers = postprocessing_fillers
+        self.postprocessing_normalize = postprocessing_normalize
+        self.postprocessing_correct = postprocessing_correct
+
+        # Логируем настройки постобработки
+        logger.info("=" * 50)
+        logger.info("FileTranscriptionQueue инициализирована")
+        logger.info(f"  enable_postprocessing: {enable_postprocessing}")
+        logger.info(f"  postprocessing_diarization: {postprocessing_diarization}")
+        logger.info("=" * 50)
 
         self._on_progress = on_progress
         self._on_completed = on_completed
@@ -303,6 +402,7 @@ class FileTranscriptionQueue:
         self._cancelled = threading.Event()
         self._temp_files: List[Path] = []
         self._summarizer = None  # Ленивая инициализация
+        self._text_processor = None  # Ленивая инициализация
 
     @property
     def tasks(self) -> List[FileTask]:
@@ -455,6 +555,10 @@ class FileTranscriptionQueue:
                 vad_filter=self.vad_filter,
             )
 
+            if not segments_data:
+                logger.warning(f"Транскрипция вернула 0 сегментов для {task.file_path.name}")
+                raise ValueError("Транскрипция не вернула ни одного сегмента. Проверьте аудиофайл и настройки.")
+
             task.progress = 60
             if self._on_progress:
                 self._on_progress(task)
@@ -480,8 +584,79 @@ class FileTranscriptionQueue:
                 model_used=self.model_size,
             )
 
+            # Постобработка транскрипции (если включена)
+            logger.info(f"Проверка постобработки: enable={self.enable_postprocessing}, text_len={len(task.result.full_text) if task.result.full_text else 0}")
+            if self.enable_postprocessing and task.result.full_text:
+                if self._cancelled.is_set():
+                    task.status = FileStatus.CANCELLED
+                    if self._on_completed:
+                        self._on_completed(task)
+                    return
+
+                task.status = FileStatus.PROCESSING
+                task.progress = 62
+                if self._on_progress:
+                    self._on_progress(task)
+
+                try:
+                    logger.info(f"Начинаем постобработку для {task.file_path.name}")
+                    logger.info(f"  audio_path: {audio_path}")
+                    logger.info(f"  segments_count: {len(segments_data)}")
+                    processed_result = self._process_text(
+                        task.result.full_text,
+                        audio_path,
+                        segments_data,
+                        task,
+                    )
+                    logger.info(f"Постобработка завершена. Stats: {processed_result.processing_stats}")
+                    task.result.processed_text = processed_result.processed_text
+                    task.result.processing_stats = processed_result.processing_stats
+
+                    # Извлекаем статистику спикеров из диаризации
+                    if processed_result.has_speakers and processed_result.diarization:
+                        diar_result = processed_result.diarization
+
+                        # 1. Сливаем слишком мелких спикеров (ошибки кластеризации)
+                        diar_result = self.pipeline.diarizer.merge_short_speakers(diar_result)
+
+                        # 2. Выравниваем с текстом транскрипции (чтобы посчитать слова)
+                        # Преобразуем segments транскрипции в формат словаря, который ждет align
+                        raw_segments = [
+                            {"start": s.start, "end": s.end, "text": s.text}
+                            for s in task.result.segments
+                        ]
+                        diar_result = self.pipeline.diarizer.align_with_transcription(diar_result, raw_segments)
+
+                        # 3. Теперь обновляем num_speakers и считаем статистику (уже есть текст и правильные спикеры)
+                        task.result.num_speakers = diar_result.num_speakers
+
+                        speaker_statistics = diar_result.get_speaker_statistics()
+                        if speaker_statistics:
+                            task.result.speaker_stats = [
+                                SpeakerStats(
+                                    speaker_id=ss.speaker_id,
+                                    speaker_name=ss.speaker_name,
+                                    total_duration=ss.total_duration,
+                                    segment_count=ss.segment_count,
+                                    word_count=ss.word_count,
+                                )
+                                for ss in speaker_statistics
+                            ]
+
+                        # 4. Обновляем сегменты транскрипции (чтобы покрасились в HTML)
+                        if diar_result.segments:
+                            self._update_segments_with_speakers(task, diar_result.segments)
+
+                            # Также обновим processed_result, если нужно, чтобы в pipeline сохранилось
+                            processed_result.diarization = diar_result
+
+                    task.progress = 68
+                except Exception as e:
+                    # Постобработка не критична — продолжаем без неё
+                    task.result.processing_stats = {"error": str(e)}
+
             # Суммаризация (если включена)
-            if self.enable_summary and task.result.full_text:
+            if self.enable_summary and task.result.text_for_summary:
                 if self._cancelled.is_set():
                     task.status = FileStatus.CANCELLED
                     if self._on_completed:
@@ -494,13 +669,19 @@ class FileTranscriptionQueue:
                     self._on_progress(task)
 
                 try:
-                    summary, metrics = self._summarize_text(task.result.full_text, task)
+                    summary, metrics = self._summarize_text(task.result.text_for_summary, task)
+                    if not summary or len(summary) < 10:
+                        raise ValueError("Суммаризация вернула пустой или слишком короткий результат")
                     task.result.summary = summary
                     task.result.summary_metrics = metrics.to_dict() if metrics else None
                 except Exception as e:
-                    # Суммаризация не критична — продолжаем без неё
-                    task.result.summary = None
-                    task.result.summary_metrics = {"error": str(e)}
+                    logger.error(f"Ошибка суммаризации для {task.file_path.name}: {e}")
+                    # Теперь мы считаем это ошибкой задачи, если саммаризация была включена и не удалась
+                    task.status = FileStatus.ERROR
+                    task.error_message = f"Ошибка саммаризации: {str(e)}"
+                    if self._on_completed:
+                        self._on_completed(task)
+                    return
 
             task.status = FileStatus.COMPLETED
             task.progress = 100
@@ -521,12 +702,23 @@ class FileTranscriptionQueue:
             config = SummarizerConfig(
                 enable_thinking=self.enable_thinking,
                 custom_prompts=self.custom_prompts,
+                # OpenRouter настройки
+                provider=self.summary_provider,
+                openrouter_api_key=self.openrouter_api_key,
+                openrouter_model=self.openrouter_model,
+                openrouter_reasoning=self.openrouter_reasoning,
+                openrouter_reasoning_effort=self.openrouter_reasoning_effort,
             )
             self._summarizer = get_summarizer(config)
         else:
             # Обновляем настройки если изменились
             self._summarizer.config.enable_thinking = self.enable_thinking
             self._summarizer.config.custom_prompts = self.custom_prompts
+            self._summarizer.config.provider = self.summary_provider
+            self._summarizer.config.openrouter_api_key = self.openrouter_api_key
+            self._summarizer.config.openrouter_model = self.openrouter_model
+            self._summarizer.config.openrouter_reasoning = self.openrouter_reasoning
+            self._summarizer.config.openrouter_reasoning_effort = self.openrouter_reasoning_effort
 
         # Загружаем модель если нужно
         if not self._summarizer.is_loaded:
@@ -553,6 +745,77 @@ class FileTranscriptionQueue:
             text,
             progress_callback=summary_progress_cb,
             thinking_callback=self._on_thinking,
+        )
+
+    def _update_segments_with_speakers(self, task: FileTask, speaker_segments) -> None:
+        """
+        Обновляет сегменты транскрипции информацией о спикерах.
+
+        Args:
+            task: Задача с результатом транскрипции
+            speaker_segments: Сегменты диаризации с информацией о спикерах
+        """
+        if not task.result or not task.result.segments or not speaker_segments:
+            return
+
+        # Для каждого сегмента транскрипции находим соответствующего спикера
+        for trans_seg in task.result.segments:
+            best_speaker = None
+            best_overlap = 0
+
+            for diar_seg in speaker_segments:
+                # Вычисляем перекрытие по времени
+                overlap_start = max(trans_seg.start, diar_seg.start)
+                overlap_end = min(trans_seg.end, diar_seg.end)
+                overlap = max(0, overlap_end - overlap_start)
+
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = diar_seg.speaker
+
+            if best_speaker:
+                trans_seg.speaker = best_speaker
+
+    def _process_text(self, text: str, audio_path: Path, segments_data: List[dict], task: FileTask):
+        """Выполнить постобработку текста транскрипции."""
+        from .text_processor import TextProcessingPipeline, ProcessingConfig
+
+        logger.info("_process_text вызван")
+        logger.info(f"  diarization: {self.postprocessing_diarization}")
+
+        # Ленивая инициализация процессора
+        if self._text_processor is None:
+            logger.info("Создаём новый TextProcessingPipeline")
+            config = ProcessingConfig(
+                enable_diarization=self.postprocessing_diarization,
+                enable_punctuation=self.postprocessing_punctuation,
+                enable_fillers=self.postprocessing_fillers,
+                enable_normalize=self.postprocessing_normalize,
+                enable_correct=self.postprocessing_correct,
+                language=self.language,
+            )
+            self._text_processor = TextProcessingPipeline(config)
+            logger.info("TextProcessingPipeline создан")
+        else:
+            # Обновляем настройки если изменились
+            self._text_processor.config.enable_diarization = self.postprocessing_diarization
+            self._text_processor.config.enable_punctuation = self.postprocessing_punctuation
+            self._text_processor.config.enable_fillers = self.postprocessing_fillers
+            self._text_processor.config.enable_normalize = self.postprocessing_normalize
+            self._text_processor.config.enable_correct = self.postprocessing_correct
+            self._text_processor.config.language = self.language
+
+        # Callback для прогресса
+        def processing_progress_cb(status: str, current: int, total: int):
+            task.progress = 62 + int(6 * current / max(total, 1))
+            if self._on_progress:
+                self._on_progress(task)
+
+        return self._text_processor.process(
+            text=text,
+            audio_path=audio_path,
+            transcription_segments=segments_data,
+            progress_callback=processing_progress_cb,
         )
 
     @property

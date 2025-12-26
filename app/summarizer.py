@@ -18,68 +18,78 @@ import os
 import re
 import sys
 import time
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Отдельный логгер для ответов LLM
+llm_logger = logging.getLogger("mindtype.llm")
+llm_logger.setLevel(logging.DEBUG)
+
+def _setup_llm_logging():
+    """Настройка детального лога для LLM."""
+    try:
+        log_dir = Path.home() / ".cache" / "mindtype" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "summarizer.log"
+
+        handler = logging.FileHandler(log_file, encoding='utf-8')
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+        llm_logger.addHandler(handler)
+    except:
+        pass
+
+_setup_llm_logging()
 
 # =============================================================================
 # ПРОМПТЫ
 # =============================================================================
 
-SYSTEM_PROMPT = """Ты — PM-ассистент. Делаешь управленческие выжимки из транскрипций встреч.
+SYSTEM_PROMPT = """Ты — PM-ассистент. Пиши строго на русском.
+Твоя задача: выписать факты, числа и задачи из текста.
 
 ПРАВИЛА:
-1. Отвечай ТОЛЬКО на русском языке
-2. НЕ выдумывай факты — только то, что есть в тексте
-3. ВСЕ числа, даты, сроки, суммы из текста ОБЯЗАНЫ попасть в ответ
-4. Следуй формату точно — не добавляй свои разделы
-5. Техтермины не переводи: ТЗ, ТЭП, МАФ, ДОУ, ЭП, стадия Р, стилобат
+1. Только русский язык (английский запрещён).
+2. Все числа, даты и сроки из текста должны быть в ответе.
+3. Не выдумывай того, чего нет в тексте.
+4. Техтермины не переводи: ТЗ, ТЭП, МАФ, ДОУ, ЭП, стадия Р, стилобат.
+"""
 
-ЗАПРЕЩЕНО:
-- Английский язык
-- Придуманные факты и числа
-- Разделы "Summary", "Key Points", "Overview"
-- Слова "важно", "стандартно" без конкретики"""
-
-EXTRACTION_PROMPT = """ТЕКСТ:
+EXTRACTION_PROMPT = """Текст для анализа:
 \"\"\"
 {chunk_text}
 \"\"\"
 
-Извлеки ВСЕ факты из текста. Отвечай на русском.
+Выпиши все факты из текста выше на русском языке.
 
-## Числа, даты, сроки, суммы
-Выпиши КАЖДОЕ число, дату, срок, бюджет, процент из текста:
+## 1. Числа, даты, сроки
 - [значение] — [контекст]
 
-## Решения и договорённости
-Что решили, согласовали, утвердили:
+## 2. Решения и договорённости
 - ...
 
-## Задачи и обещания
-Кто что должен сделать/прислать:
-- [Кто] → [что сделает] (срок если есть)
+## 3. Задачи
+- [Кто] → [что сделает] (срок)
 
-## Риски и открытые вопросы
-Что не решено, неясно, блокирует:
+## 4. Риски и вопросы
 - ...
 
-ВАЖНО:
-- Извлекай ВСЁ что видишь, даже если кажется мелким
-- Числа, проценты, деньги, сроки — обязательно
-- Не пропускай технические термины (ТЗ, ТЭП, МАФ и т.д.)
-- Не додумывай то, чего нет в тексте"""
+ВАЖНО: Пиши только правду из текста. Если информации для раздела нет, пиши "—"."""
 
-AGGREGATION_PROMPT = """ИЗВЛЕЧЁННЫЕ ФАКТЫ ИЗ {n_chunks} ЧАСТЕЙ:
+AGGREGATION_PROMPT = """Объедини факты из {n_chunks} частей в одно итоговое PM-саммари.
+
+ФАКТЫ:
 \"\"\"
 {extracted_facts}
 \"\"\"
 
-Объедини ВСЕ факты в PM-саммари. НЕ ТЕРЯЙ факты — если что-то упомянуто, оно должно быть в итоговом саммари.
+Итоговое саммари на русском языке:
 
-## 1) Все числа/даты/сроки/суммы
-Перенеси ВСЕ числа из фактов выше:
-- [значение] — [что означает]
+## 1) Все числа/даты/сроки
+- [значение] — [контекст]
 
 ## 2) Решения и договорённости
 - ...
@@ -90,7 +100,7 @@ AGGREGATION_PROMPT = """ИЗВЛЕЧЁННЫЕ ФАКТЫ ИЗ {n_chunks} ЧАС
 ## 4) Ждём от исполнителя
 - ...
 
-## 5) Риски и открытые вопросы
+## 5) Риски и вопросы
 - ...
 
 ## 6) Следующие шаги
@@ -98,10 +108,7 @@ AGGREGATION_PROMPT = """ИЗВЛЕЧЁННЫЕ ФАКТЫ ИЗ {n_chunks} ЧАС
 |----------|---------------|------|
 | ... | ... | ... |
 
-КРИТИЧНО:
-- Убери только точные дубликаты
-- ВСЕ числа из исходных фактов должны быть в разделе 1
-- Только русский язык"""
+ВАЖНО: Не теряй ни одного числа или даты из списка выше."""
 
 SHORT_PROMPT = """ТРАНСКРИПЦИЯ:
 \"\"\"
@@ -138,6 +145,110 @@ SHORT_PROMPT = """ТРАНСКРИПЦИЯ:
 | ... | ... | ... |
 
 ВАЖНО: Заполни ВСЕ 6 разделов. Отвечай только на русском."""
+
+# =============================================================================
+# ПРОМПТЫ ДЛЯ ДИАЛОГОВ (С РАЗМЕТКОЙ СПИКЕРОВ)
+# =============================================================================
+
+DIALOG_SYSTEM_PROMPT = """Ты — PM-ассистент. Пиши строго на русском.
+В тексте есть SPEAKER_XX. Привязывай факты к спикерам.
+
+ПРАВИЛА:
+1. Только русский язык.
+2. Не выдумывай факты.
+3. Сохраняй SPEAKER_XX в ответах.
+"""
+
+DIALOG_EXTRACTION_PROMPT = """ТРАНСКРИПЦИЯ:
+\"\"\"
+{chunk_text}
+\"\"\"
+
+Выпиши факты по спикерам на русском языке.
+
+## Участники
+- SPEAKER_XX: [роль]
+
+## Числа и даты
+- [SPEAKER_XX]: [значение] — [контекст]
+
+## Решения и задачи
+- [SPEAKER_XX] → [что сделал/сделает]
+
+## Вопросы
+- [SPEAKER_XX]: ..."""
+
+DIALOG_AGGREGATION_PROMPT = """Объедини факты из {n_chunks} частей встречи.
+
+ФАКТЫ:
+\"\"\"
+{extracted_facts}
+\"\"\"
+
+Итоговый протокол на русском:
+
+## Участники встречи
+| Спикер | Роль | Кратко |
+|--------|------|--------|
+| SPEAKER_XX | [роль] | [тема] |
+
+## 1) Все числа/даты/сроки
+- [SPEAKER_XX]: [значение] — [контекст]
+
+## 2) Решения и задачи
+- [SPEAKER_XX]: ...
+
+## 3) Риски и вопросы
+- [SPEAKER_XX]: ...
+
+## 4) Следующие шаги
+| Действие | Ответственный | Срок |
+|----------|---------------|------|
+| ... | SPEAKER_XX | ... |"""
+
+DIALOG_SHORT_PROMPT = """ТРАНСКРИПЦИЯ ВСТРЕЧИ:
+\"\"\"
+{transcript}
+\"\"\"
+
+---
+
+Сделай протокол встречи на русском языке. Заполни ВСЕ разделы. Если раздел пустой — напиши "—".
+
+## Участники встречи
+Определи роль каждого спикера по контексту:
+| Спикер | Роль |
+|--------|------|
+| SPEAKER_XX | [заказчик/исполнитель/эксперт/неизвестно] |
+
+## 1) Все даты/числа/сроки
+Выпиши с указанием кто озвучил:
+- [SPEAKER_XX]: [дата/число] — [контекст]
+
+## 2) Решения и договорённости
+Что решили, согласовали, утвердили:
+- [SPEAKER_XX]: ...
+
+## 3) Задачи по участникам
+### SPEAKER_00:
+- [задача] (срок)
+
+### SPEAKER_01:
+- [задача] (срок)
+
+## 4) Риски и открытые вопросы
+- [SPEAKER_XX]: ...
+
+## 5) Следующие шаги
+| Действие | Ответственный | Срок |
+|----------|---------------|------|
+| ... | SPEAKER_XX | ... |
+
+ВАЖНО: Заполни ВСЕ 5 разделов. Указывай ID спикеров. Отвечай только на русском."""
+
+# =============================================================================
+# СТАНДАРТНЫЕ ПРОМПТЫ (БЕЗ РАЗМЕТКИ СПИКЕРОВ)
+# =============================================================================
 
 FULL_PROMPT_WITH_EXAMPLE = """Ты — PM-ассистент. Делаешь выжимки из транскрипций на русском языке.
 
@@ -202,7 +313,16 @@ FULL_PROMPT_WITH_EXAMPLE = """Ты — PM-ассистент. Делаешь в�
 @dataclass
 class SummarizerConfig:
     """Конфигурация суммаризатора."""
-    # Модель (unsloth - надёжное зеркало)
+    # Провайдер: "local" или "openrouter"
+    provider: str = "local"
+
+    # OpenRouter настройки
+    openrouter_api_key: str = ""
+    openrouter_model: str = ""  # например "anthropic/claude-3-haiku"
+    openrouter_reasoning: bool = False  # Включить reasoning mode
+    openrouter_reasoning_effort: str = "medium"  # low / medium / high
+
+    # Локальная модель (unsloth - надёжное зеркало)
     model_repo: str = "unsloth/Qwen3-1.7B-GGUF"
     model_file: str = "Qwen3-1.7B-Q8_0.gguf"  # ~1.8 GB
 
@@ -210,9 +330,9 @@ class SummarizerConfig:
     n_ctx: int = 4096
     n_threads: int = 0  # 0 = auto (физические ядра)
     n_gpu_layers: int = -1  # -1 = все на GPU если доступен
-    temperature: float = 0.7  # Для thinking mode лучше 0.6-0.7
+    temperature: float = 0.4  # Более стабильные ответы для PM
     top_p: float = 0.9
-    max_tokens: int = 2048  # Больше для thinking (размышления + ответ)
+    max_tokens: int = 8096  # Большой лимит для длинных саммари и reasoning
     repeat_penalty: float = 1.1
     enable_thinking: bool = True  # Включить режим размышлений Qwen3
 
@@ -535,21 +655,53 @@ class Summarizer:
         )
         self._metrics = SummarizationMetrics()
 
-    def _get_prompt(self, key: str) -> str:
-        """Получить промпт с учётом кастомизации."""
+    def _get_prompt(self, key: str, is_dialog: bool = False) -> str:
+        """
+        Получить промпт с учётом кастомизации и формата диалога.
+
+        Args:
+            key: Ключ промпта (system, short, extraction, aggregation)
+            is_dialog: True если текст содержит разметку спикеров
+        """
+        # Стандартные промпты
         defaults = {
             "system": SYSTEM_PROMPT,
             "short": SHORT_PROMPT,
             "extraction": EXTRACTION_PROMPT,
             "aggregation": AGGREGATION_PROMPT,
         }
+
+        # Промпты для диалогов со спикерами
+        dialog_prompts = {
+            "system": DIALOG_SYSTEM_PROMPT,
+            "short": DIALOG_SHORT_PROMPT,
+            "extraction": DIALOG_EXTRACTION_PROMPT,
+            "aggregation": DIALOG_AGGREGATION_PROMPT,
+        }
+
+        # Кастомные промпты имеют приоритет
         if self.config.custom_prompts and key in self.config.custom_prompts:
             return self.config.custom_prompts[key]
+
+        # Выбираем промпт в зависимости от формата
+        if is_dialog:
+            return dialog_prompts.get(key, defaults.get(key, ""))
         return defaults.get(key, "")
+
+    def _is_dialog_format(self, text: str) -> bool:
+        """
+        Проверяет, содержит ли текст разметку спикеров.
+
+        Returns:
+            True если найдены метки SPEAKER_XX:
+        """
+        return bool(re.search(r'SPEAKER_\d+:', text))
 
     @property
     def is_loaded(self) -> bool:
         """Проверить, загружена ли модель."""
+        if self.config.provider == "openrouter":
+            return self._model_loaded  # Для OpenRouter модель не нужна
         return self._model_loaded and self.model is not None
 
     def load_model(
@@ -558,13 +710,37 @@ class Summarizer:
         progress_callback: Optional[SummaryProgressCallback] = None,
     ) -> None:
         """
-        Загрузить модель Qwen3.
+        Загрузить модель (локальную Qwen3 или проверить OpenRouter).
 
         Args:
             models_dir: Директория для моделей (по умолчанию ~/.cache/mindtype)
             progress_callback: Callback для отображения прогресса
         """
         if self._model_loaded:
+            return
+
+        # Для OpenRouter не нужна локальная модель
+        if self.config.provider == "openrouter":
+            if progress_callback:
+                progress_callback("Проверка OpenRouter API...", 50, 100)
+
+            # Проверяем ключ
+            if not self.config.openrouter_api_key:
+                raise RuntimeError("OpenRouter API ключ не задан")
+            if not self.config.openrouter_model:
+                raise RuntimeError("OpenRouter модель не выбрана")
+
+            # Проверяем валидность ключа
+            from .openrouter import OpenRouterClient, OpenRouterAuthError
+            try:
+                client = OpenRouterClient(self.config.openrouter_api_key)
+                client.validate_api_key()
+            except OpenRouterAuthError as e:
+                raise RuntimeError(f"Неверный API ключ OpenRouter: {e}")
+
+            self._model_loaded = True
+            if progress_callback:
+                progress_callback("OpenRouter готов", 100, 100)
             return
 
         try:
@@ -667,6 +843,89 @@ class Summarizer:
         Returns:
             Сгенерированный текст
         """
+        # Выбор провайдера
+        if self.config.provider == "openrouter":
+            return self._generate_openrouter(prompt, system_prompt, max_tokens, thinking_callback)
+
+        return self._generate_local(prompt, system_prompt, max_tokens, thinking_callback)
+
+    def _generate_openrouter(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        thinking_callback: Optional[ThinkingCallback] = None,
+    ) -> str:
+        """Генерация через OpenRouter API."""
+        from .openrouter import OpenRouterClient, OpenRouterError
+
+        if not self.config.openrouter_api_key:
+            raise RuntimeError("OpenRouter API ключ не задан")
+        if not self.config.openrouter_model:
+            raise RuntimeError("OpenRouter модель не выбрана")
+
+        # Используем кастомный или дефолтный системный промпт
+        system_prompt = system_prompt or self._get_prompt("system")
+
+        # Проверяем кэш
+        cache_key = f"openrouter:{self.config.openrouter_model}:{system_prompt}|||{prompt}"
+        if self._cache:
+            cached = self._cache.get(cache_key)
+            if cached:
+                return cached
+
+        # Создаём клиент
+        client = OpenRouterClient(self.config.openrouter_api_key)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            if thinking_callback:
+                # Стриминг с колбэком
+                result = client.chat_completion(
+                    messages=messages,
+                    model=self.config.openrouter_model,
+                    max_tokens=max_tokens or self.config.max_tokens,
+                    temperature=self.config.temperature,
+                    stream=True,
+                    on_token=thinking_callback,
+                    reasoning=self.config.openrouter_reasoning,
+                    reasoning_effort=self.config.openrouter_reasoning_effort,
+                )
+            else:
+                result = client.chat_completion(
+                    messages=messages,
+                    model=self.config.openrouter_model,
+                    max_tokens=max_tokens or self.config.max_tokens,
+                    temperature=self.config.temperature,
+                    stream=False,
+                    reasoning=self.config.openrouter_reasoning,
+                    reasoning_effort=self.config.openrouter_reasoning_effort,
+                )
+        except OpenRouterError as e:
+            logger.error(f"OpenRouter ошибка: {e}")
+            raise RuntimeError(f"Ошибка OpenRouter: {e}")
+
+        # Обновляем метрики
+        self._metrics.llm_calls += 1
+
+        # Сохраняем в кэш
+        if self._cache:
+            self._cache.set(cache_key, result)
+
+        return result.strip()
+
+    def _generate_local(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        thinking_callback: Optional[ThinkingCallback] = None,
+    ) -> str:
+        """Генерация через локальную модель Qwen3."""
         if not self.is_loaded:
             raise RuntimeError("Модель не загружена")
 
@@ -707,16 +966,45 @@ class Summarizer:
             )
             result = response["choices"][0]["message"]["content"].strip()
 
+            # Логируем ответ
+            llm_logger.debug(f"PROMPT: {prompt[:200]}...")
+            llm_logger.debug(f"RESPONSE: {result}")
+
             # Обновляем метрики
             if "usage" in response:
                 self._metrics.total_generation_tokens += response["usage"].get("completion_tokens", 0)
 
         # Если был thinking mode, извлекаем ответ после </think>
-        if self.config.enable_thinking and "</think>" in result:
-            # Формат: <think>размышления</think>ответ
-            parts = result.split("</think>", 1)
-            if len(parts) > 1:
-                result = parts[1].strip()
+        if self.config.enable_thinking:
+            if "</think>" in result:
+                # Формат: <think>размышления</think>ответ
+                parts = result.split("</think>", 1)
+                if len(parts) > 1:
+                    result = parts[1].strip()
+            elif "<think>" in result:
+                # Если тег не закрыт, значит ответ пуст или в процессе
+                logger.warning("LLM не закрыла тег </think>, ответ может быть пустым.")
+                # Попробуем взять всё, что после <think> если там есть текст без тегов
+                result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+                if not result and "<think>" in result:
+                     # Если всё еще пусто, значит LLM только размышляла
+                     raise ValueError("LLM выдала только размышления без итогового текста.")
+
+        # Очистка от Markdown мусора (иногда модель пишет ```markdown или подобное в начале)
+        result = re.sub(r'^```[a-zA-Z]*\n', '', result)
+        result = re.sub(r'\n```$', '', result)
+        result = result.strip()
+
+        # Если результат пуст или слишком короткий
+        if not result:
+            raise ValueError("LLM вернула пустой результат.")
+
+        if len(result) < 50:
+            # Проверяем, не является ли это просто заголовками без содержания
+            clean_content = re.sub(r'#.*?\n', '', result).strip()
+            if len(clean_content) < 10:
+                logger.error(f"LLM вернула слишком короткий ответ ({len(result)} симв): {result}")
+                raise ValueError("LLM вернула слишком короткий или неполный ответ.")
 
         # Обновляем метрики
         self._metrics.llm_calls += 1
@@ -768,6 +1056,11 @@ class Summarizer:
                         thinking_callback("\n[Готово]\n")
 
         self._metrics.total_generation_tokens += len(full_response.split())
+
+        # Логируем ответ
+        llm_logger.debug(f"PROMPT (STREAMING): {messages[-1]['content'][:200]}...")
+        llm_logger.debug(f"RESPONSE: {full_response}")
+
         return full_response
 
     def _ensure_russian(
@@ -805,10 +1098,11 @@ class Summarizer:
     def _extract_from_chunk(
         self,
         chunk: Chunk,
+        is_dialog: bool = False,
         thinking_callback: Optional[ThinkingCallback] = None,
     ) -> str:
         """Извлечь факты из одного чанка."""
-        extraction_prompt = self._get_prompt("extraction")
+        extraction_prompt = self._get_prompt("extraction", is_dialog=is_dialog)
         prompt = extraction_prompt.format(chunk_text=chunk.text)
         facts = self._ensure_russian(prompt, thinking_callback=thinking_callback)
 
@@ -826,11 +1120,12 @@ class Summarizer:
     def _aggregate_facts(
         self,
         facts: List[str],
+        is_dialog: bool = False,
         thinking_callback: Optional[ThinkingCallback] = None,
     ) -> str:
         """Агрегировать факты в финальное саммари."""
         combined = "\n\n".join([f"[Чанк {i+1}]\n{f}" for i, f in enumerate(facts)])
-        aggregation_prompt = self._get_prompt("aggregation")
+        aggregation_prompt = self._get_prompt("aggregation", is_dialog=is_dialog)
         prompt = aggregation_prompt.format(extracted_facts=combined, n_chunks=len(facts))
         return self._ensure_russian(prompt, thinking_callback=thinking_callback)
 
@@ -852,18 +1147,32 @@ class Summarizer:
         Returns:
             Кортеж (саммари, метрики)
         """
+        if not transcript or not transcript.strip():
+            logger.warning("Summarizer: пустой входной текст.")
+            raise ValueError("Текст транскрипции пуст, саммаризация невозможна.")
+
         if not self.is_loaded:
             raise RuntimeError("Модель не загружена. Вызовите load_model() сначала.")
 
         start_time = time.time()
         self._metrics = SummarizationMetrics()
 
+        # Очистка от "призрачных" спикеров, если их слишком много
+        speakers = set(re.findall(r'SPEAKER_(\d+):', transcript))
+        if len(speakers) > 15:
+            logger.info(f"Summarizer: Обнаружено {len(speakers)} спикеров. Упрощаем разметку.")
+            transcript = re.sub(r'SPEAKER_\d+:', "Участник:", transcript)
+
+        # Определяем формат текста (диалог со спикерами или нет)
+        is_dialog = self._is_dialog_format(transcript)
+
         # Оцениваем размер
         estimated_tokens = self._chunker.estimate_tokens(transcript)
         self._metrics.input_tokens = estimated_tokens
 
         if progress_callback:
-            progress_callback("Анализ транскрипции...", 5, 100)
+            format_info = "протокола встречи" if is_dialog else "транскрипции"
+            progress_callback(f"Анализ {format_info}...", 5, 100)
 
         # Выбираем стратегию
         if estimated_tokens < self.config.short_threshold:
@@ -873,10 +1182,11 @@ class Summarizer:
             if progress_callback:
                 progress_callback("Генерация саммари...", 20, 100)
 
-            if use_few_shot:
+            if use_few_shot and not is_dialog:
+                # Few-shot только для стандартного формата
                 prompt = FULL_PROMPT_WITH_EXAMPLE.format(transcript=transcript)
             else:
-                short_prompt = self._get_prompt("short")
+                short_prompt = self._get_prompt("short", is_dialog=is_dialog)
                 prompt = short_prompt.format(transcript=transcript)
 
             summary = self._ensure_russian(prompt, thinking_callback=thinking_callback)
@@ -899,7 +1209,7 @@ class Summarizer:
                 if thinking_callback:
                     thinking_callback(f"\n[Чанк {i+1}/{len(chunks)}]\n")
 
-                facts = self._extract_from_chunk(chunk, thinking_callback=thinking_callback)
+                facts = self._extract_from_chunk(chunk, is_dialog=is_dialog, thinking_callback=thinking_callback)
                 extracted_facts.append(facts)
 
             # Этап 2: Агрегация
@@ -909,7 +1219,7 @@ class Summarizer:
             if thinking_callback:
                 thinking_callback("\n[Агрегация фактов...]\n")
 
-            summary = self._aggregate_facts(extracted_facts, thinking_callback=thinking_callback)
+            summary = self._aggregate_facts(extracted_facts, is_dialog=is_dialog, thinking_callback=thinking_callback)
 
         # Валидация
         validation = validate_facts(summary, transcript)

@@ -52,6 +52,19 @@ def _default_config() -> Dict[str, Any]:
         "overlay_margin": 20,                # Отступ от края экрана
         "overlay_wave_gain": 1.5,            # Усиление волн (1.0 - 10.0)
         "overlay_opacity": 230,              # Прозрачность фона (0-255)
+        # Саммаризация
+        "summary_provider": "local",         # "local" или "openrouter"
+        "openrouter_api_key": "",            # API ключ OpenRouter
+        "openrouter_model": "",              # ID модели (например "anthropic/claude-3-haiku")
+        "openrouter_reasoning": False,       # Включить reasoning mode
+        "openrouter_reasoning_effort": "medium",  # low / medium / high
+        # Постобработка транскрипций
+        "enable_postprocessing": True,      # Включить постобработку
+        "postprocessing_diarization": True,  # Диаризация спикеров (MFCC + sklearn, лёгкая)
+        "postprocessing_punctuation": True,  # Восстановление пунктуации
+        "postprocessing_fillers": True,      # Удаление слов-паразитов
+        "postprocessing_normalize": True,    # Нормализация чисел/дат
+        "postprocessing_correct": True,      # Коррекция ошибок ASR
     }
 
 

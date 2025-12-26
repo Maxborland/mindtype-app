@@ -103,8 +103,10 @@ LOG_HTTP_REQUESTS: bool = _get_env_bool("MINDTYPE_LOG_HTTP", False)
 # Application Info
 # =============================================================================
 
+from .version import __version__
+
 # Версия приложения (используется для проверки обновлений)
-APP_VERSION: str = "1.0.0"
+APP_VERSION: str = __version__
 
 # Название приложения
 APP_NAME: str = "MindType"

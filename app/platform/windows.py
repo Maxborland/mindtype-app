@@ -392,10 +392,18 @@ class WindowsTextInserter(BaseTextInserter):
             return False
 
         try:
-            # Мягко восстанавливаем фокус
+            # Полное восстановление фокуса на целевое окно
             if self._window_manager.has_saved_window:
-                self._window_manager.restore_window_soft()
-                time.sleep(delay + 0.05)
+                self._window_manager.restore_window()
+                time.sleep(delay + 0.1) # Увеличиваем задержку для надежного переключения
+
+            # Проверка текущего активного окна
+            current_hwnd = user32.GetForegroundWindow()
+            # Если мы всё еще в нашем окне, вставка может не сработать
+            if self._window_manager._our_window and current_hwnd == self._window_manager._our_window:
+                # Попытка №2: форсированное переключение
+                self._window_manager.restore_window()
+                time.sleep(0.2)
 
             # Сохраняем предыдущий буфер обмена
             prev_clip: Optional[str] = None
@@ -408,7 +416,7 @@ class WindowsTextInserter(BaseTextInserter):
             pyperclip.copy(text)
             time.sleep(0.05)
 
-            # Освобождаем модификаторы
+            # Освобождаем модификаторы (Ctrl, Shift, Alt, Win), которые могут быть зажаты
             self._release_modifiers()
             time.sleep(0.05)
 
@@ -424,7 +432,9 @@ class WindowsTextInserter(BaseTextInserter):
                     pass
 
             return True
-        except Exception:
+        except Exception as e:
+            if 'logger' in globals():
+                logger.error(f"Ошибка вставки текста: {e}")
             return False
 
     def type_text(self, text: str) -> bool:

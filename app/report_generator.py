@@ -299,6 +299,85 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             margin-left: 8px;
         }}
 
+        /* Участники встречи */
+        .speakers-panel {{
+            background-color: #f8f8ff;
+            border: 2px solid #000000;
+            padding: 16px;
+            margin-bottom: 16px;
+        }}
+
+        .speaker-cards {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 12px;
+        }}
+
+        .speaker-card {{
+            background-color: #ffffff;
+            border: 1px solid #c0c0c0;
+            padding: 12px;
+            min-width: 180px;
+            flex: 1;
+        }}
+
+        .speaker-id {{
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }}
+
+        .speaker-stats {{
+            display: flex;
+            gap: 16px;
+            font-size: 12px;
+            color: #666666;
+        }}
+
+        .speaker-stat {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+
+        /* Цвета спикеров */
+        .speaker-0 {{ border-left: 4px solid #FF6B6B; }}
+        .speaker-1 {{ border-left: 4px solid #4ECDC4; }}
+        .speaker-2 {{ border-left: 4px solid #45B7D1; }}
+        .speaker-3 {{ border-left: 4px solid #96CEB4; }}
+        .speaker-4 {{ border-left: 4px solid #FFEAA7; }}
+        .speaker-5 {{ border-left: 4px solid #DDA0DD; }}
+        .speaker-6 {{ border-left: 4px solid #98D8C8; }}
+        .speaker-7 {{ border-left: 4px solid #F7DC6F; }}
+
+        .speaker-tag {{
+            font-weight: bold;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            margin-right: 8px;
+        }}
+
+        .speaker-tag-0 {{ background-color: #FF6B6B; color: white; }}
+        .speaker-tag-1 {{ background-color: #4ECDC4; color: white; }}
+        .speaker-tag-2 {{ background-color: #45B7D1; color: white; }}
+        .speaker-tag-3 {{ background-color: #96CEB4; color: white; }}
+        .speaker-tag-4 {{ background-color: #FFEAA7; color: #333; }}
+        .speaker-tag-5 {{ background-color: #DDA0DD; color: white; }}
+        .speaker-tag-6 {{ background-color: #98D8C8; color: #333; }}
+        .speaker-tag-7 {{ background-color: #F7DC6F; color: #333; }}
+
+        /* Сегменты со спикерами */
+        .segment.speaker-0 {{ border-left: 4px solid #FF6B6B; }}
+        .segment.speaker-1 {{ border-left: 4px solid #4ECDC4; }}
+        .segment.speaker-2 {{ border-left: 4px solid #45B7D1; }}
+        .segment.speaker-3 {{ border-left: 4px solid #96CEB4; }}
+        .segment.speaker-4 {{ border-left: 4px solid #FFEAA7; }}
+        .segment.speaker-5 {{ border-left: 4px solid #DDA0DD; }}
+        .segment.speaker-6 {{ border-left: 4px solid #98D8C8; }}
+        .segment.speaker-7 {{ border-left: 4px solid #F7DC6F; }}
+
         /* Для печати */
         @media print {{
             body {{
@@ -372,7 +451,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-value">{char_count}</div>
                     <div class="stat-label">{label_characters}</div>
                 </div>
+                <div class="stat-item">
+                    <div class="stat-value">{speaker_count}</div>
+                    <div class="stat-label">{label_speakers}</div>
+                </div>
             </div>
+
+            {speakers_section}
 
             {summary_section}
 
@@ -401,9 +486,29 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 </html>
 '''
 
-SEGMENT_TEMPLATE = '''<div class="segment">
+SEGMENT_TEMPLATE = '''<div class="segment {speaker_class}">
     <div class="segment-time">{time}</div>
-    <div class="segment-text">{text}</div>
+    <div class="segment-text">{speaker_tag}{text}</div>
+</div>
+'''
+
+SPEAKERS_SECTION_TEMPLATE = '''
+<div class="speakers-panel">
+    <div class="section-title">{title}</div>
+    <div class="speaker-cards">
+        {speaker_cards}
+    </div>
+</div>
+'''
+
+SPEAKER_CARD_TEMPLATE = '''
+<div class="speaker-card speaker-{index}">
+    <div class="speaker-id">{speaker_name}</div>
+    <div class="speaker-stats">
+        <span class="speaker-stat">⏱ {duration}</span>
+        <span class="speaker-stat">💬 {segments} {segments_label}</span>
+        <span class="speaker-stat">📝 {words} {words_label}</span>
+    </div>
 </div>
 '''
 
@@ -428,9 +533,11 @@ class ReportGenerator:
                 "label_segments": "сегментов",
                 "label_words": "слов",
                 "label_characters": "символов",
+                "label_speakers": "участников",
                 "section_full_text": "Полный текст",
                 "section_segments": "Сегменты с таймкодами",
                 "section_summary": "Саммари",
+                "section_speakers": "Участники встречи",
                 "summary_badge": "AI",
                 "footer_text": "Создано с помощью MindType — AI транскрипция",
             },
@@ -444,9 +551,11 @@ class ReportGenerator:
                 "label_segments": "segments",
                 "label_words": "words",
                 "label_characters": "characters",
+                "label_speakers": "speakers",
                 "section_full_text": "Full Text",
                 "section_segments": "Segments with Timestamps",
                 "section_summary": "Summary",
+                "section_speakers": "Meeting Participants",
                 "summary_badge": "AI",
                 "footer_text": "Created with MindType — AI Transcription",
             },
@@ -460,9 +569,11 @@ class ReportGenerator:
                 "label_segments": "Segmente",
                 "label_words": "Wörter",
                 "label_characters": "Zeichen",
+                "label_speakers": "Teilnehmer",
                 "section_full_text": "Volltext",
                 "section_segments": "Segmente mit Zeitstempeln",
                 "section_summary": "Zusammenfassung",
+                "section_speakers": "Besprechungsteilnehmer",
                 "summary_badge": "KI",
                 "footer_text": "Erstellt mit MindType — KI-Transkription",
             },
@@ -476,9 +587,11 @@ class ReportGenerator:
                 "label_segments": "segments",
                 "label_words": "mots",
                 "label_characters": "caractères",
+                "label_speakers": "participants",
                 "section_full_text": "Texte complet",
                 "section_segments": "Segments avec horodatage",
                 "section_summary": "Résumé",
+                "section_speakers": "Participants à la réunion",
                 "summary_badge": "IA",
                 "footer_text": "Créé avec MindType — Transcription IA",
             },
@@ -492,9 +605,11 @@ class ReportGenerator:
                 "label_segments": "segmentos",
                 "label_words": "palabras",
                 "label_characters": "caracteres",
+                "label_speakers": "participantes",
                 "section_full_text": "Texto completo",
                 "section_segments": "Segmentos con marcas de tiempo",
                 "section_summary": "Resumen",
+                "section_speakers": "Participantes de la reunión",
                 "summary_badge": "IA",
                 "footer_text": "Creado con MindType — Transcripción IA",
             },
@@ -508,9 +623,11 @@ class ReportGenerator:
                 "label_segments": "段落",
                 "label_words": "词数",
                 "label_characters": "字符",
+                "label_speakers": "参与者",
                 "section_full_text": "完整文本",
                 "section_segments": "带时间戳的段落",
                 "section_summary": "摘要",
+                "section_speakers": "会议参与者",
                 "summary_badge": "AI",
                 "footer_text": "由 MindType 创建 — AI 转录",
             },
@@ -524,9 +641,11 @@ class ReportGenerator:
                 "label_segments": "セグメント",
                 "label_words": "単語",
                 "label_characters": "文字",
+                "label_speakers": "参加者",
                 "section_full_text": "全文",
                 "section_segments": "タイムスタンプ付きセグメント",
                 "section_summary": "要約",
+                "section_speakers": "会議参加者",
                 "summary_badge": "AI",
                 "footer_text": "MindType で作成 — AI 文字起こし",
             },
@@ -665,6 +784,37 @@ class ReportGenerator:
 
         return '\n'.join(html_parts)
 
+    def _get_speaker_index(self, speaker_id: str) -> int:
+        """Получить индекс спикера из ID (SPEAKER_00 -> 0)."""
+        import re
+        match = re.search(r'SPEAKER_(\d+)', speaker_id)
+        if match:
+            return int(match.group(1)) % 8  # Макс 8 цветов
+        return 0
+
+    def _generate_speakers_section(self, result: TranscriptionResult) -> str:
+        """Сгенерировать секцию участников встречи."""
+        if not result.has_speakers or not result.speaker_stats:
+            return ""
+
+        speaker_cards = ""
+        for stat in result.speaker_stats:
+            index = self._get_speaker_index(stat.speaker_id)
+            speaker_cards += SPEAKER_CARD_TEMPLATE.format(
+                index=index,
+                speaker_name=html.escape(stat.speaker_name),
+                duration=stat.duration_formatted,
+                segments=stat.segment_count,
+                segments_label=self._labels.get("label_segments", "сегментов"),
+                words=stat.word_count,
+                words_label=self._labels.get("label_words", "слов"),
+            )
+
+        return SPEAKERS_SECTION_TEMPLATE.format(
+            title=self._labels.get("section_speakers", "Участники встречи"),
+            speaker_cards=speaker_cards,
+        )
+
     def generate_html(self, result: TranscriptionResult, output_path: Optional[Path] = None) -> str:
         """
         Сгенерировать HTML отчёт.
@@ -676,18 +826,31 @@ class ReportGenerator:
         Returns:
             HTML строка
         """
-        # Генерируем сегменты
+        # Генерируем сегменты с поддержкой спикеров
         segments_html = ""
         for seg in result.segments:
+            speaker_class = ""
+            speaker_tag = ""
+
+            if seg.speaker:
+                index = self._get_speaker_index(seg.speaker)
+                speaker_class = f"speaker-{index}"
+                speaker_tag = f'<span class="speaker-tag speaker-tag-{index}">{html.escape(seg.speaker)}</span>'
+
             segments_html += SEGMENT_TEMPLATE.format(
                 time=f"{seg.start_formatted} - {seg.end_formatted}",
-                text=html.escape(seg.text)
+                text=html.escape(seg.text),
+                speaker_class=speaker_class,
+                speaker_tag=speaker_tag,
             )
 
         # Подсчёт статистики
         full_text = result.full_text
         word_count = len(full_text.split())
         char_count = len(full_text)
+
+        # Генерируем секцию участников (если есть)
+        speakers_section = self._generate_speakers_section(result)
 
         # Генерируем секцию саммари (если есть)
         summary_section = ""
@@ -716,6 +879,7 @@ class ReportGenerator:
             label_segments=self._labels["label_segments"],
             label_words=self._labels["label_words"],
             label_characters=self._labels["label_characters"],
+            label_speakers=self._labels.get("label_speakers", "участников"),
             section_full_text=self._labels["section_full_text"],
             section_segments=self._labels["section_segments"],
             footer_text=self._labels["footer_text"],
@@ -732,8 +896,10 @@ class ReportGenerator:
             segment_count=len(result.segments),
             word_count=word_count,
             char_count=char_count,
+            speaker_count=result.num_speakers if result.num_speakers > 0 else "—",
 
             # Контент
+            speakers_section=speakers_section,
             summary_section=summary_section,
             full_text=html.escape(full_text),
             segments_html=segments_html,

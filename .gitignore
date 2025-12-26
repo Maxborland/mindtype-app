@@ -24,6 +24,7 @@ wheels/
 
 # Virtual Environment
 venv/
+venv_gpu/
 ENV/
 env/
 .venv
@@ -62,6 +63,7 @@ dist/
 *.exe
 *.dmg
 *.AppImage
+!bin/**/*.exe
 offline_whisper/
 nuitka-crash-report.xml
 
