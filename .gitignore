@@ -4,9 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -53,11 +51,14 @@ models/**/*.pth
 !models/**/vocabulary.txt
 !models/config.json
 
-# Build artifacts
-build/
+# Build and Dist
+build_nuitka/
+build_temp/
 dist/
-*.spec
-*.toc
+main.dist/
+MindType.dist/
+MindType.build/
+MindType.onefile-build/
 *.pyz
 *.pkg
 *.exe
