@@ -67,7 +67,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpulse0 libasound2 libportaudio2
+          sudo apt-get install -y libpulse0 libasound2 libportaudio2 libvulkan-dev
           chmod +x ${{ matrix.build_script }}
           ${{ matrix.build_script }} ${{ github.ref_name }} --clean
 
