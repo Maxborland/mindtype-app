@@ -39,8 +39,8 @@ python-dotenv>=1.0.0
 llama-cpp-python>=0.3.0
 
 # Постобработка транскрипций
-# Восстановление пунктуации
-deepmultilingualpunctuation>=1.0.0
+# Восстановление пунктуации (rule-based fallback)
+# deepmultilingualpunctuation удален для уменьшения размера (torch ~4GB)
 
 # Аудио обработка
 librosa>=0.10.0
