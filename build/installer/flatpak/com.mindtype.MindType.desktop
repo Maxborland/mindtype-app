@@ -1,0 +1,24 @@
+[Desktop Entry]
+Type=Application
+Name=MindType
+GenericName=Speech to Text
+Comment=Offline speech-to-text transcription using Whisper AI
+Exec=mindtype %F
+Icon=com.mindtype.MindType
+Categories=AudioVideo;Audio;Utility;
+Keywords=speech;voice;transcription;whisper;ai;dictation;
+Terminal=false
+StartupNotify=true
+StartupWMClass=MindType
+
+
+
+
+
+
+
+
+
+
+
+

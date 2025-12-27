@@ -60,16 +60,30 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: Install dependencies
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          # Установка зависимостей без кэша для экономии места
           pip install --no-cache-dir -r requirements.txt
           pip install --no-cache-dir nuitka ordered-set zstandard
-          
-          # Для macOS/Linux ставим пре-билд версию llama-cpp-python, чтобы избежать падений компиляции
-          # На Windows она обычно ставится нормально, но для надежности укажем общие параметры
-          pip install --no-cache-dir llama-cpp-python --force-reinstall --upgrade --prefer-binary
+
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir nuitka ordered-set zstandard
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          # Отключаем автодетект CPU для избежания ошибок компиляции llama-cpp на ARM64
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_METAL=ON"
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir nuitka ordered-set zstandard
 
       - name: Build with Nuitka (Windows)
         if: matrix.os == 'windows-latest'
@@ -81,7 +95,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpulse0 libasound2 libportaudio2 libvulkan-dev
+          # libasound2t64 - новое имя пакета в Ubuntu 24.04 (Noble)
+          sudo apt-get install -y libpulse0 libasound2t64 libportaudio2 libvulkan-dev
           chmod +x ${{ matrix.build_script }}
           ${{ matrix.build_script }} ${{ github.ref_name }} --clean
 
