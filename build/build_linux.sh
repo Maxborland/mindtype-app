@@ -32,6 +32,9 @@ else
     VERSION=$(get_app_version)
 fi
 
+# Remove 'v' from version for Nuitka (must be numeric tuple)
+VERSION="${VERSION#v}"
+
 echo "============================================"
 echo "  MindType - Linux Build (Nuitka)           "
 echo "============================================"
@@ -62,7 +65,7 @@ if ! python3 -c "import nuitka" 2>/dev/null; then
     echo "  - Nuitka not found. Installing..."
     pip3 install nuitka ordered-set zstandard
 else
-    NUITKA_VER=$(python3 -c "import nuitka; print(nuitka.__version__)" 2>/dev/null)
+    NUITKA_VER=$(python3 -m nuitka --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
     echo "  - Nuitka: v$NUITKA_VER"
 fi
 

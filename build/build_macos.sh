@@ -16,7 +16,7 @@ BUILD_DIR="$ROOT_DIR/build_nuitka"
 get_app_version() {
     local version_file="$ROOT_DIR/app/version.py"
     if [ -f "$version_file" ]; then
-        local version=$(grep -oP '__version__\s*=\s*"\K[^"]+' "$version_file" | head -1)
+        local version=$(grep -E '__version__\s*=\s*"[^"]+"' "$version_file" | sed 's/.*"\([^"]*\)".*/\1/' | head -1)
         if [ -n "$version" ]; then
             echo "$version"
             return 0
@@ -31,6 +31,9 @@ if [ -n "$1" ] && [[ "$1" != "--"* ]]; then
 else
     VERSION=$(get_app_version)
 fi
+
+# Remove 'v' from version for Nuitka (must be numeric tuple)
+VERSION="${VERSION#v}"
 
 echo "============================================"
 echo "  MindType - macOS Build (Nuitka)           "
@@ -62,7 +65,7 @@ if ! python3 -c "import nuitka" 2>/dev/null; then
     echo "  - Nuitka not found. Installing..."
     pip3 install nuitka ordered-set zstandard
 else
-    NUITKA_VER=$(python3 -c "import nuitka; print(nuitka.__version__)" 2>/dev/null)
+    NUITKA_VER=$(python3 -m nuitka --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
     echo "  - Nuitka: v$NUITKA_VER"
 fi
 

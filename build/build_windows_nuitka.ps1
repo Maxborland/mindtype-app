@@ -40,6 +40,13 @@ if ([string]::IsNullOrEmpty($Version)) {
     Write-Host "Version read from app/env.py: $Version" -ForegroundColor Gray
 }
 
+# Remove 'v' from version for Nuitka (must be numeric tuple)
+$NumericVersion = $Version -replace '^v', ''
+if ($NumericVersion -notmatch '^\d+\.\d+\.\d+') {
+    # If it's just 1.1, Nuitka might want 1.1.0.0
+    if ($NumericVersion -match '^\d+\.\d+$') { $NumericVersion += ".0.0" }
+}
+
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  MindType - Windows Build (Nuitka)        " -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
@@ -99,7 +106,7 @@ try {
 # Check Nuitka
 try {
     $null = python -c "import nuitka" 2>&1
-    $nuitkaVersion = python -c "import nuitka; print(nuitka.__version__)" 2>&1
+    $nuitkaVersion = python -m nuitka --version 2>&1 | Select-String -Pattern '\d+\.\d+' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
     Write-Host "  - Nuitka: v$nuitkaVersion" -ForegroundColor Green
 } catch {
     Write-Host "  - Nuitka not found. Installing..." -ForegroundColor Yellow
@@ -153,8 +160,8 @@ $NuitkaArgs = @(
     "--output-filename=MindType.exe"
     "--company-name=MindType"
     "--product-name=MindType"
-    "--file-version=$Version"
-    "--product-version=$Version"
+    "--file-version=$NumericVersion"
+    "--product-version=$NumericVersion"
     "`"--file-description=MindType - Offline Voice Transcription`""
     "`"--copyright=Copyright 2024 MindType`""
     "--lto=yes"
