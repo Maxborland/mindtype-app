@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <DisplayName>MindType Core</DisplayName>
+    <Description>Main application files for MindType.</Description>
+    <Version>1.1.0</Version>
+    <ReleaseDate>2024-12-27</ReleaseDate>
+    <Default>true</Default>
+    <ForcedInstallation>true</ForcedInstallation>
+    <Script>script.qs</Script>
+</Package>
+

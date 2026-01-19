@@ -1,0 +1,202 @@
+"""
+Unit тесты для модуля audio.py
+
+Тестируем AudioRecorder без реального доступа к микрофону
+используя mocking.
+"""
+
+import numpy as np
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch, PropertyMock
+
+from app.audio import AudioRecorder
+
+
+class TestAudioRecorder:
+    """Тесты для класса AudioRecorder."""
+
+    def test_init_defaults(self):
+        """Проверяем значения по умолчанию при инициализации."""
+        recorder = AudioRecorder()
+
+        assert recorder.samplerate == 16000
+        assert recorder.channels == 1
+        assert recorder.dtype == "int16"
+        assert recorder.recording is False
+        assert recorder.monitoring is False
+
+    def test_init_custom_params(self):
+        """Проверяем инициализацию с кастомными параметрами."""
+        recorder = AudioRecorder(samplerate=44100, channels=2)
+
+        assert recorder.samplerate == 44100
+        assert recorder.channels == 2
+
+    @patch('app.audio.sd.query_devices')
+    def test_list_input_devices(self, mock_query_devices):
+        """Тест получения списка устройств ввода."""
+        mock_query_devices.return_value = [
+            {'name': 'Microphone 1', 'max_input_channels': 2, 'max_output_channels': 0},
+            {'name': 'Speakers', 'max_input_channels': 0, 'max_output_channels': 2},
+            {'name': 'Microphone 2', 'max_input_channels': 1, 'max_output_channels': 0},
+        ]
+
+        recorder = AudioRecorder()
+        devices = recorder.list_input_devices()
+
+        assert len(devices) == 2
+        assert '0: Microphone 1' in devices
+        assert '2: Microphone 2' in devices
+        assert '1: Speakers' not in devices
+
+    def test_recording_property_initially_false(self):
+        """recording должен быть False до начала записи."""
+        recorder = AudioRecorder()
+        assert recorder.recording is False
+
+    def test_monitoring_property_initially_false(self):
+        """monitoring должен быть False до начала мониторинга."""
+        recorder = AudioRecorder()
+        assert recorder.monitoring is False
+
+    @patch('app.audio.sd.RawInputStream')
+    @patch('app.audio.tempfile.NamedTemporaryFile')
+    def test_start_creates_temp_file(self, mock_tempfile, mock_stream):
+        """При старте записи должен создаваться временный файл."""
+        # Настраиваем mock для временного файла
+        mock_file = MagicMock()
+        mock_file.name = '/tmp/test.wav'
+        mock_tempfile.return_value = mock_file
+
+        # Настраиваем mock для потока
+        mock_stream_instance = MagicMock()
+        mock_stream.return_value = mock_stream_instance
+
+        recorder = AudioRecorder()
+        recorder.start()
+
+        # Проверяем что временный файл создан
+        mock_tempfile.assert_called_once_with(delete=False, suffix='.wav')
+        assert recorder.recording is True
+
+        # Останавливаем для cleanup
+        recorder.stop()
+
+    def test_stop_without_start_returns_none(self):
+        """stop() без предварительного start() возвращает None."""
+        recorder = AudioRecorder()
+        result = recorder.stop()
+        assert result is None
+
+    @patch('app.audio.sd.RawInputStream')
+    def test_start_monitoring_success(self, mock_stream):
+        """Успешный старт мониторинга."""
+        mock_stream_instance = MagicMock()
+        mock_stream.return_value = mock_stream_instance
+
+        recorder = AudioRecorder()
+        level_values = []
+
+        def level_callback(levels):
+            level_values.extend(levels)
+
+        result = recorder.start_monitoring(level_callback=level_callback)
+
+        assert result is True
+        assert recorder.monitoring is True
+
+        recorder.stop_monitoring()
+
+    @patch('app.audio.sd.RawInputStream')
+    def test_stop_monitoring(self, mock_stream):
+        """Остановка мониторинга."""
+        mock_stream_instance = MagicMock()
+        mock_stream.return_value = mock_stream_instance
+
+        recorder = AudioRecorder()
+        recorder.start_monitoring()
+
+        assert recorder.monitoring is True
+
+        recorder.stop_monitoring()
+
+        assert recorder.monitoring is False
+        mock_stream_instance.stop.assert_called_once()
+        mock_stream_instance.close.assert_called_once()
+
+    def test_stop_monitoring_without_start(self):
+        """stop_monitoring() без start_monitoring() не должен падать."""
+        recorder = AudioRecorder()
+        # Не должно выбрасывать исключение
+        recorder.stop_monitoring()
+        assert recorder.monitoring is False
+
+
+class TestAudioLevelCalculation:
+    """Тесты для расчёта уровня громкости."""
+
+    def test_level_normalization(self):
+        """Проверка нормализации уровня к диапазону [0, 1]."""
+        # Создаём тестовые аудио данные
+        # Тихий звук
+        quiet_audio = np.array([100, -100, 50, -50], dtype=np.int16)
+        quiet_rms = np.sqrt(np.mean(quiet_audio.astype(np.float32) ** 2))
+        quiet_normalized = min(1.0, quiet_rms / 2000)
+
+        assert 0.0 <= quiet_normalized <= 1.0
+        assert quiet_normalized < 0.1  # Тихий звук должен быть < 10%
+
+        # Громкий звук
+        loud_audio = np.array([5000, -5000, 4000, -4000], dtype=np.int16)
+        loud_rms = np.sqrt(np.mean(loud_audio.astype(np.float32) ** 2))
+        loud_normalized = min(1.0, loud_rms / 2000)
+
+        assert 0.0 <= loud_normalized <= 1.0
+        assert loud_normalized > quiet_normalized  # Громкий > тихого
+
+    def test_silent_audio_level(self):
+        """Тишина должна давать уровень близкий к нулю."""
+        silent_audio = np.zeros(1000, dtype=np.int16)
+        rms = np.sqrt(np.mean(silent_audio.astype(np.float32) ** 2))
+        normalized = min(1.0, rms / 2000)
+
+        assert normalized == 0.0
+
+    def test_max_level_clipping(self):
+        """Максимальный уровень не должен превышать 1.0."""
+        max_audio = np.full(1000, 32767, dtype=np.int16)
+        rms = np.sqrt(np.mean(max_audio.astype(np.float32) ** 2))
+        normalized = min(1.0, rms / 2000)
+
+        assert normalized == 1.0
+
+
+class TestErrorHandling:
+    """Тесты обработки ошибок."""
+
+    @patch('app.audio.sd.RawInputStream')
+    def test_start_with_invalid_device(self, mock_stream):
+        """start() с несуществующим устройством должен выбрасывать исключение."""
+        import sounddevice as sd
+        mock_stream.side_effect = sd.PortAudioError("Device not found")
+
+        recorder = AudioRecorder()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            recorder.start(device=999)
+
+        assert "Не удалось открыть устройство записи" in str(exc_info.value)
+        assert recorder.recording is False
+
+    @patch('app.audio.sd.RawInputStream')
+    def test_start_monitoring_failure(self, mock_stream):
+        """Неудачный старт мониторинга возвращает False."""
+        import sounddevice as sd
+        mock_stream.side_effect = sd.PortAudioError("Device not found")
+
+        recorder = AudioRecorder()
+        result = recorder.start_monitoring(device=999)
+
+        assert result is False
+        assert recorder.monitoring is False

@@ -1,0 +1,428 @@
+"""
+Linux-специфичная реализация платформенного кода.
+Использует pynput для хоткеев и xdotool/wmctrl для управления окнами.
+"""
+
+import subprocess
+import time
+from typing import Callable, Optional, Set
+
+from PyQt6.QtCore import QObject, Qt, QEvent
+from PyQt6.QtWidgets import QApplication
+
+import pyperclip
+
+from .base import (
+    BasePlatform,
+    BaseHotkeyListener,
+    BaseHotkeyRecorder,
+    BaseWindowManager,
+    BaseTextInserter,
+)
+
+
+# Попробуем импортировать pynput
+try:
+    from pynput import keyboard as pynput_keyboard
+    PYNPUT_AVAILABLE = True
+except ImportError:
+    PYNPUT_AVAILABLE = False
+
+
+def _check_command(cmd: str) -> bool:
+    """Проверить, доступна ли команда."""
+    try:
+        subprocess.run(
+            ["which", cmd],
+            capture_output=True,
+            check=True
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _parse_combo(combo: str) -> tuple:
+    """Парсинг комбинации клавиш в формат pynput."""
+    parts = combo.lower().replace(" ", "").split("+")
+    modifiers = set()
+    key = None
+
+    for part in parts:
+        if part == "ctrl" or part == "control":
+            modifiers.add(pynput_keyboard.Key.ctrl)
+        elif part == "alt":
+            modifiers.add(pynput_keyboard.Key.alt)
+        elif part == "shift":
+            modifiers.add(pynput_keyboard.Key.shift)
+        elif part == "super" or part == "win" or part == "meta":
+            modifiers.add(pynput_keyboard.Key.cmd)
+        elif len(part) == 1:
+            key = pynput_keyboard.KeyCode.from_char(part)
+        else:
+            key_map = {
+                'f1': pynput_keyboard.Key.f1,
+                'f2': pynput_keyboard.Key.f2,
+                'f3': pynput_keyboard.Key.f3,
+                'f4': pynput_keyboard.Key.f4,
+                'f5': pynput_keyboard.Key.f5,
+                'f6': pynput_keyboard.Key.f6,
+                'f7': pynput_keyboard.Key.f7,
+                'f8': pynput_keyboard.Key.f8,
+                'f9': pynput_keyboard.Key.f9,
+                'f10': pynput_keyboard.Key.f10,
+                'f11': pynput_keyboard.Key.f11,
+                'f12': pynput_keyboard.Key.f12,
+                'space': pynput_keyboard.Key.space,
+                'esc': pynput_keyboard.Key.esc,
+                'escape': pynput_keyboard.Key.esc,
+                'tab': pynput_keyboard.Key.tab,
+                'enter': pynput_keyboard.Key.enter,
+                'backspace': pynput_keyboard.Key.backspace,
+            }
+            if part in key_map:
+                key = key_map[part]
+
+    return modifiers, key
+
+
+class LinuxHotkeyListener(BaseHotkeyListener):
+    """Linux реализация слушателя хоткеев через pynput."""
+
+    def __init__(
+        self,
+        combo: str,
+        handler: Optional[Callable[[], None]] = None,
+        *,
+        on_press: Optional[Callable[[], None]] = None,
+        on_release: Optional[Callable[[], None]] = None,
+        push_to_talk: bool = False,
+    ) -> None:
+        super().__init__(combo, handler, on_press=on_press, on_release=on_release, push_to_talk=push_to_talk)
+
+        if not PYNPUT_AVAILABLE:
+            raise RuntimeError("pynput не установлен. Установите: pip install pynput")
+
+        self._listener: Optional[pynput_keyboard.Listener] = None
+        self._pressed_keys: Set = set()
+        self._hotkey_active = False
+        self._modifiers, self._key = _parse_combo(combo)
+
+    def start(self) -> None:
+        if self._listener is not None:
+            return
+
+        self._listener = pynput_keyboard.Listener(
+            on_press=self._on_key_press,
+            on_release=self._on_key_release,
+        )
+        self._listener.start()
+
+    def stop(self) -> None:
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
+        self._pressed_keys.clear()
+        self._hotkey_active = False
+
+    def _on_key_press(self, key) -> None:
+        self._pressed_keys.add(key)
+
+        if self._check_hotkey():
+            if not self._hotkey_active:
+                self._hotkey_active = True
+                if self._on_press:
+                    self._on_press()
+                elif self._handler:
+                    self._handler()
+
+    def _on_key_release(self, key) -> None:
+        self._pressed_keys.discard(key)
+
+        if self._hotkey_active and self._push_to_talk:
+            if not self._check_hotkey():
+                self._hotkey_active = False
+                if self._on_release:
+                    self._on_release()
+
+    def _check_hotkey(self) -> bool:
+        for mod in self._modifiers:
+            if mod not in self._pressed_keys:
+                return False
+
+        if self._key:
+            if self._key not in self._pressed_keys:
+                for pressed in self._pressed_keys:
+                    if hasattr(pressed, 'char') and hasattr(self._key, 'char'):
+                        if pressed.char == self._key.char:
+                            return True
+                return False
+
+        return True
+
+
+class LinuxHotkeyRecorder(BaseHotkeyRecorder, QObject):
+    """Linux реализация записи хоткеев через Qt events."""
+
+    def __init__(self, on_recorded: Callable[[str], None]) -> None:
+        BaseHotkeyRecorder.__init__(self, on_recorded)
+        QObject.__init__(self)
+        self._pressed_keys: Set[int] = set()
+        self._active = False
+        self._app = QApplication.instance()
+
+    def start(self) -> None:
+        if self._active:
+            return
+        self._active = True
+        self._pressed_keys.clear()
+        if self._app:
+            self._app.installEventFilter(self)
+
+    def stop(self) -> None:
+        self._active = False
+        if self._app:
+            self._app.removeEventFilter(self)
+        self._pressed_keys.clear()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if not self._active:
+            return False
+
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key != Qt.Key.Key_unknown:
+                self._pressed_keys.add(key)
+            return True
+
+        elif event.type() == QEvent.Type.KeyRelease:
+            if self._pressed_keys:
+                combo = self._format_combo()
+                self.stop()
+                self._on_recorded(combo)
+            return True
+
+        return False
+
+    def _format_combo(self) -> str:
+        parts = []
+        keys = list(self._pressed_keys)
+
+        if Qt.Key.Key_Control in keys:
+            parts.append("ctrl")
+            keys.remove(Qt.Key.Key_Control)
+        if Qt.Key.Key_Alt in keys:
+            parts.append("alt")
+            keys.remove(Qt.Key.Key_Alt)
+        if Qt.Key.Key_Shift in keys:
+            parts.append("shift")
+            keys.remove(Qt.Key.Key_Shift)
+        if Qt.Key.Key_Meta in keys:
+            parts.append("super")
+            keys.remove(Qt.Key.Key_Meta)
+
+        for k in keys:
+            txt = self._key_to_string(k)
+            if txt:
+                parts.append(txt)
+
+        return "+".join(parts)
+
+    def _key_to_string(self, key_code: int) -> str:
+        if 0x30 <= key_code <= 0x39:
+            return chr(key_code)
+        if 0x41 <= key_code <= 0x5A:
+            return chr(key_code).lower()
+
+        mapping = {
+            Qt.Key.Key_F1: "f1", Qt.Key.Key_F2: "f2", Qt.Key.Key_F3: "f3",
+            Qt.Key.Key_F4: "f4", Qt.Key.Key_F5: "f5", Qt.Key.Key_F6: "f6",
+            Qt.Key.Key_F7: "f7", Qt.Key.Key_F8: "f8", Qt.Key.Key_F9: "f9",
+            Qt.Key.Key_F10: "f10", Qt.Key.Key_F11: "f11", Qt.Key.Key_F12: "f12",
+            Qt.Key.Key_Space: "space",
+            Qt.Key.Key_Escape: "esc",
+            Qt.Key.Key_Tab: "tab",
+            Qt.Key.Key_Backspace: "backspace",
+        }
+        return mapping.get(key_code, "")
+
+
+class LinuxWindowManager(BaseWindowManager):
+    """Linux реализация управления окнами через xdotool."""
+
+    def __init__(self):
+        super().__init__()
+        self._has_xdotool = _check_command("xdotool")
+        self._has_wmctrl = _check_command("wmctrl")
+
+    def get_foreground_window(self) -> Optional[str]:
+        """Получить ID активного окна."""
+        if self._has_xdotool:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "getactivewindow"],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                return result.stdout.strip()
+            except Exception:
+                pass
+        return None
+
+    def get_window_title(self, window) -> str:
+        """Получить заголовок окна."""
+        if window and self._has_xdotool:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "getwindowname", str(window)],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                return result.stdout.strip()
+            except Exception:
+                pass
+        return ""
+
+    def set_foreground_window(self, window) -> bool:
+        """Активировать окно."""
+        if window and self._has_xdotool:
+            try:
+                subprocess.run(
+                    ["xdotool", "windowactivate", str(window)],
+                    check=True
+                )
+                return True
+            except Exception:
+                pass
+        return False
+
+    def minimize_window(self, window) -> bool:
+        """Минимизировать окно."""
+        if window and self._has_xdotool:
+            try:
+                subprocess.run(
+                    ["xdotool", "windowminimize", str(window)],
+                    check=True
+                )
+                return True
+            except Exception:
+                pass
+        return False
+
+
+class LinuxTextInserter(BaseTextInserter):
+    """Linux реализация вставки текста."""
+
+    def __init__(self, window_manager: LinuxWindowManager) -> None:
+        super().__init__(window_manager)
+        self._keyboard_controller = None
+        self._has_xdotool = _check_command("xdotool")
+        if PYNPUT_AVAILABLE:
+            self._keyboard_controller = pynput_keyboard.Controller()
+
+    def insert_text(self, text: str, delay: float = 0.1) -> bool:
+        if not text:
+            return False
+
+        try:
+            # Восстанавливаем фокус
+            if self._window_manager.has_saved_window:
+                self._window_manager.restore_window_soft()
+                time.sleep(delay + 0.05)
+
+            # Сохраняем предыдущий буфер обмена
+            prev_clip = None
+            try:
+                prev_clip = pyperclip.paste()
+            except Exception:
+                pass
+
+            # Копируем текст
+            pyperclip.copy(text)
+            time.sleep(0.05)
+
+            # Вставляем через Ctrl+V
+            if self._keyboard_controller:
+                with self._keyboard_controller.pressed(pynput_keyboard.Key.ctrl):
+                    self._keyboard_controller.tap('v')
+            elif self._has_xdotool:
+                subprocess.run(
+                    ["xdotool", "key", "ctrl+v"],
+                    check=False
+                )
+
+            time.sleep(delay)
+
+            # Восстанавливаем буфер обмена
+            if prev_clip is not None:
+                try:
+                    pyperclip.copy(prev_clip)
+                except Exception:
+                    pass
+
+            return True
+        except Exception:
+            return False
+
+    def type_text(self, text: str) -> bool:
+        if not text:
+            return False
+
+        try:
+            if self._keyboard_controller:
+                self._keyboard_controller.type(text)
+            elif self._has_xdotool:
+                subprocess.run(
+                    ["xdotool", "type", "--", text],
+                    check=False
+                )
+            return True
+        except Exception:
+            return False
+
+
+class LinuxPlatform(BasePlatform):
+    """Linux платформа."""
+
+    _window_manager: Optional[LinuxWindowManager] = None
+
+    @property
+    def name(self) -> str:
+        return "Linux"
+
+    def create_hotkey_listener(
+        self,
+        combo: str,
+        handler: Optional[Callable[[], None]] = None,
+        *,
+        on_press: Optional[Callable[[], None]] = None,
+        on_release: Optional[Callable[[], None]] = None,
+        push_to_talk: bool = False,
+    ) -> LinuxHotkeyListener:
+        return LinuxHotkeyListener(
+            combo, handler,
+            on_press=on_press, on_release=on_release, push_to_talk=push_to_talk
+        )
+
+    def create_hotkey_recorder(
+        self,
+        on_recorded: Callable[[str], None],
+    ) -> LinuxHotkeyRecorder:
+        return LinuxHotkeyRecorder(on_recorded)
+
+    def create_window_manager(self) -> LinuxWindowManager:
+        if self._window_manager is None:
+            self._window_manager = LinuxWindowManager()
+        return self._window_manager
+
+    def create_text_inserter(self) -> LinuxTextInserter:
+        return LinuxTextInserter(self.create_window_manager())
+
+
+
+
+
+
+

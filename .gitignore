@@ -1,0 +1,120 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+/dist*
+
+# Virtual Environment
+venv/
+venv_gpu/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Models (большие файлы, не коммитим - гигабайты!)
+# Исключаем все бинарные файлы моделей
+models/**/*.bin
+models/**/*.safetensors
+models/**/*.onnx
+models/**/*.pt
+models/**/*.pth
+# Оставляем только конфигурационные файлы и README для структуры
+!models/**/config.json
+!models/**/README.md
+!models/**/preprocessor_config.json
+!models/**/tokenizer.json
+!models/**/vocabulary.json
+!models/**/vocabulary.txt
+!models/config.json
+
+# Build and Dist
+build_nuitka/
+build_temp/
+dist/
+main.dist/
+MindType.dist/
+MindType.build/
+MindType.onefile-build/
+*.pyz
+*.pkg
+*.exe
+*.dmg
+*.AppImage
+!bin/**/*.exe
+offline_whisper/
+nuitka-crash-report.xml
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Type checking / Linting
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local configuration (secrets)
+*.local.json
+secrets.json
+credentials.json
+
+# Claude Code local settings
+.claude/
+
+# Build artifacts
+*.spec
+file_version_info.txt
+nul
+build/mindtype/
+
+# Backup directories
+*-backup-*/
+
+# Old/temporary assets
+*_old.*
+

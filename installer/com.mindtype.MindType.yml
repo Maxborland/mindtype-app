@@ -1,0 +1,114 @@
+# =============================================================================
+# Flatpak manifest for MindType
+# Build: flatpak-builder --force-clean build-dir com.mindtype.MindType.yml
+# =============================================================================
+
+app-id: com.mindtype.MindType
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+command: mindtype
+
+finish-args:
+  # X11 + Wayland
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+
+  # Audio (for microphone access)
+  - --socket=pulseaudio
+
+  # GPU acceleration (for ML inference)
+  - --device=dri
+
+  # Network (for license validation and updates)
+  - --share=network
+
+  # Access to home directory (for saving config and models)
+  - --filesystem=home
+
+  # Access to XDG directories
+  - --filesystem=xdg-config
+  - --filesystem=xdg-data
+  - --filesystem=xdg-cache
+
+  # D-Bus access (for system integration)
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+
+  # Environment variables
+  - --env=QT_QPA_PLATFORM=xcb
+
+modules:
+  - name: mindtype
+    buildsystem: simple
+    build-commands:
+      # Create directories
+      - mkdir -p /app/bin
+      - mkdir -p /app/lib/mindtype
+      - mkdir -p /app/share/applications
+      - mkdir -p /app/share/icons/hicolor/16x16/apps
+      - mkdir -p /app/share/icons/hicolor/32x32/apps
+      - mkdir -p /app/share/icons/hicolor/48x48/apps
+      - mkdir -p /app/share/icons/hicolor/64x64/apps
+      - mkdir -p /app/share/icons/hicolor/128x128/apps
+      - mkdir -p /app/share/icons/hicolor/256x256/apps
+      - mkdir -p /app/share/metainfo
+
+      # Copy application files
+      - cp -R MindType/* /app/lib/mindtype/
+
+      # Create launcher script
+      - |
+        cat > /app/bin/mindtype << 'EOF'
+        #!/bin/bash
+        export LD_LIBRARY_PATH="/app/lib/mindtype:$LD_LIBRARY_PATH"
+        export QT_PLUGIN_PATH="/app/lib/mindtype/PyQt6/Qt6/plugins:$QT_PLUGIN_PATH"
+        exec /app/lib/mindtype/MindType "$@"
+        EOF
+      - chmod +x /app/bin/mindtype
+
+      # Install .desktop file
+      - cp com.mindtype.MindType.desktop /app/share/applications/
+
+      # Install icons
+      - |
+        for SIZE in 16 32 48 64 128 256; do
+          if [ -f "icons/${SIZE}x${SIZE}.png" ]; then
+            cp "icons/${SIZE}x${SIZE}.png" "/app/share/icons/hicolor/${SIZE}x${SIZE}/apps/com.mindtype.MindType.png"
+          fi
+        done
+
+      # Install metainfo
+      - cp com.mindtype.MindType.metainfo.xml /app/share/metainfo/
+
+    sources:
+      # Pre-built MindType binary (from Nuitka)
+      - type: dir
+        path: ../../dist/MindType
+        dest: MindType
+
+      # Desktop file
+      - type: file
+        path: flatpak/com.mindtype.MindType.desktop
+
+      # Metainfo
+      - type: file
+        path: flatpak/com.mindtype.MindType.metainfo.xml
+
+      # Icons directory
+      - type: dir
+        path: flatpak/icons
+        dest: icons
+
+
+
+
+
+
+
+
+
+
+
+
