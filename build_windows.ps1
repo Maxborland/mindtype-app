@@ -1,5 +1,5 @@
 # =============================================================================
-# Windows build script with PyArmor obfuscation + PyInstaller
+# Windows build script with PyInstaller
 # =============================================================================
 # Run: .\build_windows.ps1
 # With params: .\build_windows.ps1 -Version "0.9.1" -Clean
@@ -14,8 +14,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir = $ScriptDir
 $DistDir = Join-Path $RootDir "dist"
-$ObfuscatedDir = Join-Path $RootDir "dist_obfuscated"
-$BuildDir = Join-Path $RootDir "build_pyarmor"
+$BuildDir = Join-Path $RootDir "build"
 
 # Function to read version from app/version.py
 function Get-AppVersion {
@@ -38,34 +37,23 @@ if ([string]::IsNullOrEmpty($Version)) {
 }
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  MindType Windows Build (PyArmor)" -ForegroundColor Cyan
+Write-Host "  MindType Windows Build" -ForegroundColor Cyan
 Write-Host "  Version: $Version" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Clean if requested
 if ($Clean) {
-    Write-Host "[1/6] Cleaning previous build..." -ForegroundColor Yellow
+    Write-Host "[1/4] Cleaning previous build..." -ForegroundColor Yellow
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
-    if (Test-Path $ObfuscatedDir) { Remove-Item -Recurse -Force $ObfuscatedDir }
     if (Test-Path $BuildDir) { Remove-Item -Recurse -Force $BuildDir }
     if (Test-Path "*.spec") { Remove-Item -Force "*.spec" }
 } else {
-    Write-Host "[1/6] Skipping clean (use -Clean to clean)" -ForegroundColor Gray
-}
-
-# Check PyArmor
-Write-Host "[2/6] Checking PyArmor..." -ForegroundColor Yellow
-try {
-    $pyarmorVersion = & pyarmor --version 2>&1
-    Write-Host "  PyArmor: $pyarmorVersion" -ForegroundColor Green
-} catch {
-    Write-Host "  PyArmor not found. Installing..." -ForegroundColor Yellow
-    pip install pyarmor
+    Write-Host "[1/4] Skipping clean (use -Clean to clean)" -ForegroundColor Gray
 }
 
 # Check PyInstaller
-Write-Host "[3/6] Checking PyInstaller..." -ForegroundColor Yellow
+Write-Host "[2/4] Checking PyInstaller..." -ForegroundColor Yellow
 try {
     $pyinstallerVersion = & pyinstaller --version 2>&1
     Write-Host "  PyInstaller: $pyinstallerVersion" -ForegroundColor Green
@@ -74,38 +62,8 @@ try {
     pip install pyinstaller
 }
 
-# Obfuscate with PyArmor
-Write-Host "[4/6] Obfuscating with PyArmor..." -ForegroundColor Yellow
-Write-Host "  This may take a few minutes..." -ForegroundColor Gray
-
-# Create obfuscated directory
-if (Test-Path $ObfuscatedDir) { Remove-Item -Recurse -Force $ObfuscatedDir }
-New-Item -ItemType Directory -Force -Path $ObfuscatedDir | Out-Null
-
-# Copy non-Python files first
-Write-Host "  Copying assets..." -ForegroundColor Gray
-Copy-Item -Path "app" -Destination $ObfuscatedDir -Recurse -Force
-Copy-Item -Path "main.py" -Destination $ObfuscatedDir -Force
-
-# Obfuscate Python files
-Write-Host "  Obfuscating Python code..." -ForegroundColor Gray
-Push-Location $ObfuscatedDir
-try {
-    # Obfuscate main.py and app/ directory
-    & pyarmor gen --output . main.py
-    & pyarmor gen --output ./app --recursive ./app
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyArmor obfuscation failed"
-    }
-} finally {
-    Pop-Location
-}
-
-Write-Host "  Obfuscation complete!" -ForegroundColor Green
-
 # Build with PyInstaller
-Write-Host "[5/6] Building with PyInstaller..." -ForegroundColor Yellow
+Write-Host "[3/4] Building with PyInstaller..." -ForegroundColor Yellow
 
 $PyInstallerArgs = @(
     "--name=MindType",
@@ -125,10 +83,9 @@ $PyInstallerArgs = @(
     "--hidden-import=keyring",
     "--hidden-import=keyring.backends",
     "--hidden-import=keyring.backends.Windows",
-    "--collect-all=pyarmor_runtime",
     "--noconfirm",
     "--clean",
-    "$ObfuscatedDir\main.py"
+    "main.py"
 )
 
 & pyinstaller @PyInstallerArgs
@@ -141,7 +98,7 @@ Write-Host "  Build complete!" -ForegroundColor Green
 
 # Create installer with Inno Setup (if available)
 if (-not $NoInstaller) {
-    Write-Host "[6/6] Creating installer..." -ForegroundColor Yellow
+    Write-Host "[4/4] Creating installer..." -ForegroundColor Yellow
 
     $InnoSetup = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
     $IssFile = Join-Path $RootDir "installer\windows.iss"
@@ -158,7 +115,7 @@ if (-not $NoInstaller) {
         Write-Host "  Inno Setup not found, skipping installer" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[6/6] Skipping installer (use without -NoInstaller to create)" -ForegroundColor Gray
+    Write-Host "[4/4] Skipping installer (use without -NoInstaller to create)" -ForegroundColor Gray
 }
 
 # Summary

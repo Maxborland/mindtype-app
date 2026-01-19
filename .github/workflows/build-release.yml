@@ -40,13 +40,13 @@ jobs:
             VERSION="${{ github.ref_name }}"
             VERSION="${VERSION#v}"
           else
-            VERSION=$(grep -oP 'APP_VERSION:\s*str\s*=\s*"\K[^"]+' app/env.py | head -1)
+            VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' app/version.py | head -1)
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
   # ==========================================================================
-  # Build for Windows
+  # Build for Windows (PyArmor + PyInstaller)
   # ==========================================================================
   build-windows:
     needs: prepare
@@ -65,12 +65,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install nuitka ordered-set zstandard
+          pip install pyinstaller
 
-      - name: Build with Nuitka
+      - name: Build with PyInstaller
         run: |
           $env:VERSION = "${{ needs.prepare.outputs.version }}"
-          .\build\build_windows_nuitka.ps1 -Version $env:VERSION -NoInstaller -Clean
+          .\build_windows.ps1 -Version $env:VERSION -NoInstaller -Clean
 
       - name: Install Inno Setup
         run: |
@@ -79,7 +79,7 @@ jobs:
       - name: Create installer
         run: |
           $env:VERSION = "${{ needs.prepare.outputs.version }}"
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$env:VERSION build\installer\windows.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$env:VERSION installer\windows.iss
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -90,175 +90,10 @@ jobs:
           retention-days: 30
 
   # ==========================================================================
-  # Build for Linux
-  # ==========================================================================
-  build-linux:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            patchelf \
-            libportaudio2 \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libegl1 \
-            libgl1 \
-            imagemagick \
-            fuse \
-            libfuse2
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install nuitka ordered-set zstandard
-
-      - name: Build with Nuitka
-        run: |
-          chmod +x build/build_linux_nuitka.sh
-          ./build/build_linux_nuitka.sh --version ${{ needs.prepare.outputs.version }} --clean
-
-      - name: Create AppImage
-        run: |
-          chmod +x build/installer/create_appimage.sh
-          ./build/installer/create_appimage.sh ${{ needs.prepare.outputs.version }}
-
-      - name: Create DEB package
-        run: |
-          chmod +x build/installer/create_deb.sh
-          ./build/installer/create_deb.sh ${{ needs.prepare.outputs.version }}
-
-      - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-artifacts
-          path: |
-            dist/${{ env.APP_NAME }}-${{ needs.prepare.outputs.version }}-x86_64.AppImage
-            dist/mindtype_${{ needs.prepare.outputs.version }}_amd64.deb
-          retention-days: 30
-
-  # ==========================================================================
-  # Build RPM in Fedora container
-  # ==========================================================================
-  build-rpm:
-    needs: [prepare, build-linux]
-    runs-on: ubuntu-22.04
-    container:
-      image: fedora:39
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          dnf install -y \
-            python3.11 \
-            python3.11-pip \
-            python3.11-devel \
-            gcc \
-            gcc-c++ \
-            patchelf \
-            rpm-build \
-            portaudio-devel \
-            libxkbcommon-devel \
-            mesa-libGL-devel \
-            mesa-libEGL-devel \
-            ImageMagick
-
-      - name: Setup Python
-        run: |
-          python3.11 -m pip install --upgrade pip
-          python3.11 -m pip install -r requirements.txt
-          python3.11 -m pip install nuitka ordered-set zstandard
-
-      - name: Build with Nuitka
-        run: |
-          chmod +x build/build_linux_nuitka.sh
-          # Use python3.11 explicitly
-          sed -i 's/python3/python3.11/g' build/build_linux_nuitka.sh
-          ./build/build_linux_nuitka.sh --version ${{ needs.prepare.outputs.version }} --clean
-
-      - name: Create RPM package
-        run: |
-          chmod +x build/installer/create_rpm.sh
-          sed -i 's/python3/python3.11/g' build/installer/create_rpm.sh
-          ./build/installer/create_rpm.sh ${{ needs.prepare.outputs.version }}
-
-      - name: Upload RPM artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rpm-artifacts
-          path: dist/mindtype-*.rpm
-          retention-days: 30
-
-  # ==========================================================================
-  # Build Flatpak
-  # ==========================================================================
-  build-flatpak:
-    needs: [prepare, build-linux]
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Linux build
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-artifacts
-          path: dist/
-
-      - name: Install Flatpak tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
-          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
-
-      - name: Setup Python and rebuild
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Rebuild for Flatpak
-        run: |
-          # Need fresh build for Flatpak packaging
-          sudo apt-get install -y build-essential patchelf libportaudio2
-          pip install -r requirements.txt
-          pip install nuitka ordered-set zstandard
-          chmod +x build/build_linux_nuitka.sh
-          ./build/build_linux_nuitka.sh --version ${{ needs.prepare.outputs.version }} --clean
-
-      - name: Create Flatpak
-        run: |
-          chmod +x build/installer/create_flatpak.sh
-          ./build/installer/create_flatpak.sh ${{ needs.prepare.outputs.version }}
-
-      - name: Upload Flatpak artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: flatpak-artifacts
-          path: dist/com.mindtype.MindType-*.flatpak
-          retention-days: 30
-
-  # ==========================================================================
   # Create GitHub Release
   # ==========================================================================
   create-release:
-    needs: [prepare, build-windows, build-linux, build-rpm, build-flatpak]
+    needs: [prepare, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -289,68 +124,15 @@ jobs:
             **Windows:**
             - `MindType-${{ needs.prepare.outputs.version }}-Setup.exe` - Windows installer
 
-            **Linux:**
-            - `MindType-${{ needs.prepare.outputs.version }}-x86_64.AppImage` - Universal AppImage (all distros)
-            - `mindtype_${{ needs.prepare.outputs.version }}_amd64.deb` - Debian/Ubuntu package
-            - `mindtype-${{ needs.prepare.outputs.version }}-1.x86_64.rpm` - Fedora/RHEL package
-            - `com.mindtype.MindType-${{ needs.prepare.outputs.version }}.flatpak` - Flatpak bundle
+            **Linux & macOS:** Coming soon!
 
             ### Installation
 
             **Windows:** Download and run the setup executable.
 
-            **Linux (AppImage):**
-            ```bash
-            chmod +x MindType-*-x86_64.AppImage
-            ./MindType-*-x86_64.AppImage
-            ```
-
-            **Linux (DEB):**
-            ```bash
-            sudo dpkg -i mindtype_*_amd64.deb
-            sudo apt install -f
-            ```
-
-            **Linux (RPM):**
-            ```bash
-            sudo dnf install mindtype-*.rpm
-            ```
-
-            **Linux (Flatpak):**
-            ```bash
-            flatpak install com.mindtype.MindType-*.flatpak
-            ```
-
           draft: false
           prerelease: false
           files: |
             artifacts/windows-artifacts/*
-            artifacts/linux-artifacts/*
-            artifacts/rpm-artifacts/*
-            artifacts/flatpak-artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ==========================================================================
-  # Cleanup on failure
-  # ==========================================================================
-  cleanup:
-    needs: [build-windows, build-linux, build-rpm, build-flatpak]
-    runs-on: ubuntu-latest
-    if: failure()
-    steps:
-      - name: Notify failure
-        run: |
-          echo "Build failed! Check the logs above for details."
-          exit 1
-
-
-
-
-
-
-
-
-
-
-
