@@ -29,11 +29,6 @@ keyboard>=0.13.5; sys_platform == 'win32'
 pyobjc-framework-Cocoa>=9.0; sys_platform == 'darwin'
 pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'
 
-# Nuitka для сборки
-nuitka>=2.8.0
-ordered-set>=4.1.0
-zstandard>=0.22.0
-
 # Системные и прочее
 python-dotenv>=1.0.0
 scikit-learn>=1.0.0
