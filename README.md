@@ -6,6 +6,11 @@
 
 ![MindType Screenshot](assets/screenshot.png)
 
+Additional screenshots:
+- [Main Window (Alt)](docs/assets/screenshot_app.png)
+- [Main Window (Second View)](docs/assets/screenshot_app2.png)
+- [Error State](docs/assets/screenshot_error.png)
+
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-Beta-green)]()
 [![Linux](https://img.shields.io/badge/Linux-Coming%20Soon-lightgrey)]()

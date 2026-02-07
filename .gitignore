@@ -109,6 +109,7 @@ CLAUDE.md
 .playwright-mcp/
 temp_config.json
 screenshot_*.png
+!docs/assets/screenshot_*.png
 mindtype-tauri/
 .tmp_temp/
 .tmp_appdata/
