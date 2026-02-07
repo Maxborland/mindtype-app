@@ -2,20 +2,30 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+Security fixes are provided for the latest release on the `main` branch.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| Latest (main) | :white_check_mark: |
+| Older releases | :x: |
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Please do **not** open public GitHub issues for security vulnerabilities.
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+Report vulnerabilities via:
+- Email: `info@mindtype.space`
+
+When reporting, please include:
+- A clear description of the issue
+- Reproduction steps or proof of concept
+- Affected version/commit
+- Potential impact
+
+### Response Expectations
+
+- Initial acknowledgment: within 72 hours
+- Triage/update: as soon as validated
+- Fix timeline: depends on severity and complexity
+
+If the report is valid, we will coordinate remediation and disclosure.

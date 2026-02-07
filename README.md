@@ -37,7 +37,7 @@ Additional screenshots:
 
 ### Windows (Beta)
 
-1. Download the latest installer from [Releases](../../releases)
+1. Download the latest installer from the official website: [mindtype.space](https://mindtype.space)
 2. Run `MindType-Setup.exe`
 3. Launch MindType from the Start Menu
 
@@ -142,6 +142,6 @@ If you use MindType in a commercial product, you must open-source your modificat
 
 <div align="center">
 
-**[Download](../../releases)** • **[Website](https://mindtype.space)** • **[Report Bug](../../issues)**
+**[Download](https://mindtype.space)** • **[Website](https://mindtype.space)** • **[Report Bug](../../issues)**
 
 </div>

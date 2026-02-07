@@ -6,7 +6,7 @@ Thank you for your interest in contributing to MindType! This document provides 
 
 ### Reporting Bugs
 
-1. Check if the bug has already been reported in [Issues](https://github.com/anthropics/mindtype/issues)
+1. Check if the bug has already been reported in [Issues](https://github.com/Maxborland/mindtype-app/issues)
 2. If not, create a new issue using the bug report template
 3. Include as much detail as possible:
    - OS version (Windows 10/11, Linux distro, macOS version)
