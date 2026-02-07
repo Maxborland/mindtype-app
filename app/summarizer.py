@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,7 +253,7 @@ DIALOG_SHORT_PROMPT = """ТРАНСКРИПЦИЯ ВСТРЕЧИ:
 @dataclass
 class SummarizerConfig:
     """Конфигурация суммаризатора."""
-    # Провайдер: openai, anthropic, gemini, ollama, openrouter
+    # Провайдер: openai, anthropic, gemini, ollama, openrouter, mindtype_cloud
     provider: str = "openrouter"
 
     # API ключ (для всех провайдеров кроме Ollama)
@@ -291,7 +292,7 @@ class SummarizerConfig:
     # Legacy поля для обратной совместимости
     openrouter_api_key: str = ""
     openrouter_model: str = ""
-    openrouter_reasoning: bool = True
+    openrouter_reasoning: bool = False
     openrouter_reasoning_effort: str = "medium"
     enable_thinking: bool = True
 
@@ -478,8 +479,9 @@ class Summarizer:
         provider_name = self.config.provider.upper()
         if progress_callback: progress_callback(f"Проверка {provider_name} API...", 50, 100)
 
-        # Проверяем наличие API ключа (не требуется для Ollama)
-        if self.config.provider != "ollama" and not self.config.api_key:
+        # Проверяем наличие API ключа (не требуется для Ollama и MindType Cloud без ключа)
+        no_key_providers = ("ollama", "mindtype_cloud")
+        if self.config.provider not in no_key_providers and not self.config.api_key:
             raise RuntimeError(f"API ключ для {provider_name} не задан")
 
         # Создаём и проверяем провайдер
@@ -491,7 +493,7 @@ class Summarizer:
         self._model_loaded = True
         if progress_callback: progress_callback(f"{provider_name} готов", 100, 100)
 
-    def _generate(self, prompt: str, system_prompt: Optional[str] = None, max_tokens: Optional[int] = None, thinking_callback: Optional[ThinkingCallback] = None) -> str:
+    def _generate(self, prompt: str, system_prompt: Optional[str] = None, max_tokens: Optional[int] = None, thinking_callback: Optional[ThinkingCallback] = None, meeting_id: Optional[str] = None) -> str:
         """Сгенерировать ответ через LLM провайдер."""
         if not self._provider:
             self._provider = self._create_provider()
@@ -506,6 +508,13 @@ class Summarizer:
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
         reasoning = self._get_reasoning_config()
 
+        # Дополнительные параметры для MindType Cloud
+        cloud_kwargs = {}
+        if self.config.provider == "mindtype_cloud":
+            cloud_kwargs["task"] = "summarize"
+            if meeting_id:
+                cloud_kwargs["meeting_id"] = meeting_id
+
         # Используем стриминг если есть callback
         if thinking_callback:
             result = self._provider.stream(
@@ -516,6 +525,7 @@ class Summarizer:
                 on_thinking=thinking_callback,  # Для thinking блоков
                 max_tokens=max_tokens or self.config.max_tokens,
                 temperature=self.config.temperature,
+                **cloud_kwargs,
             )
         else:
             result = self._provider.complete(
@@ -524,21 +534,22 @@ class Summarizer:
                 reasoning=reasoning,
                 max_tokens=max_tokens or self.config.max_tokens,
                 temperature=self.config.temperature,
+                **cloud_kwargs,
             )
 
         self._metrics.llm_calls += 1
         if self._cache: self._cache.set(cache_key, result)
         return result.strip()
 
-    def _ensure_russian(self, prompt: str, system_prompt: Optional[str] = None, thinking_callback: Optional[ThinkingCallback] = None) -> str:
+    def _ensure_russian(self, prompt: str, system_prompt: Optional[str] = None, thinking_callback: Optional[ThinkingCallback] = None, meeting_id: Optional[str] = None) -> str:
         for _ in range(self.config.max_language_retries):
-            response = self._generate(prompt, system_prompt, thinking_callback=thinking_callback)
+            response = self._generate(prompt, system_prompt, thinking_callback=thinking_callback, meeting_id=meeting_id)
             if detect_language(response) == "ru": return response
             self._metrics.language_retries += 1
             prompt = f"ВАЖНО: Отвечай ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.\n\n{prompt}"
         return response
 
-    def summarize(self, transcript: str, progress_callback: Optional[SummaryProgressCallback] = None, thinking_callback: Optional[ThinkingCallback] = None) -> Tuple[str, SummarizationMetrics]:
+    def summarize(self, transcript: str, progress_callback: Optional[SummaryProgressCallback] = None, thinking_callback: Optional[ThinkingCallback] = None, meeting_id: Optional[str] = None) -> Tuple[str, SummarizationMetrics]:
         if not transcript.strip(): raise ValueError("Текст транскрипции пуст")
         if not self._model_loaded: self.load_model(progress_callback=progress_callback)
 
@@ -548,22 +559,26 @@ class Summarizer:
         estimated_tokens = self._chunker.estimate_tokens(transcript)
         self._metrics.input_tokens = estimated_tokens
 
+        # Генерируем meeting_id для MindType Cloud (группировка кредитов)
+        if not meeting_id and self.config.provider == "mindtype_cloud":
+            meeting_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, transcript[:500]))
+
         if estimated_tokens < self.config.short_threshold:
             self._metrics.input_chunks = 1
             if progress_callback: progress_callback("Генерация саммари...", 50, 100)
             prompt = self._get_prompt("short", is_dialog=is_dialog).format(transcript=transcript)
-            summary = self._ensure_russian(prompt, thinking_callback=thinking_callback)
+            summary = self._ensure_russian(prompt, thinking_callback=thinking_callback, meeting_id=meeting_id)
         else:
             chunks = self._chunker.chunk(transcript)
             self._metrics.input_chunks = len(chunks)
             facts = []
             for i, chunk in enumerate(chunks):
                 if progress_callback: progress_callback(f"Анализ чанка {i+1}/{len(chunks)}...", 10 + int(70 * (i+1)/len(chunks)), 100)
-                fact = self._ensure_russian(self._get_prompt("extraction", is_dialog=is_dialog).format(chunk_text=chunk.text), thinking_callback=thinking_callback)
+                fact = self._ensure_russian(self._get_prompt("extraction", is_dialog=is_dialog).format(chunk_text=chunk.text), thinking_callback=thinking_callback, meeting_id=meeting_id)
                 facts.append(fact)
 
             if progress_callback: progress_callback("Агрегация...", 90, 100)
-            summary = self._ensure_russian(self._get_prompt("aggregation", is_dialog=is_dialog).format(extracted_facts="\n\n".join(facts), n_chunks=len(facts)), thinking_callback=thinking_callback)
+            summary = self._ensure_russian(self._get_prompt("aggregation", is_dialog=is_dialog).format(extracted_facts="\n\n".join(facts), n_chunks=len(facts)), thinking_callback=thinking_callback, meeting_id=meeting_id)
 
         self._metrics.processing_time_sec = time.time() - start_time
         self._metrics.output_tokens = self._chunker.estimate_tokens(summary)

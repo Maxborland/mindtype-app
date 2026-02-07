@@ -5,6 +5,7 @@
 # This software is the confidential and proprietary information of the Author.
 
 import logging
+import os
 import sys
 import traceback
 from datetime import datetime
@@ -66,6 +67,9 @@ from .hotkeys import HotkeyListener, HotkeyRecorder
 from .inserter import insert_text, focus_manager
 from .licensing import LicenseManager, LicenseStatus
 from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusWidget, TrialExpiredDialog
+from .ui.setup_wizard import SetupWizard
+from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, CreditsHistoryDialog, CreditsHistoryWorker
+from .ui.mode_manager import ModeManager, ModeToggleWidget
 from .overlay import OverlayWidget
 from .report_generator import ReportGenerator
 from .transcriber import Transcriber
@@ -94,6 +98,7 @@ from .updater import Updater, UpdateInfo
 
 # Импорты из UI модуля
 from .ui.styles import STYLESHEET
+from .ui.tokens import COLORS, SPACING, TYPOGRAPHY
 from .ui.icons import create_app_icon
 from .ui.workers import (
     TranscribeWorker,
@@ -102,8 +107,27 @@ from .ui.workers import (
     UpdateDownloadWorker,
     FileTranscriptionWorker,
 )
-# Миксины доступны для будущего рефакторинга:
-# from .ui.mixins import AssistantMixin, FilesMixin, UpdatesMixin, HotkeysMixin
+from .ui.widgets import (
+    TranscriptionEntry,
+    TranscriptionHistoryWidget,
+    JournalEntry,
+    JournalWidget,
+    AssistantDialogHistoryWidget,
+    MicLevelWidget,
+)
+from .ui.file_widgets import (
+    DropZoneWidget,
+    FileQueueItemWidget,
+)
+from .ui.layouts import (
+    FormRow,
+    FormLayout,
+    TwoColumnLayout,
+    SectionBox,
+    ScrollableContent,
+    ActionBar,
+)
+from .ui.components import Separator, EmptyState
 
 
 # Версия приложения (импортируется из version.py)
@@ -114,763 +138,6 @@ from .version import __version__ as APP_VERSION
 # UI КОМПОНЕНТЫ
 # Примечание: STYLESHEET, create_app_icon и воркеры вынесены в модуль app.ui
 # =============================================================================
-
-
-class TranscriptionEntry:
-    """Запись истории транскрипции."""
-    def __init__(self, text: str):
-        self.time = datetime.now()
-        self.text = text
-
-
-class TranscriptionHistoryWidget(QWidget):
-    """Виджет истории транскрипций с возможностью копирования."""
-
-    def __init__(self, translate_func=None, parent=None):
-        super().__init__(parent)
-        self._entries: List[TranscriptionEntry] = []
-        self._max_entries = 20
-        self._translate = translate_func or (lambda x: x)
-        self._build_ui()
-
-    def set_translate_func(self, func):
-        """Установить функцию перевода."""
-        self._translate = func
-        self._update_labels()
-
-    def _build_ui(self):
-        self.setStyleSheet("background-color: #ffffff;")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        # Заголовок секции
-        header = QHBoxLayout()
-        self._title_label = QLabel(self._translate("history"))
-        self._title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        header.addWidget(self._title_label)
-        header.addStretch()
-        layout.addLayout(header)
-
-        # Последняя транскрипция (крупная)
-        last_section = QFrame()
-        last_section.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
-        last_layout = QVBoxLayout(last_section)
-        last_layout.setContentsMargins(8, 8, 8, 8)
-        last_layout.setSpacing(6)
-
-        last_header = QHBoxLayout()
-        self._last_label = QLabel(self._translate("last_transcription"))
-        self._last_label.setStyleSheet("font-size: 11px;")
-        last_header.addWidget(self._last_label)
-        last_header.addStretch()
-
-        self._copy_btn = QPushButton(self._translate("copy"))
-        self._copy_btn.setMinimumWidth(70)
-        self._copy_btn.clicked.connect(self._copy_last)
-        last_header.addWidget(self._copy_btn)
-
-        last_layout.addLayout(last_header)
-
-        self._last_text = QLabel(self._translate("no_transcriptions"))
-        self._last_text.setStyleSheet("font-size: 12px;")
-        self._last_text.setWordWrap(True)
-        self._last_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        last_layout.addWidget(self._last_text)
-
-        layout.addWidget(last_section)
-
-        # История (список)
-        self._history_scroll = QScrollArea()
-        self._history_scroll.setWidgetResizable(True)
-        self._history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._history_scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
-
-        self._history_content = QWidget()
-        self._history_content.setStyleSheet("background-color: #ffffff;")
-        self._history_layout = QVBoxLayout(self._history_content)
-        self._history_layout.setContentsMargins(0, 0, 8, 0)
-        self._history_layout.setSpacing(4)
-        self._history_layout.addStretch()
-
-        self._history_scroll.setWidget(self._history_content)
-        layout.addWidget(self._history_scroll, stretch=1)
-
-    def _update_labels(self):
-        """Обновить все переводимые тексты."""
-        self._title_label.setText(self._translate("history"))
-        self._last_label.setText(self._translate("last_transcription"))
-        self._copy_btn.setText(self._translate("copy"))
-        if not self._entries:
-            self._last_text.setText(self._translate("no_transcriptions"))
-
-    def add_transcription(self, text: str):
-        """Добавить новую транскрипцию."""
-        if not text.strip():
-            return
-
-        entry = TranscriptionEntry(text)
-        self._entries.insert(0, entry)
-
-        # Ограничиваем количество
-        if len(self._entries) > self._max_entries:
-            self._entries = self._entries[:self._max_entries]
-
-        self._rebuild_history()
-
-    def _rebuild_history(self):
-        """Перестроить UI истории."""
-        # Обновляем последнюю транскрипцию
-        if self._entries:
-            self._last_text.setText(self._entries[0].text)
-        else:
-            self._last_text.setText(self._translate("no_transcriptions"))
-
-        # Очищаем старые элементы
-        while self._history_layout.count() > 1:
-            item = self._history_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # Добавляем записи (начиная со второй)
-        for entry in self._entries[1:]:
-            widget = self._create_history_item(entry)
-            self._history_layout.insertWidget(self._history_layout.count() - 1, widget)
-
-    def _create_history_item(self, entry: TranscriptionEntry) -> QWidget:
-        """Создать элемент истории."""
-        widget = QFrame()
-        widget.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-            QFrame:hover {
-                background-color: #dddddd;
-            }
-        """)
-        widget.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(8)
-
-        # Время
-        time_label = QLabel(entry.time.strftime("%H:%M"))
-        time_label.setStyleSheet("font-size: 11px;")
-        time_label.setFixedWidth(40)
-        layout.addWidget(time_label)
-
-        # Текст (обрезаем если длинный)
-        text = entry.text[:80] + "..." if len(entry.text) > 80 else entry.text
-        text_label = QLabel(text)
-        text_label.setStyleSheet("font-size: 11px;")
-        text_label.setWordWrap(False)
-        layout.addWidget(text_label, stretch=1)
-
-        # Делаем весь виджет кликабельным
-        widget.mousePressEvent = lambda e, t=entry.text: self._copy_text(t)
-
-        return widget
-
-    def _copy_last(self):
-        """Копировать последнюю транскрипцию."""
-        if self._entries:
-            self._copy_text(self._entries[0].text)
-
-    def _copy_text(self, text: str):
-        """Копировать текст в буфер обмена."""
-        clipboard = QApplication.clipboard()
-        clipboard.setText(text)
-
-        # Показываем feedback
-        original_text = self._copy_btn.text()
-        self._copy_btn.setText(self._translate("copied"))
-        QTimer.singleShot(1500, lambda: self._copy_btn.setText(original_text))
-
-    def get_last_text(self) -> str:
-        """Получить последнюю транскрипцию."""
-        return self._entries[0].text if self._entries else ""
-
-
-class JournalEntry:
-    """Запись в журнале транскрипций."""
-    def __init__(self, status: str, title_key: str, text: str = "", extra_key: str = "", is_translatable: bool = True):
-        self.time = datetime.now()
-        self.status = status  # "success", "pending", "error"
-        self.title_key = title_key  # Ключ перевода или готовый текст
-        self.text = text
-        self.extra_key = extra_key  # Ключ перевода или готовый текст для доп. инфо
-        self.is_translatable = is_translatable  # Нужен ли перевод
-
-
-class JournalWidget(QWidget):
-    """Виджет журнала транскрипций."""
-
-    def __init__(self, translate_func=None, parent=None):
-        super().__init__(parent)
-        self._entries: List[JournalEntry] = []
-        self._max_entries = 50
-        self._translate = translate_func or (lambda x: x)
-        self._build_ui()
-
-    def set_translate_func(self, func):
-        """Установить функцию перевода."""
-        self._translate = func
-        self._rebuild_ui()
-
-    def _build_ui(self):
-        self.setStyleSheet("background-color: #ffffff;")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Скроллящаяся область
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
-
-        self._content = QWidget()
-        self._content.setStyleSheet("background-color: #ffffff;")
-        self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 0, 8, 0)
-        self._content_layout.setSpacing(8)
-        self._content_layout.addStretch()
-
-        scroll.setWidget(self._content)
-        layout.addWidget(scroll)
-
-    def add_entry(self, status: str, title_key: str, text: str = "", extra_key: str = "", is_translatable: bool = True):
-        """Добавить запись в журнал."""
-        entry = JournalEntry(status, title_key, text, extra_key, is_translatable)
-        self._entries.insert(0, entry)
-
-        # Ограничиваем количество записей
-        if len(self._entries) > self._max_entries:
-            self._entries = self._entries[:self._max_entries]
-
-        self._rebuild_ui()
-
-    def _rebuild_ui(self):
-        """Перестроить UI журнала."""
-        # Удаляем старые виджеты
-        while self._content_layout.count() > 1:
-            item = self._content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # Добавляем записи
-        for entry in self._entries:
-            widget = self._create_entry_widget(entry)
-            self._content_layout.insertWidget(self._content_layout.count() - 1, widget)
-
-    def _create_entry_widget(self, entry: JournalEntry) -> QWidget:
-        """Создать виджет записи."""
-        widget = QFrame()
-        widget.setObjectName("journalEntry")
-        widget.setFrameShape(QFrame.Shape.StyledPanel)
-        widget.setStyleSheet("""
-            QFrame#journalEntry {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-            QFrame#journalEntry QLabel {
-                background: transparent;
-            }
-        """)
-
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
-
-        # Время
-        time_label = QLabel(entry.time.strftime("%H:%M:%S"))
-        time_label.setObjectName("journalTime")
-        time_label.setFixedWidth(60)
-        time_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(time_label)
-
-        # Статус-индикатор (точка)
-        status_dot = QLabel("*")
-        status_dot.setStyleSheet("font-size: 12px;")
-        status_dot.setFixedWidth(16)
-        layout.addWidget(status_dot)
-
-        # Контент
-        content_layout = QVBoxLayout()
-        content_layout.setSpacing(2)
-
-        # Заголовок со статусом
-        title_row = QHBoxLayout()
-
-        status_label = QLabel()
-        if entry.status == "success":
-            status_label.setText("[OK]")
-            status_label.setStyleSheet("font-weight: bold;")
-        elif entry.status == "pending":
-            status_label.setText("[...]")
-        else:
-            status_label.setText("[X]")
-            status_label.setStyleSheet("font-weight: bold;")
-        title_row.addWidget(status_label)
-
-        # Переводим заголовок если нужно
-        title_text = self._translate(entry.title_key) if entry.is_translatable else entry.title_key
-        title_label = QLabel(title_text)
-        title_label.setStyleSheet("font-weight: bold;")
-        title_row.addWidget(title_label)
-        title_row.addStretch()
-
-        content_layout.addLayout(title_row)
-
-        # Текст (если есть)
-        if entry.text:
-            text_label = QLabel(entry.text[:100] + "..." if len(entry.text) > 100 else entry.text)
-            text_label.setObjectName("journalText")
-            text_label.setWordWrap(True)
-            content_layout.addWidget(text_label)
-
-        # Дополнительная информация (если есть)
-        if entry.extra_key:
-            # Переводим extra если нужно
-            extra_text = self._translate(entry.extra_key) if entry.is_translatable else entry.extra_key
-            extra_label = QLabel(extra_text)
-            extra_label.setStyleSheet("font-size: 11px; font-style: italic;")
-            content_layout.addWidget(extra_label)
-
-        layout.addLayout(content_layout, stretch=1)
-
-        return widget
-
-    def clear(self):
-        """Очистить журнал."""
-        self._entries = []
-        self._rebuild_ui()
-
-
-class AssistantDialogHistoryWidget(QWidget):
-    """Виджет истории диалогов ассистента."""
-
-    dialog_selected = pyqtSignal(object)  # Сигнал при выборе диалога (Dialog)
-    continue_clicked = pyqtSignal(object)  # Сигнал при нажатии "Продолжить"
-    delete_clicked = pyqtSignal(str)  # Сигнал при удалении (dialog_id)
-
-    def __init__(self, translate_func=None, parent=None):
-        super().__init__(parent)
-        self._translate = translate_func or (lambda x: x)
-        self._dialogs: List[Dialog] = []
-        self._selected_dialog: Optional[Dialog] = None
-        self._build_ui()
-
-    def set_translate_func(self, func):
-        """Установить функцию перевода."""
-        self._translate = func
-        self._update_labels()
-
-    def _build_ui(self):
-        self.setStyleSheet("background-color: #ffffff;")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        # === Левая панель: список диалогов ===
-        left_panel = QFrame()
-        left_panel.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
-        left_panel.setFixedWidth(200)
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
-
-        # Заголовок
-        header = QFrame()
-        header.setFixedHeight(24)
-        header.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
-                border: none;
-            }
-        """)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 2, 8, 2)
-        self._title_label = QLabel(self._translate("assistant_dialogs"))
-        self._title_label.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 10px;")
-        header_layout.addWidget(self._title_label)
-        left_layout.addWidget(header)
-
-        # Список диалогов
-        self._dialog_scroll = QScrollArea()
-        self._dialog_scroll.setWidgetResizable(True)
-        self._dialog_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._dialog_scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
-
-        self._dialog_list = QWidget()
-        self._dialog_list.setStyleSheet("background-color: #ffffff;")
-        self._dialog_list_layout = QVBoxLayout(self._dialog_list)
-        self._dialog_list_layout.setContentsMargins(4, 4, 4, 4)
-        self._dialog_list_layout.setSpacing(4)
-        self._dialog_list_layout.addStretch()
-
-        self._dialog_scroll.setWidget(self._dialog_list)
-        left_layout.addWidget(self._dialog_scroll, stretch=1)
-
-        # Кнопка "Очистить всё"
-        self._clear_all_btn = QPushButton(self._translate("clear_all_dialogs"))
-        self._clear_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-                padding: 4px 8px;
-                font-size: 10px;
-            }
-            QPushButton:hover {
-                background-color: #c0c0c0;
-            }
-        """)
-        self._clear_all_btn.clicked.connect(self._on_clear_all)
-        left_layout.addWidget(self._clear_all_btn)
-
-        layout.addWidget(left_panel)
-
-        # === Правая панель: просмотр диалога ===
-        right_panel = QFrame()
-        right_panel.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
-
-        # Заголовок
-        preview_header = QFrame()
-        preview_header.setFixedHeight(24)
-        preview_header.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
-                border: none;
-            }
-        """)
-        preview_header_layout = QHBoxLayout(preview_header)
-        preview_header_layout.setContentsMargins(8, 2, 8, 2)
-        self._preview_label = QLabel(self._translate("dialog_preview"))
-        self._preview_label.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 10px;")
-        preview_header_layout.addWidget(self._preview_label)
-        right_layout.addWidget(preview_header)
-
-        # Контент диалога
-        self._preview_scroll = QScrollArea()
-        self._preview_scroll.setWidgetResizable(True)
-        self._preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._preview_scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
-
-        self._preview_content = QWidget()
-        self._preview_content.setStyleSheet("background-color: #ffffff;")
-        self._preview_layout = QVBoxLayout(self._preview_content)
-        self._preview_layout.setContentsMargins(8, 8, 8, 8)
-        self._preview_layout.setSpacing(6)
-
-        self._placeholder_label = QLabel(self._translate("select_dialog"))
-        self._placeholder_label.setStyleSheet("color: #808080; font-style: italic;")
-        self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_layout.addWidget(self._placeholder_label)
-        self._preview_layout.addStretch()
-
-        self._preview_scroll.setWidget(self._preview_content)
-        right_layout.addWidget(self._preview_scroll, stretch=1)
-
-        # Кнопки управления
-        controls = QFrame()
-        controls.setStyleSheet("QFrame { background-color: #ffffff; border-top: 1px solid #808080; }")
-        controls_layout = QHBoxLayout(controls)
-        controls_layout.setContentsMargins(8, 6, 8, 6)
-        controls_layout.setSpacing(8)
-
-        self._continue_btn = QPushButton(self._translate("continue_dialog"))
-        self._continue_btn.setEnabled(False)
-        self._continue_btn.clicked.connect(self._on_continue)
-        controls_layout.addWidget(self._continue_btn)
-
-        self._delete_btn = QPushButton(self._translate("delete_dialog"))
-        self._delete_btn.setEnabled(False)
-        self._delete_btn.clicked.connect(self._on_delete)
-        controls_layout.addWidget(self._delete_btn)
-
-        controls_layout.addStretch()
-        right_layout.addWidget(controls)
-
-        layout.addWidget(right_panel, stretch=1)
-
-    def _update_labels(self):
-        """Обновить переводимые тексты."""
-        self._title_label.setText(self._translate("assistant_dialogs"))
-        self._preview_label.setText(self._translate("dialog_preview"))
-        self._clear_all_btn.setText(self._translate("clear_all_dialogs"))
-        self._continue_btn.setText(self._translate("continue_dialog"))
-        self._delete_btn.setText(self._translate("delete_dialog"))
-        if not self._selected_dialog:
-            self._placeholder_label.setText(self._translate("select_dialog"))
-
-    def refresh(self):
-        """Обновить список диалогов из менеджера."""
-        history_manager = get_dialog_history_manager()
-        self._dialogs = history_manager.get_all_dialogs()
-        self._rebuild_dialog_list()
-
-    def _rebuild_dialog_list(self):
-        """Перестроить список диалогов."""
-        # Очищаем список
-        while self._dialog_list_layout.count() > 1:
-            item = self._dialog_list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        if not self._dialogs:
-            no_dialogs = QLabel(self._translate("no_dialogs"))
-            no_dialogs.setStyleSheet("color: #808080; font-style: italic; font-size: 10px;")
-            no_dialogs.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._dialog_list_layout.insertWidget(0, no_dialogs)
-            return
-
-        for dialog in self._dialogs:
-            item = self._create_dialog_item(dialog)
-            self._dialog_list_layout.insertWidget(self._dialog_list_layout.count() - 1, item)
-
-    def _create_dialog_item(self, dialog: Dialog) -> QWidget:
-        """Создать элемент списка диалогов."""
-        item = QFrame()
-        item.setObjectName(f"dialog_{dialog.id}")
-        item.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #808080;
-            }
-            QFrame:hover {
-                background-color: #e0e0e0;
-            }
-        """)
-        item.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        layout = QVBoxLayout(item)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(2)
-
-        # Заголовок (обрезанный)
-        title = dialog.title or "Новый диалог"
-        title_label = QLabel(title[:30] + "..." if len(title) > 30 else title)
-        title_label.setStyleSheet("font-weight: bold; font-size: 10px; background: transparent;")
-        layout.addWidget(title_label)
-
-        # Дата
-        try:
-            dt = datetime.fromisoformat(dialog.timestamp)
-            date_str = dt.strftime("%d.%m.%Y %H:%M")
-        except Exception:
-            date_str = dialog.timestamp[:16]
-        date_label = QLabel(date_str)
-        date_label.setStyleSheet("color: #808080; font-size: 9px; background: transparent;")
-        layout.addWidget(date_label)
-
-        # Клик для выбора
-        item.mousePressEvent = lambda e, d=dialog: self._on_dialog_selected(d)
-
-        return item
-
-    def _on_dialog_selected(self, dialog: Dialog):
-        """Обработка выбора диалога."""
-        self._selected_dialog = dialog
-        self._continue_btn.setEnabled(True)
-        self._delete_btn.setEnabled(True)
-        self._show_dialog_preview(dialog)
-        self.dialog_selected.emit(dialog)
-
-    def _show_dialog_preview(self, dialog: Dialog):
-        """Показать предпросмотр диалога."""
-        # Очищаем preview
-        while self._preview_layout.count() > 0:
-            item = self._preview_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # System prompt (если есть)
-        if dialog.system_prompt:
-            sys_frame = QFrame()
-            sys_frame.setStyleSheet("""
-                QFrame {
-                    background-color: #f0f0f0;
-                    border: 1px dashed #808080;
-                }
-            """)
-            sys_layout = QVBoxLayout(sys_frame)
-            sys_layout.setContentsMargins(6, 4, 6, 4)
-            sys_label = QLabel("System: " + dialog.system_prompt[:100] + ("..." if len(dialog.system_prompt) > 100 else ""))
-            sys_label.setWordWrap(True)
-            sys_label.setStyleSheet("font-size: 9px; color: #606060; background: transparent;")
-            sys_layout.addWidget(sys_label)
-            self._preview_layout.addWidget(sys_frame)
-
-        # Сообщения
-        for msg in dialog.messages:
-            bubble = self._create_message_bubble(msg.role, msg.content)
-            self._preview_layout.addWidget(bubble)
-
-        self._preview_layout.addStretch()
-
-    def _create_message_bubble(self, role: str, content: str) -> QWidget:
-        """Создать пузырёк сообщения."""
-        outer = QWidget()
-        row = QHBoxLayout(outer)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-
-        bubble = QFrame()
-        bubble.setStyleSheet("""
-            QFrame {
-                border: 1px solid #000000;
-                background-color: %s;
-            }
-        """ % ("#dddddd" if role == "user" else "#ffffff"))
-        bubble_layout = QVBoxLayout(bubble)
-        bubble_layout.setContentsMargins(6, 4, 6, 4)
-
-        label = QLabel(content[:200] + ("..." if len(content) > 200 else ""))
-        label.setWordWrap(True)
-        label.setStyleSheet("font-size: 10px; color: #000000; background: transparent;")
-        bubble_layout.addWidget(label)
-
-        if role == "user":
-            row.addStretch()
-            row.addWidget(bubble, stretch=0)
-        else:
-            row.addWidget(bubble, stretch=0)
-            row.addStretch()
-
-        return outer
-
-    def _on_continue(self):
-        """Продолжить выбранный диалог."""
-        if self._selected_dialog:
-            self.continue_clicked.emit(self._selected_dialog)
-
-    def _on_delete(self):
-        """Удалить выбранный диалог."""
-        if self._selected_dialog:
-            dialog_id = self._selected_dialog.id
-            history_manager = get_dialog_history_manager()
-            history_manager.delete_dialog(dialog_id)
-            self._selected_dialog = None
-            self._continue_btn.setEnabled(False)
-            self._delete_btn.setEnabled(False)
-            # Очищаем preview
-            while self._preview_layout.count() > 0:
-                item = self._preview_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            self._placeholder_label = QLabel(self._translate("select_dialog"))
-            self._placeholder_label.setStyleSheet("color: #808080; font-style: italic;")
-            self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._preview_layout.addWidget(self._placeholder_label)
-            self._preview_layout.addStretch()
-            self.refresh()
-            self.delete_clicked.emit(dialog_id)
-
-    def _on_clear_all(self):
-        """Очистить всю историю."""
-        history_manager = get_dialog_history_manager()
-        history_manager.clear_all()
-        self._selected_dialog = None
-        self._continue_btn.setEnabled(False)
-        self._delete_btn.setEnabled(False)
-        self.refresh()
-        # Очищаем preview
-        while self._preview_layout.count() > 0:
-            item = self._preview_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._placeholder_label = QLabel(self._translate("select_dialog"))
-        self._placeholder_label.setStyleSheet("color: #808080; font-style: italic;")
-        self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_layout.addWidget(self._placeholder_label)
-        self._preview_layout.addStretch()
-
-
-class MicLevelWidget(QWidget):
-    """Индикатор уровня микрофона с цветовой шкалой."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(120, 20)
-        self._level = 0.0
-        self._peak = 0.0
-        self._peak_decay = 0.02
-
-    def set_level(self, level: float) -> None:
-        """Установить уровень (0.0 - 1.0)."""
-        self._level = max(0.0, min(1.0, level))
-        # Обновляем пик
-        if self._level > self._peak:
-            self._peak = self._level
-        else:
-            self._peak = max(0.0, self._peak - self._peak_decay)
-        self.update()
-
-    def reset(self) -> None:
-        """Сбросить уровень."""
-        self._level = 0.0
-        self._peak = 0.0
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        from PyQt6.QtGui import QPainter, QColor, QPainterPath, QLinearGradient, QBrush
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        w, h = self.width(), self.height()
-        radius = 4
-
-        # Фон
-        bg_path = QPainterPath()
-        bg_path.addRoundedRect(0, 0, w, h, radius, radius)
-        painter.fillPath(bg_path, QColor(30, 30, 35, 200))
-
-        # Градиент для индикатора уровня
-        level_width = max(0, int((w - 4) * self._level))
-        if level_width > 0:
-            gradient = QLinearGradient(2, 0, w - 2, 0)
-            gradient.setColorAt(0.0, QColor(80, 200, 120))     # Зелёный
-            gradient.setColorAt(0.6, QColor(200, 200, 80))     # Жёлтый
-            gradient.setColorAt(0.85, QColor(255, 140, 80))    # Оранжевый
-            gradient.setColorAt(1.0, QColor(255, 80, 80))      # Красный
-
-            level_path = QPainterPath()
-            level_path.addRoundedRect(2, 2, level_width, h - 4, radius - 1, radius - 1)
-            painter.fillPath(level_path, QBrush(gradient))
-
-        # Индикатор пика (вертикальная линия)
-        if self._peak > 0.05:
-            peak_x = 2 + int((w - 4) * self._peak)
-            peak_color = QColor(255, 255, 255, 180)
-            painter.setPen(peak_color)
-            painter.drawLine(peak_x, 3, peak_x, h - 3)
-
-        # Рамка
-        painter.setPen(QColor(60, 60, 65))
-        painter.drawRoundedRect(0, 0, w - 1, h - 1, radius, radius)
 
 
 class PromptCustomizationDialog(QMainWindow):
@@ -901,18 +168,18 @@ class PromptCustomizationDialog(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["md"])
+        layout.setSpacing(SPACING["sm"])
 
         # Заголовок
         title = QLabel(self._t("prompt_settings"))
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title.setObjectName("panelTitle")
         layout.addWidget(title)
 
         # Выбор пресета
         preset_layout = QHBoxLayout()
         preset_label = QLabel(self._t("preset") + ":")
-        preset_label.setStyleSheet("font-weight: bold;")
+        preset_label.setObjectName("bodyBold")
         preset_layout.addWidget(preset_label)
 
         self.preset_combo = QComboBox()
@@ -933,24 +200,8 @@ class PromptCustomizationDialog(QMainWindow):
         preset_layout.addStretch()
         layout.addLayout(preset_layout)
 
-        # Табы для разных промптов
+        # Табы для разных промптов (используют глобальный STYLESHEET)
         self.prompt_tabs = QTabWidget()
-        self.prompt_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #000000;
-                background-color: #ffffff;
-            }
-            QTabBar::tab {
-                background-color: #e0e0e0;
-                border: 1px solid #000000;
-                padding: 4px 12px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background-color: #ffffff;
-                border-bottom: none;
-            }
-        """)
 
         # Создаём вкладки для каждого промпта
         self.prompt_editors = {}
@@ -967,24 +218,17 @@ class PromptCustomizationDialog(QMainWindow):
         for key, name in prompt_names:
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
-            tab_layout.setContentsMargins(8, 8, 8, 8)
+            tab_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
 
             # Описание
             desc = QLabel(self._get_prompt_description(key))
             desc.setWordWrap(True)
-            desc.setStyleSheet("color: #666666; font-size: 11px; margin-bottom: 8px;")
+            desc.setObjectName("caption")
             tab_layout.addWidget(desc)
 
-            # Редактор
+            # Редактор (использует глобальный стиль QTextEdit)
             editor = QTextEdit()
-            editor.setStyleSheet("""
-                QTextEdit {
-                    font-family: 'Consolas', 'Courier New', monospace;
-                    font-size: 11px;
-                    border: 1px solid #808080;
-                    background-color: #ffffff;
-                }
-            """)
+            editor.setObjectName("codeEditor")
             tab_layout.addWidget(editor)
 
             # Кнопка сброса
@@ -1008,7 +252,7 @@ class PromptCustomizationDialog(QMainWindow):
         buttons_layout.addStretch()
 
         save_btn = QPushButton(self._t("save"))
-        save_btn.setStyleSheet("font-weight: bold;")
+        save_btn.setObjectName("primaryButton")
         save_btn.clicked.connect(self._save_prompts)
         buttons_layout.addWidget(save_btn)
 
@@ -1070,7 +314,8 @@ class PromptCustomizationDialog(QMainWindow):
         # Показываем сообщение
         preset_name = self._presets[self._current_preset]["name"]
         from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.information(self, "Готово", f"Все промпты сброшены к пресету «{preset_name}».")
+        msg = self._t("prompts_reset_message").replace("{preset}", preset_name)
+        QMessageBox.information(self, self._t("prompts_reset"), msg)
 
     def _save_prompts(self):
         """Сохранить промпты и пресет в конфиг."""
@@ -1085,360 +330,6 @@ class PromptCustomizationDialog(QMainWindow):
 
         self.config.update(custom_prompts=custom_prompts, summary_preset=self._current_preset)
         self.close()
-
-
-class DropZoneWidget(QFrame):
-    """Зона drag-and-drop для файлов в стиле Classic Mac OS."""
-    files_dropped = pyqtSignal(list)  # List[Path]
-    clicked = pyqtSignal()
-
-    def __init__(self, translate_func=None, parent=None):
-        super().__init__(parent)
-        self._translate = translate_func or (lambda x: x)
-        self.setAcceptDrops(True)
-        self.setMinimumHeight(100)
-        self._build_ui()
-
-    def set_translate_func(self, func):
-        self._translate = func
-        self._update_texts()
-
-    def _create_folder_icon(self) -> QPixmap:
-        """Создать пиксельную иконку папки в стиле Classic Mac OS."""
-        size = 32
-        pixmap = QPixmap(size, size)
-        pixmap.fill(QColor(0, 0, 0, 0))
-
-        painter = QPainter(pixmap)
-        black = QColor(0, 0, 0)
-
-        # Папка - классический стиль
-        # Верхняя вкладка
-        painter.fillRect(4, 6, 10, 4, black)
-        # Основной прямоугольник (рамка)
-        painter.fillRect(2, 10, 28, 2, black)  # верх
-        painter.fillRect(2, 26, 28, 2, black)  # низ
-        painter.fillRect(2, 10, 2, 18, black)  # лево
-        painter.fillRect(28, 10, 2, 18, black)  # право
-        # Внутренняя часть (белая)
-        painter.fillRect(4, 12, 24, 14, QColor(255, 255, 255))
-        # Линии внутри папки
-        painter.fillRect(6, 16, 20, 2, black)
-        painter.fillRect(6, 22, 14, 2, black)
-
-        painter.end()
-        return pixmap
-
-    def _build_ui(self):
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QFrame:hover {
-                background-color: #f0f0f0;
-            }
-        """)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(4)
-
-        # Пиксельная иконка папки
-        icon_label = QLabel()
-        icon_label.setPixmap(self._create_folder_icon())
-        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setStyleSheet("border: none; background: transparent;")
-        layout.addWidget(icon_label)
-
-        # Основной текст
-        self._main_label = QLabel(self._translate("drag_drop_files"))
-        self._main_label.setStyleSheet("font-weight: bold; font-size: 12px; border: none; background: transparent;")
-        self._main_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._main_label)
-
-        # Подсказка
-        self._sub_label = QLabel(self._translate("or_click_to_select"))
-        self._sub_label.setStyleSheet("font-size: 11px; color: #808080; border: none; background: transparent;")
-        self._sub_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._sub_label)
-
-        # Форматы
-        self._formats_label = QLabel(self._translate("supported_formats"))
-        self._formats_label.setStyleSheet("font-size: 10px; color: #808080; border: none; background: transparent;")
-        self._formats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._formats_label.setWordWrap(True)
-        layout.addWidget(self._formats_label)
-
-    def _update_texts(self):
-        self._main_label.setText(self._translate("drag_drop_files"))
-        self._sub_label.setText(self._translate("or_click_to_select"))
-        self._formats_label.setText(self._translate("supported_formats"))
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            # Проверяем, есть ли поддерживаемые файлы
-            for url in event.mimeData().urls():
-                path = Path(url.toLocalFile())
-                if is_supported_file(path):
-                    event.acceptProposedAction()
-                    self.setStyleSheet("""
-                        QFrame {
-                            background-color: #dddddd;
-                            border: 2px solid #000000;
-                        }
-                    """)
-                    return
-        event.ignore()
-
-    def dragLeaveEvent(self, event):
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QFrame:hover {
-                background-color: #f0f0f0;
-            }
-        """)
-
-    def dropEvent(self, event: QDropEvent):
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QFrame:hover {
-                background-color: #f0f0f0;
-            }
-        """)
-
-        files = []
-        for url in event.mimeData().urls():
-            path = Path(url.toLocalFile())
-            if path.is_file() and is_supported_file(path):
-                files.append(path)
-            elif path.is_dir():
-                # Рекурсивно ищем файлы в папке
-                for ext in ALL_EXTENSIONS:
-                    files.extend(path.rglob(f"*{ext}"))
-
-        if files:
-            self.files_dropped.emit(files)
-            event.acceptProposedAction()
-
-
-class FileQueueItemWidget(QFrame):
-    """Элемент очереди файлов."""
-    remove_clicked = pyqtSignal(object)  # FileTask
-    open_clicked = pyqtSignal(object)  # FileTask
-
-    def __init__(self, task: FileTask, translate_func=None, parent=None):
-        super().__init__(parent)
-        self.task = task
-        self._translate = translate_func or (lambda x: x)
-        self._close_icon = self._create_close_icon()
-        self._open_icon = self._create_open_icon()
-        self._build_ui()
-        self.update_status()
-
-    def _create_close_icon(self) -> QIcon:
-        """Пиксельная ч/б иконка-крестик."""
-        size = 12
-        pm = QPixmap(size, size)
-        pm.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pm)
-        pen = QPen(QColor(0, 0, 0))
-        pen.setWidth(2)
-        p.setPen(pen)
-        p.drawLine(2, 2, size - 3, size - 3)
-        p.drawLine(size - 3, 2, 2, size - 3)
-        p.end()
-        return QIcon(pm)
-
-    def _create_open_icon(self) -> QIcon:
-        """Пиксельная ч/б иконка 'открыть'."""
-        w, h = 12, 12
-        pm = QPixmap(w, h)
-        pm.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pm)
-        black = QColor(0, 0, 0)
-        # Стрелка вправо в квадратных скобках: [>]
-        p.fillRect(2, 2, 2, 8, black)      # левая скобка
-        p.fillRect(8, 4, 2, 4, black)      # основание стрелки
-        p.fillRect(6, 5, 2, 2, black)      # середина
-        p.fillRect(10, 5, 2, 2, black)     # наконечник
-        p.end()
-        return QIcon(pm)
-
-    def set_translate_func(self, func):
-        self._translate = func
-        self.update_status()
-
-    def _create_file_icon(self, is_video: bool) -> QPixmap:
-        """Создать пиксельную иконку файла."""
-        size = 20
-        pixmap = QPixmap(size, size)
-        pixmap.fill(QColor(0, 0, 0, 0))
-
-        painter = QPainter(pixmap)
-        black = QColor(0, 0, 0)
-
-        # Документ с уголком
-        painter.fillRect(2, 0, 14, 2, black)   # верх
-        painter.fillRect(2, 18, 16, 2, black)  # низ
-        painter.fillRect(2, 0, 2, 20, black)   # лево
-        painter.fillRect(16, 4, 2, 16, black)  # право
-        # Уголок
-        painter.fillRect(14, 0, 2, 2, black)
-        painter.fillRect(16, 2, 2, 2, black)
-        painter.fillRect(14, 2, 2, 2, black)
-
-        # Внутренние линии (контент)
-        if is_video:
-            # Треугольник play
-            painter.fillRect(7, 6, 2, 8, black)
-            painter.fillRect(9, 7, 2, 6, black)
-            painter.fillRect(11, 8, 2, 4, black)
-        else:
-            # Ноты
-            painter.fillRect(6, 6, 2, 8, black)
-            painter.fillRect(12, 8, 2, 6, black)
-            painter.fillRect(4, 12, 4, 2, black)
-            painter.fillRect(10, 12, 4, 2, black)
-
-        painter.end()
-        return pixmap
-
-    def _build_ui(self):
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-        """)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
-
-        # Иконка типа файла (пиксельная)
-        icon_label = QLabel()
-        icon_label.setPixmap(self._create_file_icon(self.task.is_video))
-        icon_label.setFixedWidth(24)
-        icon_label.setStyleSheet("border: none;")
-        layout.addWidget(icon_label)
-
-        # Информация о файле
-        info_layout = QVBoxLayout()
-        info_layout.setSpacing(2)
-
-        # Имя файла
-        self._name_label = QLabel(self.task.file_name)
-        self._name_label.setStyleSheet("font-weight: bold; font-size: 12px;")
-        info_layout.addWidget(self._name_label)
-
-        # Статус
-        self._status_label = QLabel("")
-        self._status_label.setStyleSheet("font-size: 11px; color: #808080;")
-        info_layout.addWidget(self._status_label)
-
-        layout.addLayout(info_layout, stretch=1)
-
-        # Прогресс-бар
-        self._progress = QProgressBar()
-        self._progress.setFixedWidth(80)
-        self._progress.setFixedHeight(16)
-        self._progress.setRange(0, 100)
-        self._progress.setTextVisible(False)
-        layout.addWidget(self._progress)
-
-        # Кнопка открыть/удалить
-        self._action_btn = QPushButton("×")
-        self._action_btn.setFixedSize(24, 24)
-        self._action_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                font-weight: bold;
-                border: 1px solid #000000;
-                background: #ffffff;
-                padding: 0;
-            }
-            QPushButton:hover {
-                background: #000000;
-                color: #ffffff;
-            }
-        """)
-        self._action_btn.setText("")
-        self._action_btn.setIconSize(QSize(12, 12))
-        self._action_btn.clicked.connect(self._on_action_clicked)
-        layout.addWidget(self._action_btn)
-
-    def _on_action_clicked(self):
-        if self.task.status == FileStatus.COMPLETED:
-            self.open_clicked.emit(self.task)
-        elif self.task.status in (FileStatus.PENDING, FileStatus.ERROR, FileStatus.CANCELLED):
-            self.remove_clicked.emit(self.task)
-
-    def update_status(self):
-        """Обновить отображение статуса."""
-        status_map = {
-            FileStatus.PENDING: ("status_pending", "#808080"),
-            FileStatus.EXTRACTING: ("status_extracting", "#0066cc"),
-            FileStatus.TRANSCRIBING: ("status_transcribing", "#0066cc"),
-            FileStatus.SUMMARIZING: ("status_summarizing", "#9900cc"),
-            FileStatus.GENERATING: ("status_generating", "#0066cc"),
-            FileStatus.COMPLETED: ("status_completed", "#008800"),
-            FileStatus.ERROR: ("status_error", "#cc0000"),
-            FileStatus.CANCELLED: ("status_cancelled", "#808080"),
-        }
-
-        key, color = status_map.get(self.task.status, ("status_pending", "#808080"))
-        status_text = self._translate(key)
-
-        if self.task.status == FileStatus.ERROR and self.task.error_message:
-            status_text += f": {self.task.error_message[:50]}"
-
-        self._status_label.setText(status_text)
-        self._status_label.setStyleSheet(f"font-size: 11px; color: {color};")
-
-        # Прогресс
-        self._progress.setValue(self.task.progress)
-
-        # Кнопка
-        if self.task.status == FileStatus.COMPLETED:
-            self._action_btn.setIcon(self._open_icon)
-            self._action_btn.setToolTip(self._translate("open_folder"))
-        else:
-            self._action_btn.setIcon(self._close_icon)
-            self._action_btn.setToolTip(self._translate("remove_from_queue"))
-
-        # Прогресс-бар visibility
-        self._progress.setVisible(self.task.status in (
-            FileStatus.EXTRACTING,
-            FileStatus.TRANSCRIBING,
-            FileStatus.SUMMARIZING,
-            FileStatus.GENERATING,
-            FileStatus.PENDING,
-        ))
 
 
 class MainWindow(QMainWindow):
@@ -1459,7 +350,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("MindType")
         self.setWindowIcon(create_app_icon(64))
-        self.setFixedSize(600, 600)
+        self.setMinimumSize(950, 750)
+        self.resize(1000, 780)
 
         self.config = ConfigManager()
         self.audio = AudioRecorder()
@@ -1552,9 +444,155 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(500, self._check_models_on_startup)
 
     def _check_models_on_startup(self) -> None:
-        """Check if any models are available, prompt to download if not."""
-        if not self._has_any_model():
+        """Check if setup is complete and models are available."""
+        # Check if first-run setup was completed
+        setup_completed = self.config.config.get("setup_completed", False)
+
+        if not setup_completed:
+            # Show full setup wizard for new users
+            self._show_setup_wizard()
+        elif not self._has_any_model():
+            # Setup done but no models - show model download only
             self._show_first_run_dialog()
+
+    def _show_setup_wizard(self) -> None:
+        """Show the first-run setup wizard."""
+        wizard = SetupWizard(self.config, self._t, self)
+
+        # Connect model download signal - pass wizard directly via lambda
+        wizard.model_page.download_requested.connect(
+            lambda model_size: self._on_wizard_model_download(model_size, wizard)
+        )
+
+        if wizard.exec():
+            # Wizard completed successfully
+            logger.info("Setup wizard completed")
+
+            # Refresh UI with new settings
+            self._apply_config()
+
+            # Initialize MindType Cloud provider if selected
+            if self.config.config.get("use_mindtype_cloud", False):
+                self._init_mindtype_cloud()
+        else:
+            logger.info("Setup wizard cancelled")
+
+    def _on_wizard_model_download(self, model_size: str, wizard: "SetupWizard") -> None:
+        """Handle model download request from wizard."""
+        logger.info(f"Starting model download: {model_size}")
+
+        # Start download using existing ModelDownloadWorker
+        from .ui.workers import ModelDownloadWorker
+
+        downloader = ModelDownloadWorker(self.transcriber, model_size, self.models_dir)
+        downloader.progress.connect(
+            lambda status, current, total: wizard.model_page.update_progress(
+                int(current / max(total, 1) * 100) if total > 0 else 0,
+                current / (1024 * 1024) if total > 0 else 0,
+                total / (1024 * 1024) if total > 0 else 0,
+            )
+        )
+        downloader.finished.connect(
+            lambda path, err: wizard.model_page.download_finished(err == "")
+        )
+        downloader.start()
+        self._download_worker = downloader  # Keep reference
+        logger.info("Model download worker started")
+
+    def _init_mindtype_cloud(self) -> None:
+        """Initialize MindType Cloud provider."""
+        try:
+            from .llm.mindtype_cloud import MindTypeCloudProvider
+
+            # Получить лицензионный ключ из LicenseManager
+            license_info = self.license_manager.get_license_info()
+            license_key = license_info.license_key or ""
+            self._cloud_provider = MindTypeCloudProvider(license_key=license_key)
+
+            # Update credits balance widget if exists
+            if hasattr(self, '_credits_widget'):
+                self._refresh_credits_balance()
+
+            logger.info("MindType Cloud provider initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize MindType Cloud: {e}")
+
+    def _refresh_credits_balance(self) -> None:
+        """Refresh credits balance from server."""
+        if not hasattr(self, '_cloud_provider') or not self._cloud_provider:
+            return
+
+        if not hasattr(self, '_credits_widget'):
+            return
+
+        self._credits_widget.set_loading(True)
+
+        # Use background worker to avoid blocking UI
+        worker = CreditsRefreshWorker(self._cloud_provider, self)
+        worker.balance_fetched.connect(self._on_credits_fetched)
+        worker.error_occurred.connect(self._on_credits_error)
+        worker.start()
+        self._credits_worker = worker  # Keep reference
+
+    def _on_credits_fetched(self, credits: int) -> None:
+        """Handle credits balance fetched."""
+        if hasattr(self, '_credits_widget'):
+            self._credits_widget.set_balance(credits)
+            logger.info(f"Credits balance updated: {credits}")
+
+    def _on_credits_error(self, error: str) -> None:
+        """Handle credits fetch error."""
+        if hasattr(self, '_credits_widget'):
+            self._credits_widget.set_loading(False)
+            logger.warning(f"Failed to fetch credits: {error}")
+
+    def _on_credits_history_requested(self) -> None:
+        """Загрузить и показать историю кредитов."""
+        if not hasattr(self, '_cloud_provider') or not self._cloud_provider:
+            return
+
+        worker = CreditsHistoryWorker(self._cloud_provider, self)
+        worker.history_fetched.connect(self._on_credits_history_fetched)
+        worker.error_occurred.connect(
+            lambda err: logger.warning(f"Failed to fetch credits history: {err}")
+        )
+        worker.start()
+        self._history_worker = worker  # Keep reference
+
+    def _on_credits_history_fetched(self, credits: int, history: list) -> None:
+        """Показать диалог истории кредитов."""
+        # Обновляем баланс
+        if hasattr(self, '_credits_widget'):
+            self._credits_widget.set_balance(credits)
+
+        dialog = CreditsHistoryDialog(
+            history=history,
+            translate_func=self._t,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _apply_config(self) -> None:
+        """Apply configuration changes after setup wizard."""
+        cfg = self.config.config
+
+        # Update UI language
+        ui_lang = cfg.get("ui_language", "ru")
+        self._ui_lang = ui_lang
+        idx = self.ui_lang_box.findData(ui_lang)
+        if idx >= 0:
+            self.ui_lang_box.setCurrentIndex(idx)
+
+        # Update credits widget visibility based on llm_provider
+        use_cloud = cfg.get("llm_provider", "") == "mindtype_cloud"
+        if hasattr(self, '_credits_widget'):
+            self._credits_widget.setVisible(use_cloud)
+
+        # Initialize cloud provider if needed
+        if use_cloud:
+            self._init_mindtype_cloud()
+
+        logger.info("Configuration applied from setup wizard")
 
     def _has_any_model(self) -> bool:
         """Check if at least one model is downloaded."""
@@ -1603,61 +641,11 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle(self._t("first_run_title"))
         dialog.setFixedWidth(480)
         dialog.setModal(True)
-
-        # Classic Mac OS style
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-            QLabel {
-                color: #000000;
-                font-family: "Chicago", "Geneva", sans-serif;
-            }
-            QComboBox {
-                padding: 4px 8px;
-                border: 2px solid #000000;
-                background: #ffffff;
-                font-family: "Chicago", "Geneva", sans-serif;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid #000000;
-            }
-            QPushButton {
-                padding: 6px 16px;
-                border: 2px solid #000000;
-                background: #ffffff;
-                font-family: "Chicago", "Geneva", sans-serif;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #000000;
-                color: #ffffff;
-            }
-            QPushButton:disabled {
-                border-color: #888888;
-                color: #888888;
-            }
-            QProgressBar {
-                border: 2px solid #000000;
-                background: #ffffff;
-                text-align: center;
-                height: 18px;
-            }
-            QProgressBar::chunk {
-                background-color: #000000;
-            }
-        """)
+        # Использует глобальный STYLESHEET
 
         layout = QVBoxLayout(dialog)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(SPACING["md"])
+        layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
 
         # Welcome message
         welcome = QLabel(self._t("first_run_welcome"))
@@ -1666,7 +654,7 @@ class MainWindow(QMainWindow):
 
         # Model selection
         model_label = QLabel(self._t("first_run_select_model"))
-        model_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        model_label.setObjectName("bodyBold")
         layout.addWidget(model_label)
 
         # Dropdown for model selection
@@ -1732,11 +720,16 @@ class MainWindow(QMainWindow):
     def _populate_model_combo(self) -> None:
         """Populate model combo box with download status indicators."""
         self.model_box.clear()
-        models = ["large-v3", "medium", "small", "tiny", "distil-large-v2", "distil-large-v3"]
+        models = ["large-v3", "medium", "small", "tiny"]
 
         for name in models:
-            model_path = self.models_dir / name
-            is_downloaded = model_path.exists() and (model_path / "model.bin").exists()
+            # Check both formats: ggml-*.bin (whisper.cpp) and name/model.bin (ONNX)
+            ggml_path = self.models_dir / f"ggml-{name}.bin"
+            onnx_path = self.models_dir / name
+            is_downloaded = (
+                ggml_path.exists()
+                or (onnx_path.exists() and (onnx_path / "model.bin").exists())
+            )
 
             if is_downloaded:
                 self.model_box.addItem(f"[OK] {name}", name)
@@ -2208,10 +1201,33 @@ class MainWindow(QMainWindow):
 
         # Главный контейнер
         central = QWidget()
-        central.setStyleSheet("background-color: #ffffff;")
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
+        main_layout.setSpacing(SPACING["lg"])
+
+        # Header bar с кредитами и переключателем режима
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 4)
+
+        # Credits widget (показывается только для MindType Cloud)
+        self._credits_widget = CreditsBalanceWidget(self._t, self)
+        self._credits_widget.history_requested.connect(self._on_credits_history_requested)
+        is_mindtype_cloud = self.config.config.get("llm_provider", "") == "mindtype_cloud"
+        self._credits_widget.setVisible(is_mindtype_cloud)
+        header_layout.addWidget(self._credits_widget)
+
+        # Инициализировать MindType Cloud если выбран
+        if is_mindtype_cloud:
+            self._init_mindtype_cloud()
+
+        header_layout.addStretch()
+
+        # Mode toggle (Simple/Advanced)
+        self._mode_manager = ModeManager(self, self.config, self._t)
+        self._mode_toggle = ModeToggleWidget(self._mode_manager, self._t, self)
+        header_layout.addWidget(self._mode_toggle)
+
+        main_layout.addLayout(header_layout)
 
         # Вкладки - порядок: Основные, Саммари, Настройки
         self.tabs = QTabWidget()
@@ -2228,271 +1244,250 @@ class MainWindow(QMainWindow):
     def _build_basic_tab(self) -> QWidget:
         """Построить вкладку основных настроек."""
         tab = QWidget()
-        tab.setStyleSheet("background-color: #ffffff;")
-        layout = QGridLayout(tab)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(8)
-        layout.setColumnStretch(1, 1)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
+        tab_layout.setSpacing(SPACING["sm"])
 
-        row = 0
+        # Форма с полями
+        form = FormLayout(label_width=140, spacing=SPACING["sm"])
 
         # Аудио вход
-        self.audio_input_label = QLabel(self._t("audio_input"))
         self.mic_box = QComboBox()
-        layout.addWidget(self.audio_input_label, row, 0)
-        layout.addWidget(self.mic_box, row, 1)
-        row += 1
+        self._audio_input_row = form.add_row(self._t("audio_input"), self.mic_box)
+        self.audio_input_label = self._audio_input_row.label
 
         # Хоткей
-        self.hotkey_label = QLabel(self._t("hotkey"))
-        hotkey_row = QHBoxLayout()
+        hotkey_widget = QWidget()
+        hotkey_layout = QHBoxLayout(hotkey_widget)
+        hotkey_layout.setContentsMargins(0, 0, 0, 0)
+        hotkey_layout.setSpacing(SPACING["sm"])
         self.hotkey_edit = QLineEdit()
         self.hotkey_edit.setPlaceholderText("ctrl+alt+v")
         self.hotkey_edit.setReadOnly(True)
         self.hotkey_record_btn = QPushButton(self._t("record_hotkey"))
-        hotkey_row.addWidget(self.hotkey_edit)
-        hotkey_row.addWidget(self.hotkey_record_btn)
-        layout.addWidget(self.hotkey_label, row, 0)
-        layout.addLayout(hotkey_row, row, 1)
-        row += 1
-
-        # Язык приложения
-        self.ui_lang_label = QLabel(self._t("ui_language"))
-        self.ui_lang_box = QComboBox()
-        for code, name in UI_LANGUAGES.items():
-            self.ui_lang_box.addItem(name, code)
-        layout.addWidget(self.ui_lang_label, row, 0)
-        layout.addWidget(self.ui_lang_box, row, 1)
-        row += 1
+        hotkey_layout.addWidget(self.hotkey_edit)
+        hotkey_layout.addWidget(self.hotkey_record_btn)
+        self._hotkey_row = form.add_row(self._t("hotkey"), hotkey_widget)
+        self.hotkey_label = self._hotkey_row.label
 
         # Язык транскрипции
-        self.trans_lang_label = QLabel(self._t("transcription_language"))
         self.trans_lang_box = QComboBox()
         for code, name in WHISPER_LANGUAGES.items():
             display = f"{name} ({code.upper()})" if code != "auto" else name
             self.trans_lang_box.addItem(display, code)
-        layout.addWidget(self.trans_lang_label, row, 0)
-        layout.addWidget(self.trans_lang_box, row, 1)
-        row += 1
+        self._trans_lang_row = form.add_row(self._t("transcription_language"), self.trans_lang_box)
+        self.trans_lang_label = self._trans_lang_row.label
 
         # Статус лицензии
-        self.license_status_label = QLabel(self._t("license_status"))
         self.license_status_widget = LicenseStatusWidget(
             self.license_manager,
             translate_func=self._t
         )
         self.license_status_widget.clicked.connect(self._show_license_dialog)
-        layout.addWidget(self.license_status_label, row, 0)
-        layout.addWidget(self.license_status_widget, row, 1)
-        row += 1
+        self._license_row = form.add_row(self._t("license_status"), self.license_status_widget)
+        self.license_status_label = self._license_row.label
 
-        # Разделитель
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("background-color: #cccccc;")
-        layout.addWidget(separator, row, 0, 1, 2)
-        row += 1
+        # Добавляем форму в таб
+        tab_layout.addWidget(form)
+        tab_layout.addStretch()
 
-        # Обновления
-        self.update_label = QLabel(self._t("current_version"))
-        update_row = QHBoxLayout()
-
-        # Получаем версию из env
-        try:
-            from .env import APP_VERSION
-            current_ver = APP_VERSION
-        except ImportError:
-            current_ver = "1.0.0"
-
-        self.update_version_label = QLabel(f"v{current_ver}")
-        self.update_version_label.setStyleSheet("font-weight: bold;")
-        update_row.addWidget(self.update_version_label)
-        update_row.addStretch()
-
-        self.check_update_btn = QPushButton(self._t("check_updates"))
-        self.check_update_btn.clicked.connect(self._check_for_updates)
-        update_row.addWidget(self.check_update_btn)
-
-        layout.addWidget(self.update_label, row, 0)
-        layout.addLayout(update_row, row, 1)
-        row += 1
-
-        # Статус обновления
-        self.update_status_label = QLabel("")
-        self.update_status_label.setStyleSheet("font-size: 11px;")
-        self.update_status_label.setVisible(False)
-        layout.addWidget(self.update_status_label, row, 0, 1, 2)
-        row += 1
-
-        # Прогресс-бар обновления
-        self.update_progress = QProgressBar()
-        self.update_progress.setRange(0, 100)
-        self.update_progress.setValue(0)
-        self.update_progress.setVisible(False)
-        layout.addWidget(self.update_progress, row, 0, 1, 2)
-        row += 1
-
-        # Кнопка поддержки
-        self.support_label = QLabel(self._t("contact_support"))
-        self.support_btn = QPushButton("help@mindtype.space")
-        self.support_btn.setStyleSheet("font-size: 11px;")
-        self.support_btn.clicked.connect(self._on_contact_support)
-        layout.addWidget(self.support_label, row, 0)
-        layout.addWidget(self.support_btn, row, 1)
-        row += 1
-
-        layout.setRowStretch(row, 1)
         return tab
 
     def _build_additional_tab(self) -> QWidget:
         """Построить вкладку дополнительных настроек."""
         tab = QWidget()
-        tab.setStyleSheet("background-color: #ffffff;")
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(0)
 
-        # Скролл для всего контента
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
+        # Скроллируемый контейнер
+        scroll = ScrollableContent(horizontal_scroll=False)
 
-        content = QWidget()
-        content.setStyleSheet("background-color: #ffffff;")
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(12)
+        # === Секция AI Provider ===
+        ai_section = SectionBox(self._t("ai_provider"), label_width=140)
+        self.ai_section_label = ai_section  # Для совместимости
 
-        # === Секция Производительность ===
-        perf_section = QWidget()
-        perf_layout = QGridLayout(perf_section)
-        perf_layout.setContentsMargins(0, 0, 0, 0)
-        perf_layout.setSpacing(8)
-        perf_layout.setColumnStretch(1, 1)
+        # Выбор провайдера
+        self.provider_combo = QComboBox()
+        self.provider_combo.setMinimumWidth(200)
+        self.provider_combo.addItem("MindType Cloud", "mindtype_cloud")
+        self.provider_combo.addItem("OpenAI", "openai")
+        self.provider_combo.addItem("Claude (Anthropic)", "anthropic")
+        self.provider_combo.addItem("Gemini (Google)", "gemini")
+        self.provider_combo.addItem("Ollama (Local)", "ollama")
+        self.provider_combo.addItem("OpenRouter (Private)", "openrouter")
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        self._provider_row = ai_section.form.add_row(self._t("llm_provider"), self.provider_combo)
+        self.provider_label = self._provider_row.label
 
-        perf_row = 0
+        # API ключ
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setPlaceholderText("sk-...")
+        self.api_key_edit.setObjectName("monoInput")
+        self._api_key_row = ai_section.form.add_row(self._t("api_key"), self.api_key_edit)
+        self.api_key_label = self._api_key_row.label
 
-        # Заголовок секции
-        self.perf_section_label = QLabel(self._t("performance_section"))
-        self.perf_section_label.setStyleSheet("font-weight: bold;")
-        perf_layout.addWidget(self.perf_section_label, perf_row, 0, 1, 2)
-        perf_row += 1
+        # Base URL (для Ollama)
+        self.base_url_edit = QLineEdit()
+        self.base_url_edit.setPlaceholderText("http://localhost:11434")
+        self.base_url_edit.setObjectName("monoInput")
+        self._base_url_row = ai_section.form.add_row(self._t("base_url"), self.base_url_edit)
+        self.base_url_label = self._base_url_row.label
 
-        # VAD Filter (чекбокс)
-        self.vad_label = QLabel(self._t("vad_filter"))
+        # Выбор модели с поиском
+        model_widget = QWidget()
+        model_layout = QHBoxLayout(model_widget)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.setSpacing(SPACING["sm"])
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.lineEdit().setPlaceholderText(self._t("search_model"))
+        self.model_combo.setObjectName("wideCombo")
+        self.model_combo.addItem(self._t("select_model"), "")
+        self.refresh_models_btn = QPushButton(self._t("refresh_models"))
+        self.refresh_models_btn.setObjectName("smallButton")
+        self.refresh_models_btn.clicked.connect(self._on_refresh_models)
+        model_layout.addWidget(self.model_combo, stretch=1)
+        model_layout.addWidget(self.refresh_models_btn)
+        self._model_select_row = ai_section.form.add_row(self._t("openrouter_model"), model_widget)
+        self.model_select_label = self._model_select_row.label
+
+        # Reasoning mode
+        reasoning_widget = QWidget()
+        reasoning_layout = QHBoxLayout(reasoning_widget)
+        reasoning_layout.setContentsMargins(0, 0, 0, 0)
+        reasoning_layout.setSpacing(SPACING["sm"])
+        self.reasoning_checkbox = QCheckBox(self._t("reasoning_mode"))
+        self.reasoning_checkbox.setToolTip(self._t("reasoning_tooltip"))
+        self.reasoning_checkbox.stateChanged.connect(self._on_reasoning_changed)
+        self.effort_label = QLabel(self._t("reasoning_effort"))
+        self.effort_combo = QComboBox()
+        self.effort_combo.addItem(self._t("effort_low"), "low")
+        self.effort_combo.addItem(self._t("effort_medium"), "medium")
+        self.effort_combo.addItem(self._t("effort_high"), "high")
+        self.effort_combo.setCurrentIndex(1)
+        self.effort_combo.setObjectName("compactCombo")
+        self.effort_combo.currentIndexChanged.connect(self._on_effort_changed)
+        reasoning_layout.addWidget(self.reasoning_checkbox)
+        reasoning_layout.addWidget(self.effort_label)
+        reasoning_layout.addWidget(self.effort_combo)
+        reasoning_layout.addStretch()
+        ai_section.form.add_widget(reasoning_widget)
+
+        # Загрузка сохранённых настроек провайдера
+        cfg = self.config.config
+        saved_provider = cfg.get("llm_provider", "openrouter")
+        provider_idx = self.provider_combo.findData(saved_provider)
+        if provider_idx >= 0:
+            self.provider_combo.setCurrentIndex(provider_idx)
+        self._load_provider_settings(saved_provider)
+        self.reasoning_checkbox.setChecked(cfg.get("llm_reasoning_enabled", True))
+        effort = cfg.get("llm_reasoning_effort", "medium")
+        effort_idx = self.effort_combo.findData(effort)
+        if effort_idx >= 0:
+            self.effort_combo.setCurrentIndex(effort_idx)
+        self.api_key_edit.textChanged.connect(self._on_api_key_changed)
+        self.base_url_edit.textChanged.connect(self._on_base_url_changed)
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        self._update_provider_fields()
+
+        scroll.content_layout.addWidget(ai_section)
+
+        # === Секция Performance ===
+        perf_section = SectionBox(self._t("performance_section"), label_width=140)
+        self.perf_section_label = perf_section
+
+        # VAD Filter
         self.vad_toggle = QCheckBox()
         self.vad_toggle.setChecked(True)
-        perf_layout.addWidget(self.vad_label, perf_row, 0)
-        perf_layout.addWidget(self.vad_toggle, perf_row, 1)
-        perf_row += 1
+        self._vad_row = perf_section.form.add_row(self._t("vad_filter"), self.vad_toggle)
+        self.vad_label = self._vad_row.label
 
         # Размер луча
-        self.beam_label = QLabel(self._t("beam_size"))
-        beam_row = QHBoxLayout()
+        beam_widget = QWidget()
+        beam_layout = QHBoxLayout(beam_widget)
+        beam_layout.setContentsMargins(0, 0, 0, 0)
+        beam_layout.setSpacing(SPACING["sm"])
         self.beam_slider = QSlider(Qt.Orientation.Horizontal)
         self.beam_slider.setRange(1, 10)
         self.beam_slider.setValue(5)
         self.beam_value_label = QLabel("5")
         self.beam_value_label.setFixedWidth(30)
-        beam_row.addWidget(self.beam_slider)
-        beam_row.addWidget(self.beam_value_label)
-        perf_layout.addWidget(self.beam_label, perf_row, 0)
-        perf_layout.addLayout(beam_row, perf_row, 1)
-        perf_row += 1
+        beam_layout.addWidget(self.beam_slider)
+        beam_layout.addWidget(self.beam_value_label)
+        self._beam_row = perf_section.form.add_row(self._t("beam_size"), beam_widget)
+        self.beam_label = self._beam_row.label
 
-        # Квантование/Оптимизация
-        self.quant_label = QLabel(self._t("quantization"))
+        # Квантование
         self.compute_box = QComboBox()
         for ct in ["auto", "int8", "int8_float16", "float16", "float32"]:
             self.compute_box.addItem(ct)
-        perf_layout.addWidget(self.quant_label, perf_row, 0)
-        perf_layout.addWidget(self.compute_box, perf_row, 1)
-        perf_row += 1
+        self._quant_row = perf_section.form.add_row(self._t("quantization"), self.compute_box)
+        self.quant_label = self._quant_row.label
 
-        # Устройство (Accelerator)
-        self.accel_label = QLabel(self._t("device"))
+        # Устройство
         self.accel_box = QComboBox()
         for mode in ["auto", "npu", "gpu", "cpu"]:
             self.accel_box.addItem(mode)
-        perf_layout.addWidget(self.accel_label, perf_row, 0)
-        perf_layout.addWidget(self.accel_box, perf_row, 1)
-        perf_row += 1
+        self._accel_row = perf_section.form.add_row(self._t("device"), self.accel_box)
+        self.accel_label = self._accel_row.label
 
         # Статус NPU
         if has_npu():
-            npu_status = QLabel(f"✓ NPU обнаружен ({detect_available_providers()[0]})")
-            npu_status.setStyleSheet("color: green; font-size: 10px;")
-            perf_layout.addWidget(npu_status, perf_row, 1)
-            perf_row += 1
+            npu_status = QLabel(f"[OK] {self._t('npu_detected')} ({detect_available_providers()[0]})")
+            npu_status.setObjectName("smallBold")
+            perf_section.form.add_widget(npu_status)
 
         # Бэкенд транскрипции
-        self.backend_label = QLabel("Бэкенд Whisper")
         self.backend_box = QComboBox()
-        self.backend_box.addItem("Whisper.cpp (быстро)", "whisper_cpp")
-        self.backend_box.addItem("Faster-Whisper (CUDA)", "faster_whisper")
-        self.backend_box.addItem("ONNX Runtime (NPU)", "onnx")
-        perf_layout.addWidget(self.backend_label, perf_row, 0)
-        perf_layout.addWidget(self.backend_box, perf_row, 1)
-        perf_row += 1
+        self.backend_box.addItem(self._t("backend_whispercpp"), "whisper_cpp")
+        self.backend_box.addItem(self._t("backend_faster_whisper"), "faster_whisper")
+        self.backend_box.addItem(self._t("backend_onnx"), "onnx")
+        self._backend_row = perf_section.form.add_row(self._t("whisper_backend"), self.backend_box)
+        self.backend_label = self._backend_row.label
 
         # Модель
-        self.model_label = QLabel(self._t("model"))
         self.model_box = QComboBox()
         self._populate_model_combo()
-        perf_layout.addWidget(self.model_label, perf_row, 0)
-        perf_layout.addWidget(self.model_box, perf_row, 1)
-        perf_row += 1
+        self._model_row = perf_section.form.add_row(self._t("model"), self.model_box)
+        self.model_label = self._model_row.label
 
         # Предупреждение о distil
         self.distil_warning = QLabel(self._t("distil_en_only"))
         self.distil_warning.setObjectName("warning")
-        perf_layout.addWidget(self.distil_warning, perf_row, 1)
-        perf_row += 1
+        perf_section.form.add_widget(self.distil_warning)
 
         # Кнопка скачивания модели
         self.download_btn = QPushButton(self._t("download_model"))
         self.download_btn.setObjectName("downloadButton")
-        perf_layout.addWidget(self.download_btn, perf_row, 0, 1, 2)
-        perf_row += 1
+        perf_section.form.add_widget(self.download_btn)
 
         # Прогресс скачивания
         self.download_progress = QProgressBar()
         self.download_progress.setRange(0, 100)
         self.download_progress.setValue(0)
         self.download_progress.setTextVisible(True)
-        perf_layout.addWidget(self.download_progress, perf_row, 0, 1, 2)
-        perf_row += 1
+        perf_section.form.add_widget(self.download_progress)
 
         self.download_status_label = QLabel("")
-        perf_layout.addWidget(self.download_status_label, perf_row, 0, 1, 2)
-        perf_row += 1
+        perf_section.form.add_widget(self.download_status_label)
 
         # Путь модели
-        self.model_path_label = QLabel(self._t("model_path"))
         self.models_path_edit = QLineEdit()
         self.models_path_edit.setText(str(self.models_dir))
         self.models_path_edit.setReadOnly(True)
-        perf_layout.addWidget(self.model_path_label, perf_row, 0)
-        perf_layout.addWidget(self.models_path_edit, perf_row, 1)
-        perf_row += 1
+        self._model_path_row = perf_section.form.add_row(self._t("model_path"), self.models_path_edit)
+        self.model_path_label = self._model_path_row.label
 
-        layout.addWidget(perf_section)
+        scroll.content_layout.addWidget(perf_section)
 
         # === Секция Overlay ===
-        overlay_section = QWidget()
-        overlay_layout = QGridLayout(overlay_section)
-        overlay_layout.setContentsMargins(0, 0, 0, 0)
-        overlay_layout.setSpacing(8)
-        overlay_layout.setColumnStretch(1, 1)
-
-        overlay_row = 0
-
-        # Заголовок секции
-        self.overlay_section_label = QLabel(self._t("overlay_section"))
-        self.overlay_section_label.setStyleSheet("font-weight: bold;")
-        overlay_layout.addWidget(self.overlay_section_label, overlay_row, 0, 1, 2)
-        overlay_row += 1
+        overlay_section = SectionBox(self._t("overlay_section"), label_width=140)
+        self.overlay_section_label = overlay_section
 
         # Позиция
-        self.position_label = QLabel(self._t("position"))
         self.overlay_position_box = QComboBox()
         positions = [
             ("bottom-center", "bottom_center"),
@@ -2504,299 +1499,145 @@ class MainWindow(QMainWindow):
         ]
         for key, text_key in positions:
             self.overlay_position_box.addItem(self._t(text_key), key)
-        overlay_layout.addWidget(self.position_label, overlay_row, 0)
-        overlay_layout.addWidget(self.overlay_position_box, overlay_row, 1)
-        overlay_row += 1
+        self._position_row = overlay_section.form.add_row(self._t("position"), self.overlay_position_box)
+        self.position_label = self._position_row.label
 
         # Отступ
-        self.margin_label = QLabel(self._t("margin"))
-        margin_row = QHBoxLayout()
+        margin_widget = QWidget()
+        margin_layout = QHBoxLayout(margin_widget)
+        margin_layout.setContentsMargins(0, 0, 0, 0)
+        margin_layout.setSpacing(SPACING["sm"])
         self.overlay_margin_slider = QSlider(Qt.Orientation.Horizontal)
         self.overlay_margin_slider.setRange(0, 100)
         self.overlay_margin_slider.setValue(20)
         self.overlay_margin_value = QLabel("20")
         self.overlay_margin_value.setFixedWidth(40)
-        margin_row.addWidget(self.overlay_margin_slider)
-        margin_row.addWidget(self.overlay_margin_value)
-        overlay_layout.addWidget(self.margin_label, overlay_row, 0)
-        overlay_layout.addLayout(margin_row, overlay_row, 1)
-        overlay_row += 1
+        margin_layout.addWidget(self.overlay_margin_slider)
+        margin_layout.addWidget(self.overlay_margin_value)
+        self._margin_row = overlay_section.form.add_row(self._t("margin"), margin_widget)
+        self.margin_label = self._margin_row.label
 
         # Усиление волны
-        self.wave_gain_label = QLabel(self._t("wave_gain"))
-        gain_row = QHBoxLayout()
+        gain_widget = QWidget()
+        gain_layout = QHBoxLayout(gain_widget)
+        gain_layout.setContentsMargins(0, 0, 0, 0)
+        gain_layout.setSpacing(SPACING["sm"])
         self.overlay_gain_slider = QSlider(Qt.Orientation.Horizontal)
         self.overlay_gain_slider.setRange(10, 100)
         self.overlay_gain_slider.setValue(15)
         self.overlay_gain_value = QLabel("1.5")
         self.overlay_gain_value.setFixedWidth(40)
-        gain_row.addWidget(self.overlay_gain_slider)
-        gain_row.addWidget(self.overlay_gain_value)
-        overlay_layout.addWidget(self.wave_gain_label, overlay_row, 0)
-        overlay_layout.addLayout(gain_row, overlay_row, 1)
-        overlay_row += 1
+        gain_layout.addWidget(self.overlay_gain_slider)
+        gain_layout.addWidget(self.overlay_gain_value)
+        self._wave_gain_row = overlay_section.form.add_row(self._t("wave_gain"), gain_widget)
+        self.wave_gain_label = self._wave_gain_row.label
 
         # Прозрачность
-        self.opacity_label = QLabel(self._t("opacity"))
-        opacity_row = QHBoxLayout()
+        opacity_widget = QWidget()
+        opacity_layout = QHBoxLayout(opacity_widget)
+        opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.setSpacing(SPACING["sm"])
         self.overlay_opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.overlay_opacity_slider.setRange(50, 255)
         self.overlay_opacity_slider.setValue(230)
         self.overlay_preview_btn = QPushButton(self._t("preview"))
-        opacity_row.addWidget(self.overlay_opacity_slider)
-        opacity_row.addWidget(self.overlay_preview_btn)
-        overlay_layout.addWidget(self.opacity_label, overlay_row, 0)
-        overlay_layout.addLayout(opacity_row, overlay_row, 1)
-        overlay_row += 1
+        opacity_layout.addWidget(self.overlay_opacity_slider)
+        opacity_layout.addWidget(self.overlay_preview_btn)
+        self._opacity_row = overlay_section.form.add_row(self._t("opacity"), opacity_widget)
+        self.opacity_label = self._opacity_row.label
 
-        layout.addWidget(overlay_section)
+        scroll.content_layout.addWidget(overlay_section)
 
-        # === Секция AI Provider ===
-        ai_section = QWidget()
-        ai_layout = QGridLayout(ai_section)
-        ai_layout.setContentsMargins(0, 0, 0, 0)
-        ai_layout.setSpacing(8)
-        ai_layout.setColumnStretch(1, 1)
+        # === Секция App ===
+        app_section = SectionBox(self._t("app_section"), label_width=140)
+        self.app_section_label = app_section
 
-        ai_row = 0
+        # Язык интерфейса
+        self.ui_lang_box = QComboBox()
+        for code, name in UI_LANGUAGES.items():
+            self.ui_lang_box.addItem(name, code)
+        self._ui_lang_row = app_section.form.add_row(self._t("ui_language"), self.ui_lang_box)
+        self.ui_lang_label = self._ui_lang_row.label
 
-        # Заголовок секции
-        self.ai_section_label = QLabel(self._t("ai_provider"))
-        self.ai_section_label.setStyleSheet("font-weight: bold;")
-        ai_layout.addWidget(self.ai_section_label, ai_row, 0, 1, 2)
-        ai_row += 1
+        # Версия и обновления
+        update_widget = QWidget()
+        update_layout = QHBoxLayout(update_widget)
+        update_layout.setContentsMargins(0, 0, 0, 0)
+        update_layout.setSpacing(SPACING["sm"])
 
-        # Выбор провайдера
-        self.provider_label = QLabel(self._t("llm_provider"))
-        self.provider_combo = QComboBox()
-        self.provider_combo.setStyleSheet("""
-            QComboBox {
-                border: 2px solid #000000;
-                padding: 4px 8px;
-                background-color: #ffffff;
-                min-width: 200px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                border-left: 2px solid #000000;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                border: 2px solid #000000;
-                background-color: #ffffff;
-                selection-background-color: #000000;
-                selection-color: #ffffff;
-            }
-        """)
-        # Добавляем провайдеры
-        self.provider_combo.addItem("OpenAI", "openai")
-        self.provider_combo.addItem("Claude (Anthropic)", "anthropic")
-        self.provider_combo.addItem("Gemini (Google)", "gemini")
-        self.provider_combo.addItem("Ollama (Local)", "ollama")
-        self.provider_combo.addItem("OpenRouter (Private)", "openrouter")
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        ai_layout.addWidget(self.provider_label, ai_row, 0)
-        ai_layout.addWidget(self.provider_combo, ai_row, 1)
-        ai_row += 1
+        # Получаем версию из env
+        try:
+            from .env import APP_VERSION
+            current_ver = APP_VERSION
+        except ImportError:
+            current_ver = "1.0.0"
 
-        # API ключ
-        self.api_key_label = QLabel(self._t("api_key"))
-        self.api_key_edit = QLineEdit()
-        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_edit.setPlaceholderText("sk-...")
-        self.api_key_edit.setStyleSheet("""
-            QLineEdit {
-                border: 2px solid #000000;
-                padding: 4px 8px;
-                background-color: #ffffff;
-                font-family: 'Consolas', 'Monaco', monospace;
-            }
-        """)
-        ai_layout.addWidget(self.api_key_label, ai_row, 0)
-        ai_layout.addWidget(self.api_key_edit, ai_row, 1)
-        ai_row += 1
+        self.update_version_label = QLabel(f"v{current_ver}")
+        self.update_version_label.setObjectName("bodyBold")
+        update_layout.addWidget(self.update_version_label)
+        update_layout.addStretch()
 
-        # Base URL (для Ollama)
-        self.base_url_label = QLabel(self._t("base_url"))
-        self.base_url_edit = QLineEdit()
-        self.base_url_edit.setPlaceholderText("http://localhost:11434")
-        self.base_url_edit.setStyleSheet("""
-            QLineEdit {
-                border: 2px solid #000000;
-                padding: 4px 8px;
-                background-color: #ffffff;
-                font-family: 'Consolas', 'Monaco', monospace;
-            }
-        """)
-        ai_layout.addWidget(self.base_url_label, ai_row, 0)
-        ai_layout.addWidget(self.base_url_edit, ai_row, 1)
-        ai_row += 1
+        self.check_update_btn = QPushButton(self._t("check_updates"))
+        self.check_update_btn.clicked.connect(self._check_for_updates)
+        update_layout.addWidget(self.check_update_btn)
 
-        # Выбор модели с поиском
-        self.model_select_label = QLabel(self._t("openrouter_model"))
-        model_row = QHBoxLayout()
-        self.model_combo = QComboBox()
-        self.model_combo.setEditable(True)  # Editable для поиска
-        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model_combo.lineEdit().setPlaceholderText(self._t("search_model"))
-        self.model_combo.setStyleSheet("""
-            QComboBox {
-                border: 2px solid #000000;
-                padding: 4px 8px;
-                background-color: #ffffff;
-                min-width: 250px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                border-left: 2px solid #000000;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                border: 2px solid #000000;
-                background-color: #ffffff;
-                selection-background-color: #000000;
-                selection-color: #ffffff;
-            }
-        """)
-        self.model_combo.addItem(self._t("select_model"), "")
+        self._update_row = app_section.form.add_row(self._t("current_version"), update_widget)
+        self.update_label = self._update_row.label
 
-        self.refresh_models_btn = QPushButton(self._t("refresh_models"))
-        self.refresh_models_btn.setStyleSheet("""
-            QPushButton {
-                border: 2px solid #000000;
-                padding: 4px 12px;
-                background-color: #ffffff;
-                border-top-color: #ffffff;
-                border-left-color: #ffffff;
-                border-right-color: #808080;
-                border-bottom-color: #808080;
-            }
-            QPushButton:pressed {
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QPushButton:disabled { color: #808080; }
-        """)
-        self.refresh_models_btn.clicked.connect(self._on_refresh_models)
+        # Статус обновления (на всю ширину)
+        self.update_status_label = QLabel("")
+        self.update_status_label.setObjectName("caption")
+        self.update_status_label.setVisible(False)
+        app_section.form.add_widget(self.update_status_label)
 
-        model_row.addWidget(self.model_combo, stretch=1)
-        model_row.addWidget(self.refresh_models_btn)
-        ai_layout.addWidget(self.model_select_label, ai_row, 0)
-        ai_layout.addLayout(model_row, ai_row, 1)
-        ai_row += 1
+        # Прогресс-бар обновления (на всю ширину)
+        self.update_progress = QProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setVisible(False)
+        app_section.form.add_widget(self.update_progress)
 
-        # Reasoning mode
-        reasoning_row = QHBoxLayout()
-        self.reasoning_checkbox = QCheckBox(self._t("reasoning_mode"))
-        self.reasoning_checkbox.setToolTip(self._t("reasoning_tooltip"))
-        self.reasoning_checkbox.stateChanged.connect(self._on_reasoning_changed)
-        reasoning_row.addWidget(self.reasoning_checkbox)
+        # Кнопка поддержки
+        self.support_btn = QPushButton("help@mindtype.space")
+        self.support_btn.setObjectName("smallButton")
+        self.support_btn.clicked.connect(self._on_contact_support)
+        self._support_row = app_section.form.add_row(self._t("contact_support"), self.support_btn)
+        self.support_label = self._support_row.label
 
-        # Effort комбобокс
-        self.effort_label = QLabel(self._t("reasoning_effort"))
-        self.effort_combo = QComboBox()
-        self.effort_combo.addItem(self._t("effort_low"), "low")
-        self.effort_combo.addItem(self._t("effort_medium"), "medium")
-        self.effort_combo.addItem(self._t("effort_high"), "high")
-        self.effort_combo.setCurrentIndex(1)  # medium по умолчанию
-        self.effort_combo.setStyleSheet("""
-            QComboBox {
-                border: 2px solid #000000;
-                padding: 2px 6px;
-                background-color: #ffffff;
-                min-width: 80px;
-            }
-        """)
-        self.effort_combo.currentIndexChanged.connect(self._on_effort_changed)
-        reasoning_row.addWidget(self.effort_label)
-        reasoning_row.addWidget(self.effort_combo)
-        reasoning_row.addStretch()
-        ai_layout.addLayout(reasoning_row, ai_row, 0, 1, 2)
-        ai_row += 1
+        scroll.content_layout.addWidget(app_section)
+        scroll.content_layout.addStretch()
 
-        # Загрузка сохранённых настроек провайдера
-        cfg = self.config.config
-
-        # Загружаем выбранный провайдер
-        saved_provider = cfg.get("llm_provider", "openrouter")
-        provider_idx = self.provider_combo.findData(saved_provider)
-        if provider_idx >= 0:
-            self.provider_combo.setCurrentIndex(provider_idx)
-
-        # Загружаем API ключ для текущего провайдера
-        self._load_provider_settings(saved_provider)
-
-        # Загрузка reasoning настроек
-        self.reasoning_checkbox.setChecked(cfg.get("llm_reasoning_enabled", True))
-        effort = cfg.get("llm_reasoning_effort", "medium")
-        effort_idx = self.effort_combo.findData(effort)
-        if effort_idx >= 0:
-            self.effort_combo.setCurrentIndex(effort_idx)
-
-        # Обновляем доступность полей при переключении
-        self.api_key_edit.textChanged.connect(self._on_api_key_changed)
-        self.base_url_edit.textChanged.connect(self._on_base_url_changed)
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
-
-        # Обновляем видимость полей для текущего провайдера
-        self._update_provider_fields()
-
-        layout.addWidget(ai_section)
-        layout.addStretch()
-
-        scroll.setWidget(content)
-
-        tab_layout = QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(scroll)
-
         return tab
 
     def _build_assistant_tab(self) -> QWidget:
         """Построить вкладку голосового ассистента (Classic Mac OS System 7 style)."""
         tab = QWidget()
-        tab.setStyleSheet("background-color: #ffffff;")
+        tab.setObjectName("whiteBackground")
 
         # Скролл для всего контента
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
+        scroll.setObjectName("noBorder")
 
         content = QWidget()
-        content.setStyleSheet("background-color: #ffffff;")
+        content.setObjectName("whiteBackground")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(SPACING["lg"], SPACING["xl"], SPACING["lg"], SPACING["lg"])
+        layout.setSpacing(SPACING["xl"])
 
         # Главный чекбокс включения ассистента
         self.assistant_enable_check = QCheckBox(self._t("assistant_enable"))
-        self.assistant_enable_check.setStyleSheet("font-weight: bold;")
+        self.assistant_enable_check.setObjectName("boldCheckbox")
         layout.addWidget(self.assistant_enable_check)
 
         # === Wake Word секция ===
         wake_group = QGroupBox(self._t("assistant_wake_word"))
-        wake_group.setStyleSheet("""
-            QGroupBox {
-                border: 2px solid #000000;
-                border-radius: 0px;
-                margin-top: 8px;
-                background-color: #ffffff;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 8px;
-                padding: 0 4px;
-                background-color: #ffffff;
-            }
-        """)
+        # QGroupBox стилизуется через глобальный STYLESHEET
         wake_layout = QGridLayout()
-        wake_layout.setContentsMargins(8, 12, 8, 8)
-        wake_layout.setSpacing(8)
+        wake_layout.setContentsMargins(SPACING["sm"], SPACING["md"], SPACING["sm"], SPACING["sm"])
+        wake_layout.setSpacing(SPACING["sm"])
         wake_layout.setColumnStretch(1, 1)
 
         row = 0
@@ -2825,10 +1666,10 @@ class MainWindow(QMainWindow):
 
         # === Горячие клавиши секция ===
         hotkey_group = QGroupBox(self._t("assistant_hotkey"))
-        hotkey_group.setStyleSheet(wake_group.styleSheet())
+        # QGroupBox стилизуется через глобальный STYLESHEET
         hotkey_layout = QGridLayout()
-        hotkey_layout.setContentsMargins(8, 12, 8, 8)
-        hotkey_layout.setSpacing(8)
+        hotkey_layout.setContentsMargins(SPACING["sm"], SPACING["md"], SPACING["sm"], SPACING["sm"])
+        hotkey_layout.setSpacing(SPACING["sm"])
         hotkey_layout.setColumnStretch(1, 1)
 
         row = 0
@@ -2853,10 +1694,10 @@ class MainWindow(QMainWindow):
 
         # === Голос TTS секция ===
         voice_group = QGroupBox(self._t("assistant_voice"))
-        voice_group.setStyleSheet(wake_group.styleSheet())
+        # QGroupBox стилизуется через глобальный STYLESHEET
         voice_layout = QGridLayout()
-        voice_layout.setContentsMargins(8, 12, 8, 8)
-        voice_layout.setSpacing(8)
+        voice_layout.setContentsMargins(SPACING["sm"], SPACING["md"], SPACING["sm"], SPACING["sm"])
+        voice_layout.setSpacing(SPACING["sm"])
         voice_layout.setColumnStretch(1, 1)
 
         row = 0
@@ -2912,10 +1753,10 @@ class MainWindow(QMainWindow):
 
         # === Личность секция ===
         personality_group = QGroupBox(self._t("assistant_personality"))
-        personality_group.setStyleSheet(wake_group.styleSheet())
+        # QGroupBox стилизуется через глобальный STYLESHEET
         personality_layout = QVBoxLayout()
-        personality_layout.setContentsMargins(8, 12, 8, 8)
-        personality_layout.setSpacing(8)
+        personality_layout.setContentsMargins(SPACING["sm"], SPACING["md"], SPACING["sm"], SPACING["sm"])
+        personality_layout.setSpacing(SPACING["sm"])
 
         # Шаблон личности
         template_label = QLabel(self._t("assistant_personality_template") + ":")
@@ -2937,18 +1778,7 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QTextEdit
         self.assistant_system_prompt_edit = QTextEdit()
         self.assistant_system_prompt_edit.setMaximumHeight(80)
-        self.assistant_system_prompt_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-                padding: 4px;
-                color: #000000;
-            }
-        """)
+        self.assistant_system_prompt_edit.setObjectName("systemPromptEdit")
         personality_layout.addWidget(self.assistant_system_prompt_edit)
 
         personality_group.setLayout(personality_layout)
@@ -2967,190 +1797,149 @@ class MainWindow(QMainWindow):
     def _build_files_tab(self) -> QWidget:
         """Построить вкладку транскрибции файлов."""
         tab = QWidget()
-        tab.setStyleSheet("background-color: #ffffff;")
+        tab.setObjectName("whiteBackground")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
+        layout.setSpacing(SPACING["md"])
 
         # === Зона Drag & Drop ===
         self.drop_zone = DropZoneWidget(translate_func=self._t)
         self.drop_zone.files_dropped.connect(self._on_files_dropped)
         self.drop_zone.clicked.connect(self._on_select_files_clicked)
+        self.drop_zone.setFixedHeight(140)
         layout.addWidget(self.drop_zone)
 
-        # === Настройки вывода ===
-        settings_layout = QGridLayout()
-        settings_layout.setSpacing(8)
+        # Включить суммаризацию (checkbox напрямую)
+        self.enable_summary_checkbox = QCheckBox(self._t("enable_summary"))
+        self.enable_summary_checkbox.setChecked(True)
+        self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
+        layout.addWidget(self.enable_summary_checkbox)
 
-        # Формат вывода
-        self.output_format_label = QLabel(self._t("output_format"))
+        # Скрытые виджеты для совместимости (не отображаются в UI)
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem(self._t("format_html"), "html")
         self.output_format_combo.addItem(self._t("format_pdf"), "pdf")
         self.output_format_combo.addItem(self._t("format_both"), "both")
-        settings_layout.addWidget(self.output_format_label, 0, 0)
-        settings_layout.addWidget(self.output_format_combo, 0, 1)
+        self.output_format_combo.setVisible(False)
 
-        # Папка сохранения
-        self.output_folder_label = QLabel(self._t("output_folder"))
-        output_folder_row = QHBoxLayout()
         self.output_folder_edit = QLineEdit()
         self.output_folder_edit.setReadOnly(True)
-        # По умолчанию - папка "Документы"
-        default_output = Path.home() / "Documents" / "MindType Transcriptions"
-        self.output_folder_edit.setText(str(default_output))
-        self._output_dir = default_output
+        self.output_folder_edit.setText(str(self._output_dir))
+        self.output_folder_edit.setVisible(False)
 
         self.browse_folder_btn = QPushButton(self._t("browse"))
         self.browse_folder_btn.clicked.connect(self._on_browse_output_folder)
-        output_folder_row.addWidget(self.output_folder_edit)
-        output_folder_row.addWidget(self.browse_folder_btn)
-        settings_layout.addWidget(self.output_folder_label, 1, 0)
-        settings_layout.addLayout(output_folder_row, 1, 1)
+        self.browse_folder_btn.setVisible(False)
 
-        # Включить суммаризацию
-        self.enable_summary_checkbox = QCheckBox(self._t("enable_summary"))
-        self.enable_summary_checkbox.setChecked(True)
-        self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
-        settings_layout.addWidget(self.enable_summary_checkbox, 2, 0, 1, 2)
-
-        # Кнопка настройки промптов
         self.customize_prompts_btn = QPushButton(self._t("customize_prompts"))
         self.customize_prompts_btn.clicked.connect(self._on_customize_prompts)
-        settings_layout.addWidget(self.customize_prompts_btn, 3, 0, 1, 2)
+        self.customize_prompts_btn.setVisible(False)
 
-        layout.addLayout(settings_layout)
+        # === Очередь файлов (секция) ===
+        queue_section = QWidget()
+        queue_layout = QVBoxLayout(queue_section)
+        queue_layout.setContentsMargins(0, 0, 0, 0)
+        queue_layout.setSpacing(SPACING["xs"])
 
-        # === Очередь файлов ===
+        # Заголовок с кнопкой Clear (над рамкой)
         queue_header = QHBoxLayout()
         self.queue_title_label = QLabel(self._t("processing_queue"))
-        self.queue_title_label.setStyleSheet("font-weight: bold;")
+        self.queue_title_label.setObjectName("sectionTitle")
         queue_header.addWidget(self.queue_title_label)
         queue_header.addStretch()
-
         self.clear_queue_btn = QPushButton(self._t("clear_queue"))
+        self.clear_queue_btn.setObjectName("smallButton")
         self.clear_queue_btn.clicked.connect(self._on_clear_queue)
         queue_header.addWidget(self.clear_queue_btn)
+        queue_layout.addLayout(queue_header)
 
-        layout.addLayout(queue_header)
+        # Очередь в рамке (QFrame#card)
+        queue_frame = QFrame()
+        queue_frame.setObjectName("card")
+        queue_frame_layout = QVBoxLayout(queue_frame)
+        queue_frame_layout.setContentsMargins(0, 0, 0, 0)
+        queue_frame_layout.setSpacing(0)
 
         # Список файлов
         self._file_queue_scroll = QScrollArea()
         self._file_queue_scroll.setWidgetResizable(True)
         self._file_queue_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._file_queue_scroll.setStyleSheet("QScrollArea { border: 1px solid #000000; }")
+        self._file_queue_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self._file_queue_content = QWidget()
-        self._file_queue_content.setStyleSheet("background-color: #ffffff;")
+        self._file_queue_content.setObjectName("whiteBackground")
         self._file_queue_layout = QVBoxLayout(self._file_queue_content)
-        self._file_queue_layout.setContentsMargins(4, 4, 4, 4)
-        self._file_queue_layout.setSpacing(4)
+        self._file_queue_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        self._file_queue_layout.setSpacing(SPACING["sm"])
 
-        # Placeholder
+        # Placeholder (EmptyState)
         self._no_files_label = QLabel(self._t("no_files_in_queue"))
-        self._no_files_label.setStyleSheet("color: #808080; padding: 20px;")
+        self._no_files_label.setObjectName("placeholder")
         self._no_files_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._file_queue_layout.addWidget(self._no_files_label)
         self._file_queue_layout.addStretch()
 
         self._file_queue_scroll.setWidget(self._file_queue_content)
-        layout.addWidget(self._file_queue_scroll, stretch=1)
+        queue_frame_layout.addWidget(self._file_queue_scroll)
+        queue_layout.addWidget(queue_frame)
+
+        layout.addWidget(queue_section, stretch=1)
 
         # === Блок AI Thinking (Classic Mac OS style) ===
         self._thinking_frame = QFrame()
-        self._thinking_frame.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
-        self._thinking_frame.setVisible(False)  # Скрыт по умолчанию
+        self._thinking_frame.setObjectName("thinkingFrame")
+        self._thinking_frame.setVisible(False)
         thinking_layout = QVBoxLayout(self._thinking_frame)
         thinking_layout.setContentsMargins(0, 0, 0, 0)
         thinking_layout.setSpacing(0)
 
-        # Заголовок окна (Classic Mac style)
+        # Заголовок окна
         thinking_header_frame = QFrame()
-        thinking_header_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
-                border: none;
-                padding: 2px 4px;
-            }
-        """)
+        thinking_header_frame.setObjectName("thinkingHeader")
         thinking_header_frame.setFixedHeight(22)
         thinking_header = QHBoxLayout(thinking_header_frame)
-        thinking_header.setContentsMargins(8, 2, 4, 2)
+        thinking_header.setContentsMargins(SPACING["sm"], 2, SPACING["xs"], 2)
 
-        self._thinking_title = QLabel("AI Thinking")
-        self._thinking_title.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                font-weight: bold;
-                font-size: 11px;
-            }
-        """)
+        self._thinking_title = QLabel(self._t("ai_thinking"))
+        self._thinking_title.setObjectName("thinkingTitle")
         thinking_header.addWidget(self._thinking_title)
         thinking_header.addStretch()
 
-        # Кнопка закрытия (Classic Mac style)
         close_thinking_btn = QPushButton()
         close_thinking_btn.setFixedSize(12, 12)
-        close_thinking_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-            QPushButton:hover {
-                background-color: #c0c0c0;
-            }
-        """)
+        close_thinking_btn.setObjectName("windowClose")
         close_thinking_btn.clicked.connect(lambda: self._thinking_frame.setVisible(False))
         thinking_header.addWidget(close_thinking_btn)
         thinking_layout.addWidget(thinking_header_frame)
 
-        # Текстовое поле для вывода (Classic Mac style)
         from PyQt6.QtWidgets import QTextEdit
         self._thinking_output = QTextEdit()
         self._thinking_output.setReadOnly(True)
         self._thinking_output.setMinimumHeight(100)
         self._thinking_output.setMaximumHeight(150)
-        self._thinking_output.setStyleSheet("""
-            QTextEdit {
-                background-color: #ffffff;
-                color: #000000;
-                border: none;
-                border-top: 1px solid #808080;
-                font-family: "Geneva", "VT323", "Courier New", monospace;
-                font-size: 11px;
-                padding: 8px;
-            }
-        """)
+        self._thinking_output.setObjectName("thinkingOutput")
         thinking_layout.addWidget(self._thinking_output)
 
-        # Буфер для накопления текста
         self._thinking_buffer = ""
-
         layout.addWidget(self._thinking_frame)
 
-        # === Кнопки управления ===
-        buttons_layout = QHBoxLayout()
-        buttons_layout.addStretch()
-
-        self.start_processing_btn = QPushButton(self._t("start_processing"))
-        self.start_processing_btn.setStyleSheet("font-weight: bold;")
-        self.start_processing_btn.clicked.connect(self._on_start_processing)
+        # === Кнопки управления (ActionBar) ===
+        action_bar = ActionBar(align="right", spacing=SPACING["sm"])
+        self.start_processing_btn = action_bar.add_button(
+            self._t("start_processing"),
+            primary=True,
+            callback=self._on_start_processing
+        )
         self.start_processing_btn.setEnabled(False)
-        buttons_layout.addWidget(self.start_processing_btn)
 
-        self.stop_processing_btn = QPushButton(self._t("stop_processing"))
-        self.stop_processing_btn.clicked.connect(self._on_stop_processing)
+        self.stop_processing_btn = action_bar.add_button(
+            self._t("stop_processing"),
+            callback=self._on_stop_processing
+        )
         self.stop_processing_btn.setEnabled(False)
         self.stop_processing_btn.setVisible(False)
-        buttons_layout.addWidget(self.stop_processing_btn)
 
-        layout.addLayout(buttons_layout)
+        layout.addWidget(action_bar)
 
         return tab
 
@@ -3165,37 +1954,46 @@ class MainWindow(QMainWindow):
     def _build_journal_section(self) -> QWidget:
         """Построить секцию журнала событий."""
         section = QWidget()
-        section.setStyleSheet("background-color: #ffffff;")
+        section.setObjectName("whiteBackground")
         layout = QVBoxLayout(section)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(0, SPACING["md"], 0, 0)
+        layout.setSpacing(SPACING["xs"])
 
-        # Заголовок журнала
+        # Заголовок журнала с кнопкой Clear (над рамкой)
         journal_header = QHBoxLayout()
         self.journal_title = QLabel(self._t("journal"))
-        self.journal_title.setStyleSheet("font-weight: bold;")
+        self.journal_title.setObjectName("sectionTitle")
         journal_header.addWidget(self.journal_title)
         journal_header.addStretch()
 
         self.clear_journal_btn = QPushButton(self._t("clear_journal"))
+        self.clear_journal_btn.setObjectName("smallButton")
         self.clear_journal_btn.clicked.connect(self._clear_journal)
         journal_header.addWidget(self.clear_journal_btn)
         layout.addLayout(journal_header)
 
-        # Виджет журнала
+        # Журнал в рамке (QFrame#card)
+        journal_frame = QFrame()
+        journal_frame.setObjectName("card")
+        journal_frame_layout = QVBoxLayout(journal_frame)
+        journal_frame_layout.setContentsMargins(0, 0, 0, 0)
+        journal_frame_layout.setSpacing(0)
+
         self.journal = JournalWidget(translate_func=self._t)
-        self.journal.setMaximumHeight(120)  # Ограничиваем высоту
-        layout.addWidget(self.journal)
+        self.journal.setMaximumHeight(100)
+        journal_frame_layout.addWidget(self.journal)
+
+        layout.addWidget(journal_frame)
 
         return section
 
     def _build_history_tab(self) -> QWidget:
         """Построить вкладку истории и журнала."""
         tab = QWidget()
-        tab.setStyleSheet("background-color: #ffffff;")
+        tab.setObjectName("whiteBackground")
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(SPACING["lg"], SPACING["xl"], SPACING["lg"], SPACING["lg"])
+        layout.setSpacing(SPACING["xl"])
 
         # === История транскрипций ===
         self.transcription_history = TranscriptionHistoryWidget(translate_func=self._t)
@@ -3210,7 +2008,7 @@ class MainWindow(QMainWindow):
         # === Журнал ===
         journal_header = QHBoxLayout()
         self.journal_title = QLabel(self._t("journal"))
-        self.journal_title.setStyleSheet("font-weight: bold;")
+        self.journal_title.setObjectName("sectionTitle")
         journal_header.addWidget(self.journal_title)
         journal_header.addStretch()
 
@@ -3239,7 +2037,7 @@ class MainWindow(QMainWindow):
             self.assistant_overlay.clear_messages()
             for msg in dialog.messages:
                 self.assistant_overlay.append_message(msg.role, msg.content)
-            self.assistant_overlay.set_state_text("Готов")
+            self.assistant_overlay.set_state_text(self._t("ready"))
             self.assistant_overlay.show_overlay()
         logger.info(f"[Main] Продолжен диалог: {dialog.title}")
 
@@ -3503,12 +2301,13 @@ class MainWindow(QMainWindow):
         self.download_btn.setText(self._t("download_model"))
 
         # Дополнительная вкладка
-        self.perf_section_label.setText(self._t("performance_section"))
+        self.perf_section_label.setTitle(self._t("performance_section"))
         self.vad_label.setText(self._t("vad_filter"))
         self.beam_label.setText(self._t("beam_size"))
         self.model_path_label.setText(self._t("model_path"))
 
-        self.overlay_section_label.setText(self._t("overlay_section"))
+        self.overlay_section_label.setTitle(self._t("overlay_section"))
+        self.app_section_label.setTitle(self._t("app_section"))
         self.position_label.setText(self._t("position"))
         self.margin_label.setText(self._t("margin"))
         self.wave_gain_label.setText(self._t("wave_gain"))
@@ -3534,8 +2333,6 @@ class MainWindow(QMainWindow):
 
         # Вкладка файлов
         self.drop_zone.set_translate_func(self._t)
-        self.output_format_label.setText(self._t("output_format"))
-        self.output_folder_label.setText(self._t("output_folder"))
         self.browse_folder_btn.setText(self._t("browse"))
         self.queue_title_label.setText(self._t("processing_queue"))
         self.clear_queue_btn.setText(self._t("clear_queue"))
@@ -3557,6 +2354,8 @@ class MainWindow(QMainWindow):
         self.enable_summary_checkbox.setText(self._t("enable_summary"))
         self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
         self.customize_prompts_btn.setText(self._t("customize_prompts"))
+        if hasattr(self, "_thinking_title"):
+            self._thinking_title.setText(self._t("ai_thinking"))
 
         # Обновляем виджеты файлов
         for widget in self._file_widgets.values():
@@ -3942,8 +2741,15 @@ class MainWindow(QMainWindow):
         self._add_journal_entry("pending", "downloading", extra_key=model_size, is_translatable=True)
 
     def _on_download_progress(self, status: str, current: int, total: int) -> None:
-        self.download_progress.setValue(current)
-        self.download_status_label.setText(status)
+        if total > 0:
+            pct = int(current / total * 100)
+            self.download_progress.setValue(pct)
+            cur_mb = current / (1024 * 1024)
+            tot_mb = total / (1024 * 1024)
+            self.download_status_label.setText(f"{cur_mb:.0f} / {tot_mb:.0f} MB")
+        else:
+            self.download_progress.setValue(0)
+            self.download_status_label.setText(status)
 
     def _on_download_finished(self, path: str, err: str) -> None:
         self.download_btn.setEnabled(True)
@@ -3951,7 +2757,9 @@ class MainWindow(QMainWindow):
 
         if err and err != "cancelled":
             self.download_progress.setValue(0)
-            self.download_status_label.setText(f"Error: {err[:50]}...")
+            short_err = err if len(err) <= 80 else err[:77] + "..."
+            self.download_status_label.setText(f"Error: {short_err}")
+            self.download_status_label.setToolTip(err)
             self._add_journal_entry("error", "error", text=err, is_translatable=True)
             return
         if err == "cancelled":
@@ -4034,7 +2842,9 @@ class MainWindow(QMainWindow):
 
         if info.error:
             self.update_status_label.setText(self._t("network_error"))
-            self.update_status_label.setStyleSheet("font-size: 11px; color: #cc0000;")
+            self.update_status_label.setObjectName("updateStatusError")
+            self.update_status_label.style().unpolish(self.update_status_label)
+            self.update_status_label.style().polish(self.update_status_label)
             self.update_status_label.setVisible(True)
             self._add_journal_entry("error", "update_error", text=info.error, is_translatable=True)
             return
@@ -4043,7 +2853,9 @@ class MainWindow(QMainWindow):
             self.update_status_label.setText(
                 f"{self._t('update_available')}: v{info.version}"
             )
-            self.update_status_label.setStyleSheet("font-size: 11px; color: #006600; font-weight: bold;")
+            self.update_status_label.setObjectName("updateStatusSuccess")
+            self.update_status_label.style().unpolish(self.update_status_label)
+            self.update_status_label.style().polish(self.update_status_label)
             self.update_status_label.setVisible(True)
 
             # Показываем кнопку обновления
@@ -4064,7 +2876,9 @@ class MainWindow(QMainWindow):
                 )
         else:
             self.update_status_label.setText(self._t("no_updates"))
-            self.update_status_label.setStyleSheet("font-size: 11px;")
+            self.update_status_label.setObjectName("updateStatusNeutral")
+            self.update_status_label.style().unpolish(self.update_status_label)
+            self.update_status_label.style().polish(self.update_status_label)
             self.update_status_label.setVisible(True)
             self._add_journal_entry("success", "no_updates", is_translatable=True)
 
@@ -4105,7 +2919,9 @@ class MainWindow(QMainWindow):
 
         if success:
             self.update_status_label.setText(self._t("update_ready"))
-            self.update_status_label.setStyleSheet("font-size: 11px; color: #006600; font-weight: bold;")
+            self.update_status_label.setObjectName("updateStatusSuccess")
+            self.update_status_label.style().unpolish(self.update_status_label)
+            self.update_status_label.style().polish(self.update_status_label)
             self.check_update_btn.setText(self._t("update_now"))
 
             # Предлагаем установить
@@ -4123,7 +2939,9 @@ class MainWindow(QMainWindow):
                 self.updater.install_update()
         else:
             self.update_status_label.setText(f"{self._t('update_error')}: {error}")
-            self.update_status_label.setStyleSheet("font-size: 11px; color: #cc0000;")
+            self.update_status_label.setObjectName("updateStatusError")
+            self.update_status_label.style().unpolish(self.update_status_label)
+            self.update_status_label.style().polish(self.update_status_label)
             self.check_update_btn.setText(self._t("check_updates"))
             self.check_update_btn.clicked.disconnect()
             self.check_update_btn.clicked.connect(self._check_for_updates)
@@ -4227,13 +3045,35 @@ class MainWindow(QMainWindow):
         """Обновить видимость полей в зависимости от провайдера."""
         provider = self.provider_combo.currentData()
 
+        # MindType Cloud не требует API ключа (использует лицензию)
+        is_mindtype_cloud = provider == "mindtype_cloud"
         # Ollama не требует API ключа, но требует base_url
         is_ollama = provider == "ollama"
 
-        self.api_key_label.setVisible(not is_ollama)
-        self.api_key_edit.setVisible(not is_ollama)
+        # Скрыть API key для MindType Cloud и Ollama
+        self.api_key_label.setVisible(not is_ollama and not is_mindtype_cloud)
+        self.api_key_edit.setVisible(not is_ollama and not is_mindtype_cloud)
         self.base_url_label.setVisible(is_ollama)
         self.base_url_edit.setVisible(is_ollama)
+
+        # Скрыть выбор модели для MindType Cloud (автовыбор)
+        self.model_select_label.setVisible(not is_mindtype_cloud)
+        self.model_combo.setVisible(not is_mindtype_cloud)
+        self.refresh_models_btn.setVisible(not is_mindtype_cloud)
+
+        # Скрыть reasoning для MindType Cloud (не поддерживается)
+        self.reasoning_checkbox.setVisible(not is_mindtype_cloud)
+        self.effort_label.setVisible(not is_mindtype_cloud)
+        self.effort_combo.setVisible(not is_mindtype_cloud)
+
+        # Показать/скрыть виджет кредитов
+        if hasattr(self, '_credits_widget'):
+            self._credits_widget.setVisible(is_mindtype_cloud)
+
+        # Инициализировать MindType Cloud провайдер
+        if is_mindtype_cloud:
+            self._init_mindtype_cloud()
+            self._refresh_credits_balance()
 
         # Обновляем placeholder для API ключа
         placeholders = {
@@ -4247,6 +3087,11 @@ class MainWindow(QMainWindow):
     def _load_provider_settings(self, provider: str) -> None:
         """Загрузить настройки для провайдера."""
         cfg = self.config.config
+
+        # MindType Cloud использует лицензионный ключ, не API ключ
+        if provider == "mindtype_cloud":
+            self.api_key_edit.setText("")
+            return
 
         # API ключ
         key_field = f"{provider}_api_key"
@@ -4270,7 +3115,7 @@ class MainWindow(QMainWindow):
     def _on_api_key_changed(self, value: str) -> None:
         """Сохранить API ключ для текущего провайдера."""
         provider = self.provider_combo.currentData()
-        if provider and provider != "ollama":
+        if provider and provider not in ("ollama", "mindtype_cloud"):
             key_field = f"{provider}_api_key"
             self.config.update(**{key_field: value})
 
@@ -4404,6 +3249,52 @@ class MainWindow(QMainWindow):
         ]
         self._rebuild_file_queue_ui()
 
+    def _check_cloud_credits_before_processing(self) -> bool:
+        """
+        Pre-flight проверка кредитов MindType Cloud перед обработкой.
+
+        Returns:
+            True если можно продолжить, False если кредитов нет или отменено.
+        """
+        if not hasattr(self, '_cloud_provider') or not self._cloud_provider:
+            self._init_mindtype_cloud()
+
+        if not hasattr(self, '_cloud_provider') or not self._cloud_provider:
+            QMessageBox.warning(
+                self,
+                self._t("error"),
+                self._t("cloud_not_initialized"),
+            )
+            return False
+
+        try:
+            info = self._cloud_provider.get_balance()
+            credits = info.credits
+
+            if credits <= 0:
+                from .llm.mindtype_cloud import LLMNoCreditsError
+                reply = QMessageBox.warning(
+                    self,
+                    self._t("no_credits_title"),
+                    self._t("no_credits_message"),
+                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Open:
+                    from PyQt6.QtGui import QDesktopServices
+                    QDesktopServices.openUrl(QUrl("https://mindtype.space/buy-credits"))
+                return False
+
+            # Обновляем виджет баланса
+            if hasattr(self, '_credits_widget'):
+                self._credits_widget.set_balance(credits)
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to check credits: {e}")
+            # При ошибке сети — разрешаем продолжить (сервер проверит)
+            return True
+
     def _on_start_processing(self) -> None:
         """Начать обработку файлов."""
         from .crash_reporter import add_breadcrumb
@@ -4436,6 +3327,37 @@ class MainWindow(QMainWindow):
         # Кастомные промпты перезаписывают промпты из пресета
         custom_prompts = {**preset_prompts, **custom_prompts_saved} if custom_prompts_saved else preset_prompts
 
+        # Определяем провайдер суммаризации из настроек
+        llm_provider = cfg.get("llm_provider", "openrouter")
+        summary_api_key = ""
+        summary_model = ""
+        summary_base_url = ""
+        summary_reasoning = True
+        summary_reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
+
+        if llm_provider == "mindtype_cloud":
+            # MindType Cloud: используем лицензионный ключ
+            license_info = self.license_manager.get_license_info()
+            summary_api_key = license_info.license_key or ""
+            summary_model = "auto"
+            summary_reasoning = False  # Cloud не поддерживает reasoning
+        elif llm_provider == "ollama":
+            summary_base_url = cfg.get("ollama_base_url", "http://localhost:11434")
+            summary_model = cfg.get("ollama_model", "")
+            summary_reasoning = bool(cfg.get("llm_reasoning_enabled", True))
+        else:
+            # OpenAI, Anthropic, Gemini, OpenRouter
+            summary_api_key = cfg.get(f"{llm_provider}_api_key", "")
+            summary_model = cfg.get(f"{llm_provider}_model", "")
+            summary_reasoning = bool(cfg.get("llm_reasoning_enabled", True))
+            summary_reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
+
+        # Pre-flight проверка кредитов для MindType Cloud
+        enable_summary = self.enable_summary_checkbox.isChecked()
+        if enable_summary and llm_provider == "mindtype_cloud":
+            if not self._check_cloud_credits_before_processing():
+                return
+
         self._file_queue = FileTranscriptionQueue(
             transcriber=self.transcriber,
             model_size=cfg.get("model_size", "large-v3"),
@@ -4449,11 +3371,17 @@ class MainWindow(QMainWindow):
             on_thinking=lambda text: self.thinking_signal.emit(text),  # Всегда включен
             enable_thinking=True,  # Всегда включен
             custom_prompts=custom_prompts,
-            # OpenRouter настройки
-            summary_provider="openrouter",
+            # Универсальные настройки провайдера
+            summary_provider=llm_provider,
+            summary_api_key=summary_api_key,
+            summary_model=summary_model,
+            summary_base_url=summary_base_url,
+            summary_reasoning=summary_reasoning,
+            summary_reasoning_effort=summary_reasoning_effort,
+            # Legacy OpenRouter (обратная совместимость)
             openrouter_api_key=cfg.get("openrouter_api_key", ""),
             openrouter_model=cfg.get("openrouter_model", ""),
-            openrouter_reasoning=True,  # Всегда включен, сила выбирается в настройках
+            openrouter_reasoning=bool(cfg.get("openrouter_reasoning", cfg.get("llm_reasoning_enabled", True))),
             openrouter_reasoning_effort=cfg.get("openrouter_reasoning_effort", "medium"),
             # Постобработка (диаризация, пунктуация и т.д.)
             enable_postprocessing=cfg.get("enable_postprocessing", True),
@@ -4629,16 +3557,61 @@ class MainWindow(QMainWindow):
             self.hide()
             return
 
-        # Полное закрытие
+        # Полное закрытие — останавливаем все фоновые потоки и ресурсы
+        self._cleanup_all()
+        super().closeEvent(event)
+
+    def _cleanup_all(self) -> None:
+        """Остановить все фоновые потоки и освободить ресурсы."""
+        # Hotkeys
         if self.hotkey_listener:
             self.hotkey_listener.stop()
         if self.hotkey_recorder:
             self.hotkey_recorder.stop()
+
+        # Assistant hotkeys
+        if hasattr(self, '_assistant_hotkey_listener') and self._assistant_hotkey_listener:
+            self._assistant_hotkey_listener.stop()
+        if hasattr(self, '_assistant_hotkey_recorder') and self._assistant_hotkey_recorder:
+            self._assistant_hotkey_recorder.stop()
+
+        # Voice assistant
+        if ASSISTANT_FEATURE_ENABLED and self.voice_assistant:
+            try:
+                self.voice_assistant.stop()
+            except Exception:
+                pass
+
+        # Останавливаем запись аудио если идёт
+        if self.audio.recording:
+            self.audio.stop()
         self.audio.stop_monitoring()
+
+        # Останавливаем QThread воркеры
+        for worker in [
+            self._transcribe_thread,
+            self._download_thread,
+            self._file_worker,
+            self._update_check_worker,
+            self._update_download_worker,
+            getattr(self, '_credits_worker', None),
+            getattr(self, '_history_worker', None),
+        ]:
+            if worker and worker.isRunning():
+                worker.quit()
+                if not worker.wait(2000):  # 2 секунды на завершение
+                    worker.terminate()
+                    worker.wait(1000)
+
+        # UI cleanup
         self.overlay.hide()
         if self.tray_icon:
             self.tray_icon.hide()
-        super().closeEvent(event)
+
+        # Принудительно завершаем Qt event loop
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
 
 def main() -> None:
@@ -4651,6 +3624,37 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setWindowIcon(create_app_icon(64))  # Иконка для всего приложения
+
+    # Загружаем шрифты Chicago/Geneva для system.css стиля
+    from PyQt6.QtGui import QFontDatabase
+    fonts_dir = Path(__file__).parent / "ui" / "fonts"
+    for font_file in ["ChicagoFLF.ttf", "FindersKeepers.ttf"]:
+        font_path = fonts_dir / font_file
+        if font_path.exists():
+            font_id = QFontDatabase.addApplicationFont(str(font_path))
+            if font_id >= 0:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                logger.debug(f"Loaded font: {font_file} -> {families}")
+            else:
+                logger.warning(f"Failed to load font: {font_file}")
+
+    # Force light theme (System 7 style)
+    app.setStyle("Fusion")
+    from PyQt6.QtGui import QPalette
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(221, 221, 221))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Button, QColor(221, 221, 221))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    app.setPalette(palette)
 
     # Проверяем лицензию перед запуском
     license_manager = LicenseManager()
@@ -4679,7 +3683,25 @@ def main() -> None:
 
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+
+    exit_code = app.exec()
+
+    # Принудительное завершение если остались висящие non-daemon потоки
+    import threading
+    alive = [t for t in threading.enumerate()
+             if t.is_alive() and not t.daemon and t is not threading.main_thread()]
+    if alive:
+        logger.warning(f"Forcing exit, {len(alive)} non-daemon threads still alive: "
+                       f"{[t.name for t in alive]}")
+        # os._exit не вызывает atexit/finally, поэтому удаляем lock файл вручную
+        lock_path = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "MindType" / ".lock"
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        os._exit(exit_code)
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

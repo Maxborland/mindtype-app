@@ -1,10 +1,12 @@
 import json
+import logging
 import os
 import sys
-import logging
 from pathlib import Path
 from typing import Any, Dict
-from .env import mask_secret
+
+from .constants import API_KEY_FIELDS
+from .env import is_app_frozen, mask_secret
 
 try:
     import keyring
@@ -16,8 +18,7 @@ logger = logging.getLogger("mindtype.config")
 
 def _get_base_dir() -> Path:
     """Get application base directory (works for both dev and compiled)."""
-    # Check for Nuitka (__compiled__) or PyInstaller (frozen)
-    if getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__"):
+    if is_app_frozen():
         # Compiled with Nuitka/PyInstaller - use exe location
         return Path(sys.executable).resolve().parent
     else:
@@ -31,7 +32,7 @@ DEFAULT_MODELS_DIR = BASE_DIR / "models"
 
 def _get_default_model() -> str:
     """Get default model - use tiny in compiled mode if large not available."""
-    if getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__"):
+    if is_app_frozen():
         # In compiled mode, check which models are available
         tiny_path = DEFAULT_MODELS_DIR / "tiny"
         large_path = DEFAULT_MODELS_DIR / "large-v3"
@@ -44,6 +45,11 @@ def _get_default_model() -> str:
 
 def _default_config() -> Dict[str, Any]:
     return {
+        # Setup wizard state
+        "setup_completed": False,            # True после завершения визарда
+        "simple_mode": True,                 # True = Simple, False = Advanced
+        "use_mindtype_cloud": False,         # True = MindType Cloud, False = свой API ключ
+        # Model settings
         "model_size": _get_default_model(),
         "compute_type": "int8",
         "device": "auto",
@@ -83,6 +89,9 @@ def _default_config() -> Dict[str, Any]:
         # OpenRouter (private-only)
         "openrouter_api_key": "",
         "openrouter_model": "",
+        # Legacy aliases for backward compatibility
+        "openrouter_reasoning": True,
+        "openrouter_reasoning_effort": "medium",
         # Постобработка транскрипций
         "enable_postprocessing": True,      # Включить постобработку
         "postprocessing_diarization": True,  # Диаризация спикеров (MFCC + sklearn, лёгкая)
@@ -131,19 +140,30 @@ class ConfigManager:
         merged = _default_config()
         merged.update(data)
 
+        # Normalize reasoning keys from older config formats.
+        if "llm_reasoning_enabled" not in data:
+            if "reasoning_enabled" in data:
+                merged["llm_reasoning_enabled"] = bool(data["reasoning_enabled"])
+            elif "openrouter_reasoning" in data:
+                merged["llm_reasoning_enabled"] = bool(data["openrouter_reasoning"])
+
+        if "llm_reasoning_effort" not in data:
+            if "reasoning_effort" in data:
+                merged["llm_reasoning_effort"] = data["reasoning_effort"]
+            elif "openrouter_reasoning_effort" in data:
+                merged["llm_reasoning_effort"] = data["openrouter_reasoning_effort"]
+
+        # Keep legacy OpenRouter keys in sync for older code paths/configs.
+        merged["openrouter_reasoning"] = bool(merged.get("llm_reasoning_enabled", True))
+        merged["openrouter_reasoning_effort"] = merged.get("llm_reasoning_effort", "medium")
+
         # Fix legacy "[OK] model" format from older versions
         if "model_size" in merged and merged["model_size"].startswith("[OK] "):
             merged["model_size"] = merged["model_size"].replace("[OK] ", "")
 
         # Загружаем API ключи из keyring если доступно
         if keyring:
-            api_key_fields = [
-                "openai_api_key",
-                "anthropic_api_key",
-                "gemini_api_key",
-                "openrouter_api_key",
-            ]
-            for key_field in api_key_fields:
+            for key_field in API_KEY_FIELDS:
                 try:
                     stored_key = keyring.get_password("mindtype", key_field)
                     if stored_key:
@@ -152,7 +172,7 @@ class ConfigManager:
                     logger.error(f"Ошибка загрузки {key_field} из keyring: {e}")
 
         # In compiled mode, verify model exists or fallback to available one
-        if getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__"):
+        if is_app_frozen():
             model_size = merged.get("model_size", "tiny")
             model_path = DEFAULT_MODELS_DIR / model_size
             if not model_path.exists():
@@ -169,25 +189,26 @@ class ConfigManager:
     def save(self) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
-        # Сохраняем API ключи в keyring если доступно
-        api_key_fields = [
-            "openai_api_key",
-            "anthropic_api_key",
-            "gemini_api_key",
-            "openrouter_api_key",
-        ]
-
         data_to_save = self.config.copy()
 
-        for key_field in api_key_fields:
+        # Сохраняем API ключи в keyring если доступно
+        for key_field in API_KEY_FIELDS:
             api_key = self.config.get(key_field, "")
-            if keyring and api_key and api_key != "key_in_keyring":
-                try:
-                    keyring.set_password("mindtype", key_field, api_key)
-                    # Маскируем ключ в JSON файле
-                    data_to_save[key_field] = "key_in_keyring"
-                except Exception as e:
-                    logger.error(f"Ошибка сохранения {key_field} в keyring: {e}")
+            if api_key and api_key != "key_in_keyring":
+                if keyring:
+                    try:
+                        keyring.set_password("mindtype", key_field, api_key)
+                        # Маскируем ключ в JSON файле - никогда не сохраняем plaintext
+                        data_to_save[key_field] = "key_in_keyring"
+                    except Exception as e:
+                        logger.error(f"Ошибка сохранения {key_field} в keyring: {e}")
+                        # SECURITY: Don't save plaintext key to JSON on keyring failure
+                        data_to_save[key_field] = ""
+                        logger.warning(f"API ключ {key_field} НЕ сохранён из-за ошибки keyring")
+                else:
+                    # SECURITY: keyring not available - don't save plaintext keys
+                    logger.warning(f"keyring недоступен - API ключ {key_field} не будет сохранён")
+                    data_to_save[key_field] = ""
 
         with self.config_path.open("w", encoding="utf-8") as fh:
             json.dump(data_to_save, fh, ensure_ascii=False, indent=2)
@@ -195,5 +216,4 @@ class ConfigManager:
     def update(self, **kwargs: Any) -> None:
         self.config.update(kwargs)
         self.save()
-
 

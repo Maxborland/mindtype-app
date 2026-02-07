@@ -105,6 +105,15 @@ credentials.json
 
 # Claude Code local settings
 .claude/
+CLAUDE.md
+.playwright-mcp/
+temp_config.json
+screenshot_*.png
+mindtype-tauri/
+.tmp_temp/
+.tmp_appdata/
+.pytest_cache_local/
+pytest-cache-files-*/
 
 # Build artifacts
 *.spec
@@ -117,4 +126,3 @@ build/mindtype/
 
 # Old/temporary assets
 *_old.*
-
