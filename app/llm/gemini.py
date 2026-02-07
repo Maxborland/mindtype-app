@@ -7,21 +7,18 @@ Google Gemini LLM провайдер.
 - Динамическая загрузка моделей из API
 """
 
+import codecs
 import json
 import logging
-import urllib.request
 import urllib.error
 from typing import Dict, List, Optional, Any
-import codecs
 
 from .base import (
     LLMProvider,
     LLMModel,
     LLMError,
     LLMAuthError,
-    LLMRateLimitError,
     LLMConnectionError,
-    LLMInvalidModelError,
     ReasoningConfig,
     TokenCallback,
     ThinkingCallback,
@@ -48,54 +45,29 @@ class GeminiProvider(LLMProvider):
     def __init__(self, api_key: str, timeout: int = 180):
         super().__init__(api_key=api_key, timeout=timeout)
 
-    def _get_url(self, endpoint: str, stream: bool = False) -> str:
-        """Получить URL для endpoint."""
-        action = "streamGenerateContent" if stream else "generateContent"
-        return f"{GEMINI_BASE_URL}/models/{endpoint}:{action}"
-
-    def _make_request(
-        self,
-        url: str,
-        method: str = "GET",
-        data: Optional[Dict] = None,
-        stream: bool = False,
-    ) -> Any:
-        """Выполнить HTTP запрос к Gemini API."""
-        headers = {
+    def _get_headers(self) -> Dict[str, str]:
+        """Заголовки Gemini API (использует x-goog-api-key)."""
+        return {
             "Content-Type": "application/json",
             "x-goog-api-key": self.api_key,
         }
 
-        req_data = json.dumps(data).encode("utf-8") if data else None
-        request = urllib.request.Request(url, data=req_data, headers=headers, method=method)
-
-        try:
-            response = urlopen_with_ssl(request, timeout=self.timeout)
-            if stream:
-                return response
-            return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8") if e.fp else ""
-            self._handle_http_error(e.code, error_body)
-        except urllib.error.URLError as e:
-            raise LLMConnectionError(f"Ошибка подключения к Gemini: {e.reason}")
-
     def _handle_http_error(self, status_code: int, body: str) -> None:
-        """Обработать HTTP ошибку."""
-        try:
-            error_data = json.loads(body)
-            message = error_data.get("error", {}).get("message", body)
-        except json.JSONDecodeError:
-            message = body
-
-        if status_code in (401, 403):
+        """Обработать HTTP ошибку (403 тоже означает неверный ключ)."""
+        if status_code == 403:
+            try:
+                error_data = json.loads(body)
+                message = error_data.get("error", {}).get("message", body)
+            except json.JSONDecodeError:
+                message = body
             raise LLMAuthError(f"Неверный API ключ Gemini: {message}")
-        elif status_code == 429:
-            raise LLMRateLimitError(f"Превышен лимит запросов Gemini: {message}")
-        elif status_code == 404:
-            raise LLMInvalidModelError(f"Модель не найдена: {message}")
-        else:
-            raise LLMError(f"Ошибка Gemini API ({status_code}): {message}")
+        # Для остальных кодов используем базовую обработку
+        super()._handle_http_error(status_code, body)
+
+    def _get_url(self, endpoint: str, stream: bool = False) -> str:
+        """Получить URL для endpoint."""
+        action = "streamGenerateContent" if stream else "generateContent"
+        return f"{GEMINI_BASE_URL}/models/{endpoint}:{action}"
 
     def _fetch_models_from_api(self) -> List[LLMModel]:
         """Загрузить модели из Gemini API."""
@@ -313,63 +285,63 @@ class GeminiProvider(LLMProvider):
 
         url = self._get_url(model, stream=True) + "?alt=sse"
 
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key,
-        }
-
-        req_data = json.dumps(data).encode("utf-8")
-        request = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
-
-        full_response = []
-
         try:
-            with urlopen_with_ssl(request, timeout=self.timeout) as response:
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                buffer = ""
-
-                while True:
-                    chunk = response.read(1024)
-                    if not chunk:
-                        final = decoder.decode(b"", final=True)
-                        if final:
-                            buffer += final
-                        break
-                    buffer += decoder.decode(chunk)
-
-                    # Парсим SSE события
-                    while "\n\n" in buffer:
-                        event, buffer = buffer.split("\n\n", 1)
-
-                        for line in event.split("\n"):
-                            if line.startswith("data: "):
-                                try:
-                                    event_data = json.loads(line[6:])
-                                    candidates = event_data.get("candidates", [])
-
-                                    if candidates:
-                                        content = candidates[0].get("content", {})
-                                        parts = content.get("parts", [])
-
-                                        for part in parts:
-                                            # Обычный текст
-                                            if "text" in part:
-                                                text = part["text"]
-                                                full_response.append(text)
-                                                on_token(text)
-
-                                            # Thinking (если есть)
-                                            if "thought" in part and on_thinking:
-                                                on_thinking(part["thought"])
-
-                                except json.JSONDecodeError:
-                                    pass
-
+            response = self._make_request(url, method="POST", data=data, stream=True)
+            return self._parse_gemini_sse_stream(response, on_token, on_thinking)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             self._handle_http_error(e.code, error_body)
         except urllib.error.URLError as e:
             raise LLMConnectionError(f"Ошибка подключения к Gemini: {e.reason}")
+        return ""
+
+    def _parse_gemini_sse_stream(
+        self,
+        response,
+        on_token: TokenCallback,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> str:
+        """Парсинг SSE потока Gemini с поддержкой thinking."""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffer = ""
+        full_response: List[str] = []
+
+        while True:
+            chunk = response.read(1024)
+            if not chunk:
+                final = decoder.decode(b"", final=True)
+                if final:
+                    buffer += final
+                break
+            buffer += decoder.decode(chunk)
+
+            # Парсим SSE события
+            while "\n\n" in buffer:
+                event, buffer = buffer.split("\n\n", 1)
+
+                for line in event.split("\n"):
+                    if line.startswith("data: "):
+                        try:
+                            event_data = json.loads(line[6:])
+                            candidates = event_data.get("candidates", [])
+
+                            if candidates:
+                                content = candidates[0].get("content", {})
+                                parts = content.get("parts", [])
+
+                                for part in parts:
+                                    # Обычный текст
+                                    if "text" in part:
+                                        text = part["text"]
+                                        full_response.append(text)
+                                        on_token(text)
+
+                                    # Thinking (если есть)
+                                    if "thought" in part and on_thinking:
+                                        on_thinking(part["thought"])
+
+                        except json.JSONDecodeError:
+                            pass
 
         return "".join(full_response)
 

@@ -40,6 +40,7 @@ from .anthropic import AnthropicProvider
 from .gemini import GeminiProvider
 from .ollama import OllamaProvider
 from .openrouter import OpenRouterProvider
+from .mindtype_cloud import MindTypeCloudProvider, LLMNoCreditsError, CreditsInfo
 
 
 class ProviderType(Enum):
@@ -49,6 +50,7 @@ class ProviderType(Enum):
     GEMINI = "gemini"
     OLLAMA = "ollama"
     OPENROUTER = "openrouter"
+    MINDTYPE_CLOUD = "mindtype_cloud"
 
 
 # Человекочитаемые имена провайдеров
@@ -58,6 +60,7 @@ PROVIDER_NAMES = {
     ProviderType.GEMINI: "Gemini (Google)",
     ProviderType.OLLAMA: "Ollama (Local)",
     ProviderType.OPENROUTER: "OpenRouter (Private)",
+    ProviderType.MINDTYPE_CLOUD: "MindType Cloud",
 }
 
 
@@ -96,6 +99,9 @@ def get_provider(
 
     elif provider_type == ProviderType.OPENROUTER:
         return OpenRouterProvider(api_key=api_key, timeout=timeout)
+
+    elif provider_type == ProviderType.MINDTYPE_CLOUD:
+        return MindTypeCloudProvider(license_key=api_key, timeout=timeout)
 
     else:
         raise ValueError(f"Неизвестный тип провайдера: {provider_type}")
@@ -151,7 +157,8 @@ def requires_api_key(provider_type: ProviderType) -> bool:
     Returns:
         True если требуется API ключ
     """
-    return provider_type != ProviderType.OLLAMA
+    # Ollama не требует ключа, MindType Cloud использует лицензионный ключ (не API ключ)
+    return provider_type not in (ProviderType.OLLAMA, ProviderType.MINDTYPE_CLOUD)
 
 
 __all__ = [
@@ -162,11 +169,13 @@ __all__ = [
     "GeminiProvider",
     "OllamaProvider",
     "OpenRouterProvider",
+    "MindTypeCloudProvider",
 
     # Модели и конфигурация
     "LLMModel",
     "ReasoningConfig",
     "ReasoningEffort",
+    "CreditsInfo",
 
     # Исключения
     "LLMError",
@@ -174,6 +183,7 @@ __all__ = [
     "LLMRateLimitError",
     "LLMConnectionError",
     "LLMInvalidModelError",
+    "LLMNoCreditsError",
 
     # Типы
     "ProviderType",

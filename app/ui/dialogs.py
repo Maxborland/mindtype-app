@@ -19,11 +19,11 @@ from PyQt6.QtWidgets import (
 )
 
 
-# System 7 стиль
+# system.css стиль (Apple System OS 1984-1991)
 SYSTEM7_STYLE = """
 QDialog {
-    background-color: #c0c0c0;
-    font-family: "MS Sans Serif", "Geneva", "Arial", sans-serif;
+    background-color: #ffffff;
+    font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
 }
 QLabel {
     color: #000000;
@@ -31,41 +31,39 @@ QLabel {
 }
 QFrame#content {
     background-color: #ffffff;
-    border: 2px solid;
-    border-top-color: #ffffff;
-    border-left-color: #ffffff;
-    border-right-color: #808080;
-    border-bottom-color: #808080;
+    border: 1.5px solid #000000;
 }
+/* Rounded buttons - system.css style */
 QPushButton {
-    background-color: #c0c0c0;
+    background-color: #ffffff;
     color: #000000;
-    border: 2px solid;
-    border-top-color: #ffffff;
-    border-left-color: #ffffff;
-    border-right-color: #000000;
-    border-bottom-color: #000000;
+    border: 1.5px solid #000000;
+    border-radius: 6px;
     padding: 4px 16px;
     min-height: 20px;
     font-size: 12px;
 }
 QPushButton:hover {
-    background-color: #d0d0d0;
+    background-color: #f0f0f0;
 }
 QPushButton:pressed {
-    border-top-color: #000000;
-    border-left-color: #000000;
-    border-right-color: #ffffff;
-    border-bottom-color: #ffffff;
-    background-color: #a0a0a0;
-}
-QPushButton#primary {
     background-color: #000000;
     color: #ffffff;
+}
+/* Primary button - thick border */
+QPushButton#primary {
+    background-color: #ffffff;
+    color: #000000;
     border: 3px solid #000000;
+    border-radius: 8px;
+    font-weight: bold;
 }
 QPushButton#primary:hover {
-    background-color: #333333;
+    background-color: #f0f0f0;
+}
+QPushButton#primary:pressed {
+    background-color: #000000;
+    color: #ffffff;
 }
 QCheckBox {
     color: #000000;
@@ -75,16 +73,14 @@ QCheckBox {
 QCheckBox::indicator {
     width: 12px;
     height: 12px;
-    border: 1px solid #000000;
+    border: 1.5px solid #000000;
     background-color: #ffffff;
+}
+QCheckBox::indicator:hover {
+    background-color: #f0f0f0;
 }
 QCheckBox::indicator:checked {
-    image: none;
-    background-color: #ffffff;
-    border: 1px solid #000000;
-}
-QCheckBox::indicator:checked:after {
-    content: "X";
+    background-color: #000000;
 }
 """
 

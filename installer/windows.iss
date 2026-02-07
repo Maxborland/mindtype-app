@@ -5,7 +5,7 @@
 ; =============================================================================
 
 #ifndef AppVersion
-  #define AppVersion "0.9.1"
+  #define AppVersion "0.9.3"
 #endif
 
 #ifndef AppName

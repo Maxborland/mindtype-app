@@ -6,8 +6,9 @@ import queue
 import tempfile
 import threading
 import wave
+from collections import deque
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Deque, List, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -28,7 +29,9 @@ class AudioRecorder:
         self._tmp_path: Optional[Path] = None
         self._running = threading.Event()
         self._level_callback: Optional[LevelCallback] = None
-        self._level_history: List[float] = []
+        # P12: Use deque instead of list for O(1) operations (list.pop(0) was O(n))
+        self._level_history: Deque[float] = deque(maxlen=32)
+        self._level_history_lock = threading.Lock()  # Защита для _level_history
         self._history_max_len = 32  # Количество баров для waveform
 
         # Для мониторинга микрофона (без записи)
@@ -64,12 +67,12 @@ class AudioRecorder:
                     normalized = min(1.0, rms / 2000)
 
                     # Добавляем в историю
-                    self._level_history.append(normalized)
-                    if len(self._level_history) > self._history_max_len:
-                        self._level_history.pop(0)
-
-                    # Отправляем копию истории в callback
-                    self._level_callback(self._level_history.copy())
+                    # P12: deque with maxlen handles overflow automatically (O(1))
+                    with self._level_history_lock:
+                        self._level_history.append(normalized)
+                        # Отправляем копию истории в callback
+                        history_copy = list(self._level_history)
+                    self._level_callback(history_copy)
             except Exception:
                 pass  # Игнорируем ошибки в callback
 
@@ -82,7 +85,8 @@ class AudioRecorder:
             return
 
         self._level_callback = level_callback
-        self._level_history = []
+        with self._level_history_lock:
+            self._level_history.clear()
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         self._tmp_path = Path(tmp.name)

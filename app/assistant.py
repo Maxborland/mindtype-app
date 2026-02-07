@@ -25,7 +25,7 @@ except ImportError:
 
 from .audio import AudioRecorder
 from .dialog_history import get_dialog_history_manager, Dialog, DialogHistoryManager
-from .openrouter import OpenRouterClient
+from .llm import get_provider, ProviderType, LLMProvider, LLMError
 from .text_normalizer import get_normalizer
 from .tts import get_tts_engine
 from .wake_word import WakeWordDetector
@@ -123,7 +123,7 @@ class VoiceAssistant:
         self._wake_word_detector: Optional[WakeWordDetector] = None
         self._audio_recorder = AudioRecorder()
         self._transcriber: Optional[Transcriber] = None
-        self._openrouter_client: Optional[OpenRouterClient] = None
+        self._llm_provider: Optional[LLMProvider] = None
         self._tts_engine = get_tts_engine()
         self._text_normalizer = get_normalizer(config.tts_language)
 
@@ -133,6 +133,7 @@ class VoiceAssistant:
 
         # Прерывание (hotkey/голос)
         self._interrupt_event = threading.Event()
+        self._restart_lock = threading.Lock()  # Защита для _is_restarting
         self._is_restarting = False  # Флаг для предотвращения race condition в finally
         self._voice_interrupt_lock = threading.Lock()  # Защита для _voice_interrupt_hits
         self._voice_interrupt_hits = 0
@@ -179,14 +180,17 @@ class VoiceAssistant:
         self._tts_engine.set_rate(self.config.tts_rate)
         logger.info("[Assistant] ✅ TTS настроен")
 
-        # LLM клиент (только OpenRouter)
+        # LLM провайдер (OpenRouter с private mode)
         if self.config.openrouter_api_key:
-            logger.info(f"[Assistant] 🤖 Инициализация OpenRouter клиента (модель: {self.config.openrouter_model})...")
+            logger.info(f"[Assistant] 🤖 Инициализация LLM провайдера (модель: {self.config.openrouter_model})...")
             try:
-                self._openrouter_client = OpenRouterClient(self.config.openrouter_api_key)
-                logger.info("[Assistant] ✅ OpenRouter клиент инициализирован")
+                self._llm_provider = get_provider(
+                    ProviderType.OPENROUTER,
+                    api_key=self.config.openrouter_api_key
+                )
+                logger.info("[Assistant] ✅ LLM провайдер инициализирован")
             except Exception as e:
-                logger.error(f"[Assistant] ❌ Ошибка инициализации OpenRouter: {e}")
+                logger.error(f"[Assistant] ❌ Ошибка инициализации LLM провайдера: {e}")
         else:
             logger.warning("[Assistant] ⚠️ OpenRouter API ключ не установлен. LLM функции недоступны.")
 
@@ -274,24 +278,25 @@ class VoiceAssistant:
         self._interrupt_event.set()
 
         if start_listening:
-            self._is_restarting = True
+            with self._restart_lock:
+                self._is_restarting = True
 
         try:
             self._tts_engine.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[Assistant] TTS stop error (ignored): {e}")
         try:
             if self._audio_recorder.recording:
                 self._audio_recorder.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[Assistant] Audio recorder stop error (ignored): {e}")
 
         if start_listening:
             # Переводим в IDLE и сразу начинаем запись новой команды
             try:
                 self._set_state(AssistantState.IDLE)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Assistant] Set state error (ignored): {e}")
             threading.Thread(target=self._record_and_process_command, daemon=True).start()
 
     def _start_voice_interrupt_monitoring(self) -> None:
@@ -343,7 +348,8 @@ class VoiceAssistant:
                         # ВАЖНО: остановить мониторинг ПЕРЕД запуском нового потока,
                         # иначе callback может сработать повторно!
                         self._stop_voice_interrupt_monitoring()
-                        self._is_restarting = True
+                        with self._restart_lock:
+                            self._is_restarting = True
                         threading.Thread(target=self._record_and_process_command, daemon=True).start()
                         return  # Выходим из callback чтобы не было повторных срабатываний
             except Exception:
@@ -371,11 +377,11 @@ class VoiceAssistant:
         if hasattr(self._audio_recorder, 'stop_monitoring'):
             try:
                 self._audio_recorder.stop_monitoring()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Assistant] Stop monitoring error (ignored): {e}")
 
     def _record_and_process_command(self) -> None:
-        """Записать команду пользователя и обработать её."""
+        """Главный оркестратор записи и обработки команды."""
         # Проверяем что не идёт уже обработка (защита от множественных вызовов)
         with self._processing_lock:
             if self._is_processing:
@@ -388,149 +394,17 @@ class VoiceAssistant:
             logger.info("[Assistant] 🎤 Начинаю запись команды пользователя...")
             self._interrupt_event.clear()
 
-            # === ФАЗА 1: КАЛИБРОВКА ШУМА ===
-            self._set_state(AssistantState.CALIBRATING)
+            # Фаза 1: Калибровка микрофона
+            noise_floor = self._calibrate_microphone()
+            if noise_floor is None:
+                return  # Прервано
 
-            calibration_levels: List[float] = []
-            calibration_duration = self.config.calibration_duration  # 0.3 сек
-            calibration_done = threading.Event()
-            calibration_start = time.time()
+            # Фаза 2: Запись с VAD
+            audio_file = self._record_with_vad(noise_floor)
+            if audio_file is None:
+                return  # Прервано или ошибка
 
-            def _calibration_callback(levels):
-                if not levels:
-                    return
-                # Передаём в UI
-                if self._on_level:
-                    self._on_level(levels[-1])
-                calibration_levels.append(levels[-1])
-                # Завершаем калибровку по времени
-                if time.time() - calibration_start >= calibration_duration:
-                    calibration_done.set()
-
-            logger.info(f"[Assistant] 📊 Калибровка микрофона ({calibration_duration}с)...")
-            self._audio_recorder.start(
-                device=self.config.microphone_device,
-                level_callback=_calibration_callback
-            )
-
-            # Ждём завершения калибровки (с проверкой прерывания)
-            while not calibration_done.is_set():
-                if self._interrupt_event.is_set():
-                    logger.info("[Assistant] ⛔ Калибровка прервана")
-                    self._audio_recorder.stop()
-                    return
-                calibration_done.wait(timeout=0.1)
-
-            # ОСТАНАВЛИВАЕМ запись калибровки (важно!)
-            self._audio_recorder.stop()
-
-            # Проверка прерывания после калибровки
-            if self._interrupt_event.is_set():
-                logger.info("[Assistant] ⛔ Прервано после калибровки")
-                return
-
-            # Рассчитываем noise floor
-            if calibration_levels:
-                noise_floor = sum(calibration_levels) / len(calibration_levels)
-            else:
-                noise_floor = 0.05  # Fallback
-
-            # Динамические пороги на основе шума
-            silence_threshold = max(
-                self.config.silence_threshold,  # минимум из конфига
-                noise_floor * self.config.noise_multiplier_silence
-            )
-            speech_threshold = min(
-                self.config.max_speech_threshold,  # максимум 0.25
-                max(
-                    self.config.min_speech_threshold,  # минимум 0.06
-                    noise_floor * self.config.noise_multiplier_speech
-                )
-            )
-
-            logger.info(f"[Assistant] 📊 Калибровка завершена: шум={noise_floor:.3f}, тишина<{silence_threshold:.3f}, речь>{speech_threshold:.3f}")
-
-            # === ФАЗА 2: ЗАПИСЬ С VAD ===
-            self._set_state(AssistantState.LISTENING)
-
-            silence_duration = self.config.silence_duration    # 1.2 сек
-            max_recording_time = self.config.max_recording_time # 30 сек
-            min_speech_duration = 0.3  # Минимальная длительность речи перед началом отсчёта тишины
-
-            start_time = time.time()
-            self._recording_finished = threading.Event()
-            self._silence_start_time = None
-            self._speech_detected = False
-            self._speech_start_time = None
-            self._last_log_time = time.time()
-
-            # Callback для VAD
-            def _vad_level_callback(levels):
-                if not levels:
-                    return
-
-                lvl = levels[-1]
-                now = time.time()
-
-                # Передаём в UI
-                if self._on_level:
-                    self._on_level(lvl)
-
-                # Периодический лог уровней (каждые 2 сек)
-                if now - self._last_log_time >= 2.0:
-                    self._last_log_time = now
-                    speech_status = "🗣️речь" if self._speech_detected else "⏳ждём"
-                    logger.info(f"[VAD] lvl={lvl:.3f} | речь>{speech_threshold:.3f} | тишина<{silence_threshold:.3f} | {speech_status}")
-
-                # Детекция начала речи
-                if lvl >= speech_threshold:
-                    if not self._speech_detected:
-                        self._speech_detected = True
-                        self._speech_start_time = now
-                        logger.info(f"[VAD] 🗣️ Речь обнаружена (lvl={lvl:.3f} >= {speech_threshold:.3f})")
-                    self._silence_start_time = None  # Сброс счётчика тишины
-
-                # Детекция тишины (только после обнаружения речи)
-                elif self._speech_detected and lvl < silence_threshold:
-                    # Проверяем, что речь была достаточно долгой
-                    speech_duration = now - self._speech_start_time if self._speech_start_time else 0
-                    if speech_duration >= min_speech_duration:
-                        if self._silence_start_time is None:
-                            self._silence_start_time = now
-                            logger.info(f"[VAD] 🤫 Тишина началась (lvl={lvl:.3f} < {silence_threshold:.3f})")
-                        elif now - self._silence_start_time >= silence_duration:
-                            logger.info(f"[VAD] ✅ Тишина {silence_duration}с — завершаю запись")
-                            self._recording_finished.set()
-
-            # ЗАПУСКАЕМ запись с VAD callback (чистый старт!)
-            logger.info("[Assistant] 🎤 Слушаю... (говорите)")
-            self._audio_recorder.start(
-                device=self.config.microphone_device,
-                level_callback=_vad_level_callback
-            )
-
-            # Ждём завершения записи (по VAD, по таймауту или по внешнему стопу)
-            while not self._recording_finished.is_set() and self._audio_recorder.recording:
-                if self._interrupt_event.is_set():
-                    logger.info("[Assistant] ⛔ Запись прервана")
-                    break
-                if time.time() - start_time > max_recording_time:
-                    logger.warning(f"[Assistant] ⏳ Достигнуто макс. время записи ({max_recording_time}с)")
-                    break
-                time.sleep(0.1)
-
-            logger.info("[Assistant] ⏹️ Останавливаю запись...")
-            audio_file = self._audio_recorder.stop()
-
-            if not audio_file or not audio_file.exists():
-                logger.error("[Assistant] ❌ Не удалось записать аудио")
-                self._set_state(AssistantState.ERROR)
-                time.sleep(2)
-                return
-
-            logger.info(f"[Assistant] ✅ Аудио записано: {audio_file}")
-
-            # Обрабатываем команду
+            # Фаза 3: Обработка команды
             self._process_command(audio_file)
 
         except Exception as e:
@@ -538,25 +412,179 @@ class VoiceAssistant:
             self._set_state(AssistantState.ERROR)
             time.sleep(2)
         finally:
-            # Сбрасываем флаг обработки
-            with self._processing_lock:
-                self._is_processing = False
+            self._cleanup_recording(audio_file)
 
-            # Гарантируем возврат в IDLE, если не перезапускаемся
-            if not self._is_restarting:
-                if self._state != AssistantState.IDLE:
-                    self._set_state(AssistantState.IDLE)
-            else:
-                # Сбрасываем флаг для следующего цикла
+    def _calibrate_microphone(self) -> Optional[float]:
+        """
+        Фаза 1: Калибровка микрофона для определения уровня шума.
+
+        Returns:
+            Уровень шума (noise floor) или None если прервано
+        """
+        self._set_state(AssistantState.CALIBRATING)
+
+        calibration_levels: List[float] = []
+        calibration_duration = self.config.calibration_duration
+        calibration_done = threading.Event()
+        calibration_start = time.time()
+
+        def _calibration_callback(levels):
+            if not levels:
+                return
+            if self._on_level:
+                self._on_level(levels[-1])
+            calibration_levels.append(levels[-1])
+            if time.time() - calibration_start >= calibration_duration:
+                calibration_done.set()
+
+        logger.info(f"[Assistant] 📊 Калибровка микрофона ({calibration_duration}с)...")
+        self._audio_recorder.start(
+            device=self.config.microphone_device,
+            level_callback=_calibration_callback
+        )
+
+        # Ждём завершения калибровки (с проверкой прерывания)
+        while not calibration_done.is_set():
+            if self._interrupt_event.is_set():
+                logger.info("[Assistant] ⛔ Калибровка прервана")
+                self._audio_recorder.stop()
+                return None
+            calibration_done.wait(timeout=0.1)
+
+        self._audio_recorder.stop()
+
+        if self._interrupt_event.is_set():
+            logger.info("[Assistant] ⛔ Прервано после калибровки")
+            return None
+
+        # Рассчитываем noise floor
+        noise_floor = sum(calibration_levels) / len(calibration_levels) if calibration_levels else 0.05
+        logger.info(f"[Assistant] 📊 Калибровка завершена: шум={noise_floor:.3f}")
+
+        return noise_floor
+
+    def _record_with_vad(self, noise_floor: float) -> Optional[Path]:
+        """
+        Фаза 2: Запись с Voice Activity Detection.
+
+        Args:
+            noise_floor: Уровень шума из калибровки
+
+        Returns:
+            Путь к записанному аудио или None если прервано/ошибка
+        """
+        self._set_state(AssistantState.LISTENING)
+
+        # Динамические пороги на основе шума
+        silence_threshold = max(
+            self.config.silence_threshold,
+            noise_floor * self.config.noise_multiplier_silence
+        )
+        speech_threshold = min(
+            self.config.max_speech_threshold,
+            max(self.config.min_speech_threshold, noise_floor * self.config.noise_multiplier_speech)
+        )
+
+        logger.info(f"[Assistant] 📊 Пороги: тишина<{silence_threshold:.3f}, речь>{speech_threshold:.3f}")
+
+        # VAD состояние
+        silence_duration = self.config.silence_duration
+        max_recording_time = self.config.max_recording_time
+        min_speech_duration = 0.3
+
+        start_time = time.time()
+        self._recording_finished = threading.Event()
+        self._silence_start_time = None
+        self._speech_detected = False
+        self._speech_start_time = None
+        self._last_log_time = time.time()
+
+        def _vad_level_callback(levels):
+            if not levels:
+                return
+
+            lvl = levels[-1]
+            now = time.time()
+
+            if self._on_level:
+                self._on_level(lvl)
+
+            # Периодический лог (каждые 2 сек)
+            if now - self._last_log_time >= 2.0:
+                self._last_log_time = now
+                speech_status = "🗣️речь" if self._speech_detected else "⏳ждём"
+                logger.info(f"[VAD] lvl={lvl:.3f} | речь>{speech_threshold:.3f} | тишина<{silence_threshold:.3f} | {speech_status}")
+
+            # Детекция начала речи
+            if lvl >= speech_threshold:
+                if not self._speech_detected:
+                    self._speech_detected = True
+                    self._speech_start_time = now
+                    logger.info(f"[VAD] 🗣️ Речь обнаружена (lvl={lvl:.3f} >= {speech_threshold:.3f})")
+                self._silence_start_time = None
+
+            # Детекция тишины (только после обнаружения речи)
+            elif self._speech_detected and lvl < silence_threshold:
+                speech_dur = now - self._speech_start_time if self._speech_start_time else 0
+                if speech_dur >= min_speech_duration:
+                    if self._silence_start_time is None:
+                        self._silence_start_time = now
+                        logger.info(f"[VAD] 🤫 Тишина началась (lvl={lvl:.3f} < {silence_threshold:.3f})")
+                    elif now - self._silence_start_time >= silence_duration:
+                        logger.info(f"[VAD] ✅ Тишина {silence_duration}с — завершаю запись")
+                        self._recording_finished.set()
+
+        logger.info("[Assistant] 🎤 Слушаю... (говорите)")
+        self._audio_recorder.start(
+            device=self.config.microphone_device,
+            level_callback=_vad_level_callback
+        )
+
+        # Ждём завершения записи
+        while not self._recording_finished.is_set() and self._audio_recorder.recording:
+            if self._interrupt_event.is_set():
+                logger.info("[Assistant] ⛔ Запись прервана")
+                break
+            if time.time() - start_time > max_recording_time:
+                logger.warning(f"[Assistant] ⏳ Достигнуто макс. время записи ({max_recording_time}с)")
+                break
+            time.sleep(0.1)
+
+        logger.info("[Assistant] ⏹️ Останавливаю запись...")
+        audio_file = self._audio_recorder.stop()
+
+        if not audio_file or not audio_file.exists():
+            logger.error("[Assistant] ❌ Не удалось записать аудио")
+            self._set_state(AssistantState.ERROR)
+            time.sleep(2)
+            return None
+
+        logger.info(f"[Assistant] ✅ Аудио записано: {audio_file}")
+        return audio_file
+
+    def _cleanup_recording(self, audio_file: Optional[Path]) -> None:
+        """Очистка после записи и обработки."""
+        # Сбрасываем флаг обработки
+        with self._processing_lock:
+            self._is_processing = False
+
+        # Гарантируем возврат в IDLE, если не перезапускаемся
+        with self._restart_lock:
+            is_restarting = self._is_restarting
+            if is_restarting:
                 self._is_restarting = False
 
-            # Удаляем временный файл
-            if audio_file:
-                try:
-                    audio_file.unlink()
-                    logger.debug("[Assistant] Временный файл удален")
-                except Exception:
-                    pass
+        if not is_restarting:
+            if self._state != AssistantState.IDLE:
+                self._set_state(AssistantState.IDLE)
+
+        # Удаляем временный файл
+        if audio_file:
+            try:
+                audio_file.unlink()
+                logger.debug("[Assistant] Временный файл удален")
+            except OSError as e:
+                logger.debug(f"[Assistant] Не удалось удалить временный файл: {e}")
 
     def _process_command(self, audio_file: Path) -> None:
         """Обработать записанную команду."""
@@ -644,7 +672,8 @@ class VoiceAssistant:
             # Если во время воспроизведения или ожидания было прерывание — сразу начинаем слушать
             if self._interrupt_event.is_set():
                 logger.info("[Assistant] 🔁 Прерывание/Речь обнаружена — начинаю слушать новую команду")
-                self._is_restarting = True
+                with self._restart_lock:
+                    self._is_restarting = True
                 threading.Thread(target=self._record_and_process_command, daemon=True).start()
                 return
 
@@ -675,9 +704,9 @@ class VoiceAssistant:
         logger.debug(f"[Assistant] 📤 Отправляю запрос в LLM (модель: {self.config.openrouter_model}, сообщений: {len(messages)})")
 
         try:
-            # Используем только OpenRouter
-            if self._openrouter_client:
-                response = self._openrouter_client.chat_completion(
+            # Используем LLM провайдер
+            if self._llm_provider:
+                response = self._llm_provider.complete(
                     messages=messages,
                     model=self.config.openrouter_model,
                     max_tokens=500,  # Ограничиваем для голосового ответа
@@ -685,7 +714,7 @@ class VoiceAssistant:
                 )
                 logger.debug(f"[Assistant] ✅ Получен ответ от LLM (длина: {len(response) if response else 0} символов)")
             else:
-                logger.error("[Assistant] ❌ OpenRouter клиент не инициализирован")
+                logger.error("[Assistant] ❌ LLM провайдер не инициализирован")
                 return "Извините, нужно настроить OpenRouter API ключ."
 
             # Добавляем ответ в историю (автосохранение внутри)
@@ -695,6 +724,9 @@ class VoiceAssistant:
 
             return response
 
+        except LLMError as e:
+            logger.error(f"[Assistant] ❌ Ошибка LLM: {e}")
+            return "Извините, произошла ошибка при обращении к LLM."
         except Exception as e:
             logger.error(f"[Assistant] ❌ Ошибка получения ответа от LLM: {e}")
             return "Извините, произошла ошибка."

@@ -107,13 +107,20 @@ class SingleInstance:
         try:
             if sys.platform == "win32":
                 import ctypes
+                from ctypes import wintypes
                 kernel32 = ctypes.windll.kernel32
                 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                STILL_ACTIVE = 259
                 handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                if handle:
+                if not handle:
+                    return False
+                try:
+                    exit_code = wintypes.DWORD()
+                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return exit_code.value == STILL_ACTIVE
+                    return False
+                finally:
                     kernel32.CloseHandle(handle)
-                    return True
-                return False
             else:
                 os.kill(pid, 0)
                 return True

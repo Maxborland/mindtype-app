@@ -10,23 +10,17 @@ OpenRouter LLM провайдер (PRIVATE ONLY).
 
 import json
 import logging
-import urllib.request
 import urllib.error
 from typing import Dict, List, Optional, Any
-import codecs
 
 from .base import (
     LLMProvider,
     LLMModel,
     LLMError,
-    LLMAuthError,
-    LLMRateLimitError,
     LLMConnectionError,
-    LLMInvalidModelError,
     ReasoningConfig,
     TokenCallback,
     ThinkingCallback,
-    urlopen_with_ssl,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,53 +51,26 @@ class OpenRouterProvider(LLMProvider):
     def __init__(self, api_key: str, timeout: int = 180):
         super().__init__(api_key=api_key, timeout=timeout)
 
-    def _make_request(
-        self,
-        url: str,
-        method: str = "GET",
-        data: Optional[Dict] = None,
-        stream: bool = False,
-    ) -> Any:
-        """Выполнить HTTP запрос к OpenRouter API."""
-        headers = {
+    def _get_headers(self) -> Dict[str, str]:
+        """Заголовки с OpenRouter-специфичными полями."""
+        return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://mindtype.app",
             "X-Title": "MindType",
         }
 
-        req_data = json.dumps(data).encode("utf-8") if data else None
-        request = urllib.request.Request(url, data=req_data, headers=headers, method=method)
-
-        try:
-            response = urlopen_with_ssl(request, timeout=self.timeout)
-            if stream:
-                return response
-            return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8") if e.fp else ""
-            self._handle_http_error(e.code, error_body)
-        except urllib.error.URLError as e:
-            raise LLMConnectionError(f"Ошибка подключения к OpenRouter: {e.reason}")
-
     def _handle_http_error(self, status_code: int, body: str) -> None:
-        """Обработать HTTP ошибку."""
-        try:
-            error_data = json.loads(body)
-            message = error_data.get("error", {}).get("message", body)
-        except json.JSONDecodeError:
-            message = body
-
-        if status_code == 401:
-            raise LLMAuthError(f"Неверный API ключ OpenRouter: {message}")
-        elif status_code == 402:
+        """Обработать HTTP ошибку с поддержкой 402 (недостаточно средств)."""
+        if status_code == 402:
+            try:
+                error_data = json.loads(body)
+                message = error_data.get("error", {}).get("message", body)
+            except json.JSONDecodeError:
+                message = body
             raise LLMError(f"Недостаточно средств на балансе OpenRouter: {message}")
-        elif status_code == 429:
-            raise LLMRateLimitError(f"Превышен лимит запросов OpenRouter: {message}")
-        elif status_code == 404:
-            raise LLMInvalidModelError(f"Модель не найдена: {message}")
-        else:
-            raise LLMError(f"Ошибка OpenRouter API ({status_code}): {message}")
+        # Для остальных кодов используем базовую обработку
+        super()._handle_http_error(status_code, body)
 
     def _fetch_models_from_api(self) -> List[LLMModel]:
         """Загрузить модели из OpenRouter API."""
@@ -227,61 +194,15 @@ class OpenRouterProvider(LLMProvider):
                 "effort": reasoning.effort.value,
             }
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://mindtype.app",
-            "X-Title": "MindType",
-        }
-
-        req_data = json.dumps(data).encode("utf-8")
-        request = urllib.request.Request(CHAT_ENDPOINT, data=req_data, headers=headers, method="POST")
-
-        full_response = []
-
         try:
-            with urlopen_with_ssl(request, timeout=self.timeout) as response:
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                buffer = ""
-
-                while True:
-                    chunk = response.read(1024)
-                    if not chunk:
-                        final = decoder.decode(b"", final=True)
-                        if final:
-                            buffer += final
-                        break
-                    buffer += decoder.decode(chunk)
-
-                    # Парсим SSE события
-                    while "\n\n" in buffer:
-                        event, buffer = buffer.split("\n\n", 1)
-
-                        for line in event.split("\n"):
-                            if line.startswith("data: "):
-                                data_str = line[6:]
-                                if data_str == "[DONE]":
-                                    continue
-
-                                try:
-                                    event_data = json.loads(data_str)
-                                    delta = event_data.get("choices", [{}])[0].get("delta", {})
-                                    content = delta.get("content", "")
-
-                                    if content:
-                                        full_response.append(content)
-                                        on_token(content)
-
-                                except json.JSONDecodeError:
-                                    pass
-
+            response = self._make_request(CHAT_ENDPOINT, method="POST", data=data, stream=True)
+            return self._parse_sse_stream(response, on_token)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             self._handle_http_error(e.code, error_body)
         except urllib.error.URLError as e:
             raise LLMConnectionError(f"Ошибка подключения к OpenRouter: {e.reason}")
-
-        return "".join(full_response)
+        return ""
 
     def validate_api_key(self) -> bool:
         """Проверить валидность API ключа."""

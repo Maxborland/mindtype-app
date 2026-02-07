@@ -2,7 +2,7 @@
 # Windows build script with PyInstaller
 # =============================================================================
 # Run: .\build_windows.ps1
-# With params: .\build_windows.ps1 -Version "0.9.1" -Clean
+# With params: .\build_windows.ps1 -Version "0.9.2" -Clean
 
 param(
     [switch]$Clean,
@@ -29,7 +29,7 @@ function Get-AppVersion {
             Write-Host "Warning: Could not read version from app/version.py" -ForegroundColor Yellow
         }
     }
-    return "0.9.1"
+    return "0.9.3"
 }
 
 if ([string]::IsNullOrEmpty($Version)) {
@@ -47,7 +47,6 @@ if ($Clean) {
     Write-Host "[1/4] Cleaning previous build..." -ForegroundColor Yellow
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
     if (Test-Path $BuildDir) { Remove-Item -Recurse -Force $BuildDir }
-    if (Test-Path "*.spec") { Remove-Item -Force "*.spec" }
 } else {
     Write-Host "[1/4] Skipping clean (use -Clean to clean)" -ForegroundColor Gray
 }
@@ -55,40 +54,22 @@ if ($Clean) {
 # Check PyInstaller
 Write-Host "[2/4] Checking PyInstaller..." -ForegroundColor Yellow
 try {
-    $pyinstallerVersion = & pyinstaller --version 2>&1
+    $pyinstallerVersion = & python -m PyInstaller --version 2>&1
     Write-Host "  PyInstaller: $pyinstallerVersion" -ForegroundColor Green
 } catch {
     Write-Host "  PyInstaller not found. Installing..." -ForegroundColor Yellow
     pip install pyinstaller
 }
 
-# Build with PyInstaller
-Write-Host "[3/4] Building with PyInstaller..." -ForegroundColor Yellow
+# Build with PyInstaller using spec file
+Write-Host "[3/4] Building with PyInstaller (using mindtype.spec)..." -ForegroundColor Yellow
 
-$PyInstallerArgs = @(
-    "--name=MindType",
-    "--windowed",
-    "--icon=assets/icons/app.ico",
-    "--add-data=assets;assets",
-    "--add-data=bin;bin",
-    "--add-data=models;models",
-    "--add-data=app/assets;app/assets",
-    "--hidden-import=PyQt6",
-    "--hidden-import=PyQt6.QtCore",
-    "--hidden-import=PyQt6.QtGui",
-    "--hidden-import=PyQt6.QtWidgets",
-    "--hidden-import=sounddevice",
-    "--hidden-import=numpy",
-    "--hidden-import=scipy",
-    "--hidden-import=keyring",
-    "--hidden-import=keyring.backends",
-    "--hidden-import=keyring.backends.Windows",
-    "--noconfirm",
-    "--clean",
-    "main.py"
-)
+$SpecFile = Join-Path $RootDir "mindtype.spec"
+if (-not (Test-Path $SpecFile)) {
+    throw "Spec file not found: $SpecFile"
+}
 
-& pyinstaller @PyInstallerArgs
+& python -m PyInstaller $SpecFile --noconfirm --clean
 
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed"

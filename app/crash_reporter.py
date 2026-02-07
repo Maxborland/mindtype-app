@@ -16,18 +16,53 @@ import sys
 import traceback
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Optional, Callable, List, Tuple
+
+from .constants import MAX_BREADCRUMBS
+from .env import is_app_frozen
 
 logger = logging.getLogger("mindtype.crash_reporter")
 
-# Глобальное хранилище breadcrumbs (последние действия пользователя)
-_breadcrumbs: List[str] = []
-_max_breadcrumbs = 50
-
 # Email поддержки
 SUPPORT_EMAIL = "help@mindtype.space"
+
+
+class BreadcrumbManager:
+    """Thread-safe менеджер breadcrumbs для отслеживания действий пользователя."""
+
+    def __init__(self, max_size: int = MAX_BREADCRUMBS):
+        self._breadcrumbs: deque = deque(maxlen=max_size)
+        self._lock = Lock()
+
+    def add(self, message: str) -> None:
+        """Добавить breadcrumb с timestamp."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        with self._lock:
+            self._breadcrumbs.append(f"[{timestamp}] {message}")
+
+    def get_recent(self, count: int = 20) -> List[str]:
+        """Получить последние N breadcrumbs."""
+        with self._lock:
+            items = list(self._breadcrumbs)
+            return items[-count:] if count < len(items) else items
+
+    def get_all(self) -> List[str]:
+        """Получить все breadcrumbs."""
+        with self._lock:
+            return list(self._breadcrumbs)
+
+    def clear(self) -> None:
+        """Очистить все breadcrumbs."""
+        with self._lock:
+            self._breadcrumbs.clear()
+
+
+# Глобальный экземпляр (синглтон)
+_breadcrumb_manager = BreadcrumbManager()
 
 
 def add_breadcrumb(message: str) -> None:
@@ -36,13 +71,12 @@ def add_breadcrumb(message: str) -> None:
 
     Используется для отслеживания последовательности действий перед ошибкой.
     """
-    global _breadcrumbs
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    _breadcrumbs.append(f"[{timestamp}] {message}")
+    _breadcrumb_manager.add(message)
 
-    # Ограничиваем количество (обрезаем до лимита)
-    if len(_breadcrumbs) > _max_breadcrumbs:
-        _breadcrumbs = _breadcrumbs[-_max_breadcrumbs:]  # Оставляем последние N элементов
+
+def get_breadcrumbs(count: int = 20) -> List[str]:
+    """Получить последние N breadcrumbs."""
+    return _breadcrumb_manager.get_recent(count)
 
 
 def get_crashes_dir() -> Path:
@@ -70,7 +104,7 @@ def get_system_info() -> dict:
         "platform_version": platform.version(),
         "architecture": platform.machine(),
         "python_version": sys.version,
-        "is_frozen": getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__"),
+        "is_frozen": is_app_frozen(),
     }
 
     # Qt версия (если доступна)
@@ -89,34 +123,102 @@ def sanitize_text(text: str) -> str:
     Удалить чувствительные данные из текста.
 
     Маскирует:
-    - API ключи
+    - API ключи (OpenAI, Anthropic, Google, OpenRouter, and generic patterns)
     - Лицензионные ключи
+    - Bearer tokens
     - Пути пользователя
+    - Environment variable values that look like secrets
     """
     import re
 
-    # Маскируем API ключи
-    text = re.sub(r'sk-[a-zA-Z0-9]{20,}', 'sk-***REDACTED***', text)
+    # =================================================================
+    # SECURITY: Comprehensive secret redaction patterns
+    # Using multiple specific patterns + generic fallbacks
+    # =================================================================
+
+    # OpenAI keys: sk-... or sk-proj-...
+    text = re.sub(r'sk-[a-zA-Z0-9_-]{20,}', 'sk-***REDACTED***', text)
+
+    # Anthropic keys: sk-ant-...
+    text = re.sub(r'sk-ant-[a-zA-Z0-9_-]{20,}', 'sk-ant-***REDACTED***', text)
+
+    # Google API keys: AIza...
+    text = re.sub(r'AIza[a-zA-Z0-9_-]{30,}', 'AIza***REDACTED***', text)
+
+    # OpenRouter keys: sk-or-...
+    text = re.sub(r'sk-or-[a-zA-Z0-9_-]{20,}', 'sk-or-***REDACTED***', text)
+
+    # Groq keys: gsk_...
+    text = re.sub(r'gsk_[a-zA-Z0-9_-]{20,}', 'gsk_***REDACTED***', text)
+
+    # Together AI keys: ...
+    text = re.sub(r'[a-f0-9]{64}', '***REDACTED_HEX64***', text)
+
+    # Bearer tokens in headers
     text = re.sub(
-        r'api[_-]?key[=:]\s*["\']?[a-zA-Z0-9-_]{16,}["\']?',
-        'api_key=***REDACTED***',
+        r'[Bb]earer\s+[a-zA-Z0-9_.-]{20,}',
+        'Bearer ***REDACTED***',
+        text
+    )
+
+    # Authorization header values
+    text = re.sub(
+        r'[Aa]uthorization[=:]\s*["\']?[a-zA-Z0-9_.-]{20,}["\']?',
+        'Authorization=***REDACTED***',
+        text
+    )
+
+    # Generic api_key=value, api-key=value, apikey=value patterns
+    text = re.sub(
+        r'(api[_-]?key|apikey|secret|token|password|credential)[=:]\s*["\']?[a-zA-Z0-9_.-]{8,}["\']?',
+        r'\1=***REDACTED***',
         text,
         flags=re.IGNORECASE
     )
 
-    # Маскируем лицензионные ключи
+    # Environment variable assignments that look like secrets
+    text = re.sub(
+        r'(OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|OPENROUTER_API_KEY|API_KEY|SECRET_KEY|AUTH_TOKEN)[=:]\s*["\']?[^\s"\']{8,}["\']?',
+        r'\1=***REDACTED***',
+        text
+    )
+
+    # Маскируем лицензионные ключи (MindType format)
     text = re.sub(
         r'MT[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}',
         'MT****-****-****-****',
         text
     )
 
+    # Generic license key patterns (XXXX-XXXX-XXXX-XXXX)
+    text = re.sub(
+        r'\b[A-Z0-9]{4,5}-[A-Z0-9]{4,5}-[A-Z0-9]{4,5}-[A-Z0-9]{4,5}\b',
+        '****-****-****-****',
+        text
+    )
+
+    # HMAC secrets (hex strings of 32+ chars that look like secrets)
+    text = re.sub(
+        r'(hmac|secret|hash)[_-]?[a-fA-F0-9]{32,}',
+        r'\1_***REDACTED***',
+        text,
+        flags=re.IGNORECASE
+    )
+
     # Анонимизируем пути пользователя
     if sys.platform == "win32":
         text = re.sub(r'C:\\Users\\[^\\]+', r'C:\\Users\\<user>', text)
+        text = re.sub(r'C:/Users/[^/]+', r'C:/Users/<user>', text)
     else:
         text = re.sub(r'/home/[^/]+', '/home/<user>', text)
         text = re.sub(r'/Users/[^/]+', '/Users/<user>', text)
+
+    # Email addresses (partial masking)
+    text = re.sub(
+        r'([a-zA-Z0-9._%+-]{2})[a-zA-Z0-9._%+-]*@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+        r'\1***@\2',
+        text
+    )
 
     return text
 
@@ -167,9 +269,10 @@ def generate_crash_report(
     lines.append("")
 
     # Recent actions (breadcrumbs)
-    if _breadcrumbs:
+    recent_breadcrumbs = _breadcrumb_manager.get_recent(20)
+    if recent_breadcrumbs:
         lines.append("--- RECENT ACTIONS ---")
-        lines.extend(_breadcrumbs[-20:])
+        lines.extend(recent_breadcrumbs)
         lines.append("")
 
     # Instructions
@@ -337,7 +440,8 @@ def send_crash_report_to_server(
         error_message = sanitize_text(str(exc_value))
 
         # Санитизируем breadcrumbs перед отправкой
-        sanitized_breadcrumbs = [sanitize_text(b) for b in _breadcrumbs[-20:]] if _breadcrumbs else []
+        recent_breadcrumbs = _breadcrumb_manager.get_recent(20)
+        sanitized_breadcrumbs = [sanitize_text(b) for b in recent_breadcrumbs]
 
         payload = {
             "appVersion": __version__,

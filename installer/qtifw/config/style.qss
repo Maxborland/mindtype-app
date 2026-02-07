@@ -234,9 +234,7 @@ QComboBox::drop-down {
     width: 20px;
     background-color: #dddddd;
     border-left: 1px solid #000000;
-}
-
-QComboBox::down-arrow {
+}QComboBox::down-arrow {
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
     border-top: 6px solid #000000;

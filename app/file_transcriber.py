@@ -16,6 +16,11 @@ from typing import Callable, Dict, List, Optional
 import threading
 import queue
 
+from .text_processor.repetition_filter import (
+    filter_hallucinated_segments,
+    check_transcription_quality,
+)
+
 # Настройка логирования в файл
 def _setup_logger():
     logger = logging.getLogger("file_transcriber")
@@ -171,6 +176,7 @@ class FileTask:
     status: FileStatus = FileStatus.PENDING
     progress: int = 0  # 0-100
     error_message: str = ""
+    warning: str = ""  # Предупреждение о качестве (не блокирует, но показывается)
     result: Optional[TranscriptionResult] = None
 
     @property
@@ -244,12 +250,26 @@ def extract_audio_from_video(video_path: Path, output_path: Optional[Path] = Non
 
     Returns:
         Путь к извлечённому аудиофайлу (WAV)
+
+    Raises:
+        FileNotFoundError: Если входной файл не существует
+        PermissionError: Если нет прав на чтение файла
     """
+    # Validate input path exists and is readable
+    video_path = Path(video_path).resolve()
+    if not video_path.exists():
+        raise FileNotFoundError(f"Видеофайл не найден: {video_path}")
+    if not video_path.is_file():
+        raise ValueError(f"Путь не является файлом: {video_path}")
+    if not os.access(video_path, os.R_OK):
+        raise PermissionError(f"Нет прав на чтение файла: {video_path}")
+
     if output_path is None:
-        # Создаём временный файл
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        output_path = Path(tmp.name)
-        tmp.close()
+        # Create temp file - use delete=False and handle cleanup manually
+        # On Windows, we need to close the file before ffmpeg can write to it
+        fd, tmp_name = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)  # Close file descriptor immediately
+        output_path = Path(tmp_name)
 
     # Пробуем ffmpeg
     ffmpeg_path = shutil.which("ffmpeg")
@@ -345,8 +365,14 @@ class FileTranscriptionQueue:
         on_thinking: Optional[ThinkingCallback] = None,  # Callback для AI thinking
         enable_thinking: bool = True,  # Включить режим размышлений
         custom_prompts: Optional[Dict[str, str]] = None,  # Кастомные промпты
-        # OpenRouter настройки
-        summary_provider: str = "local",  # "local" или "openrouter"
+        # Настройки суммаризации (универсальные)
+        summary_provider: str = "local",  # "local", "openrouter", "mindtype_cloud", etc.
+        summary_api_key: str = "",  # API ключ или лицензионный ключ (для MindType Cloud)
+        summary_model: str = "",
+        summary_base_url: str = "",  # Для Ollama
+        summary_reasoning: bool = False,
+        summary_reasoning_effort: str = "medium",
+        # Legacy OpenRouter параметры (обратная совместимость)
         openrouter_api_key: str = "",
         openrouter_model: str = "",
         openrouter_reasoning: bool = False,
@@ -371,6 +397,12 @@ class FileTranscriptionQueue:
         self.enable_thinking = enable_thinking
         self.custom_prompts = custom_prompts
         self.summary_provider = summary_provider
+        self.summary_api_key = summary_api_key
+        self.summary_model = summary_model
+        self.summary_base_url = summary_base_url
+        self.summary_reasoning = summary_reasoning
+        self.summary_reasoning_effort = summary_reasoning_effort
+        # Legacy
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_model = openrouter_model
         self.openrouter_reasoning = openrouter_reasoning
@@ -559,6 +591,24 @@ class FileTranscriptionQueue:
                 logger.warning(f"Транскрипция вернула 0 сегментов для {task.file_path.name}")
                 raise ValueError("Транскрипция не вернула ни одного сегмента. Проверьте аудиофайл и настройки.")
 
+            # Фильтруем галлюцинации Whisper (повторы, известные паттерны)
+            segments_data, had_hallucinations = filter_hallucinated_segments(segments_data)
+            if had_hallucinations:
+                logger.warning(f"Обнаружены галлюцинации Whisper в {task.file_path.name}")
+
+            # Проверяем качество транскрипции
+            quality_ok, quality_warning = check_transcription_quality(
+                segments_data, duration
+            )
+            if not quality_ok:
+                logger.warning(f"Низкое качество транскрипции: {quality_warning}")
+                if not segments_data or all(
+                    not s.get("text", "").strip() for s in segments_data
+                ):
+                    raise ValueError(quality_warning)
+                # Если есть хоть какой-то текст — продолжаем, но добавим предупреждение
+                task.warning = quality_warning
+
             task.progress = 60
             if self._on_progress:
                 self._on_progress(task)
@@ -697,13 +747,24 @@ class FileTranscriptionQueue:
         """Выполнить суммаризацию текста."""
         from .summarizer import get_summarizer, SummarizerConfig
 
+        # Определяем параметры: универсальные или legacy openrouter
+        api_key = self.summary_api_key or self.openrouter_api_key
+        model = self.summary_model or self.openrouter_model
+        reasoning = self.summary_reasoning or self.openrouter_reasoning
+        reasoning_effort = self.summary_reasoning_effort if self.summary_api_key else self.openrouter_reasoning_effort
+
         # Ленивая инициализация суммаризатора с настройками
         if self._summarizer is None:
             config = SummarizerConfig(
                 enable_thinking=self.enable_thinking,
                 custom_prompts=self.custom_prompts,
-                # OpenRouter настройки
                 provider=self.summary_provider,
+                api_key=api_key,
+                model=model,
+                base_url=self.summary_base_url,
+                reasoning_enabled=reasoning,
+                reasoning_effort=reasoning_effort,
+                # Legacy (для обратной совместимости)
                 openrouter_api_key=self.openrouter_api_key,
                 openrouter_model=self.openrouter_model,
                 openrouter_reasoning=self.openrouter_reasoning,
@@ -715,6 +776,12 @@ class FileTranscriptionQueue:
             self._summarizer.config.enable_thinking = self.enable_thinking
             self._summarizer.config.custom_prompts = self.custom_prompts
             self._summarizer.config.provider = self.summary_provider
+            self._summarizer.config.api_key = api_key
+            self._summarizer.config.model = model
+            self._summarizer.config.base_url = self.summary_base_url
+            self._summarizer.config.reasoning_enabled = reasoning
+            self._summarizer.config.reasoning_effort = reasoning_effort
+            # Legacy
             self._summarizer.config.openrouter_api_key = self.openrouter_api_key
             self._summarizer.config.openrouter_model = self.openrouter_model
             self._summarizer.config.openrouter_reasoning = self.openrouter_reasoning

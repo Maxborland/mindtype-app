@@ -36,9 +36,19 @@ except ImportError:
 _PRODUCTION_API_URL = "https://mindtype.space"
 
 
+def is_app_frozen() -> bool:
+    """
+    Проверить, запущено ли приложение скомпилированным (PyInstaller/Nuitka).
+
+    Returns:
+        True если приложение запущено как exe/бинарник
+    """
+    return getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__")
+
+
 def _is_production() -> bool:
     """Проверить, запущено ли приложение в production режиме."""
-    return getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__")
+    return is_app_frozen()
 
 
 def _get_env(key: str, default: str) -> str:
@@ -115,19 +125,53 @@ UPDATE_AUTO_DOWNLOAD: bool = _get_env_bool("MINDTYPE_UPDATE_AUTO_DOWNLOAD", Fals
 LICENSE_REVALIDATION_INTERVAL: int = _get_env_int("MINDTYPE_LICENSE_REVALIDATION", 604800)
 
 
+def _get_secret_file_path() -> Path:
+    """Получить путь к файлу с HMAC секретом."""
+    base = Path(os.getenv("APPDATA", Path.home()))
+    return base / "MindType" / ".hmac_secret"
+
+
 def _generate_machine_hmac_secret() -> str:
     """
-    Генерирует уникальный HMAC секрет на основе характеристик машины.
-    Это предотвращает простой перенос кэша лицензии между машинами.
+    Генерирует уникальный HMAC секрет.
+
+    Использует криптографически случайный секрет, сохранённый локально.
+    Дополнительно привязывается к машине для защиты от переноса файла.
     """
     import platform
+    import secrets
 
-    # Собираем информацию о машине
+    secret_file = _get_secret_file_path()
+    random_secret = None
+
+    # Пытаемся загрузить существующий секрет
+    if secret_file.exists():
+        try:
+            stored = secret_file.read_bytes()
+            if len(stored) == 32:
+                random_secret = stored
+                logger.debug("HMAC secret loaded from file")
+        except Exception as e:
+            logger.warning(f"Failed to read HMAC secret file: {e}")
+
+    # Генерируем новый криптографически случайный секрет
+    if random_secret is None:
+        random_secret = secrets.token_bytes(32)
+        try:
+            secret_file.parent.mkdir(parents=True, exist_ok=True)
+            secret_file.write_bytes(random_secret)
+            # Ограничиваем права доступа (только владелец)
+            if sys.platform != "win32":
+                os.chmod(secret_file, 0o600)
+            logger.info("Generated new HMAC secret")
+        except Exception as e:
+            logger.warning(f"Failed to save HMAC secret: {e}")
+
+    # Собираем информацию о машине для привязки
     machine_info = [
         platform.node(),
         platform.machine(),
         platform.system(),
-        platform.processor(),
     ]
 
     # На Windows добавляем Volume Serial Number
@@ -143,14 +187,10 @@ def _generate_machine_hmac_secret() -> str:
         except Exception:
             pass
 
-    # Создаём хеш с солью из env или уникальной для машины
-    # Соль должна быть уникальной для каждой установки
-    salt = os.getenv("MINDTYPE_MACHINE_SALT", "")
-    if not salt:
-        # Генерируем соль на основе характеристик машины
-        salt = hashlib.md5(("|".join(machine_info) + "v1").encode()).hexdigest()[:16]
-    combined = "|".join(machine_info) + "|" + salt
-    return hashlib.sha256(combined.encode()).hexdigest()
+    # Комбинируем случайный секрет с привязкой к машине
+    machine_hash = hashlib.sha256("|".join(machine_info).encode()).digest()
+    combined = random_secret + machine_hash
+    return hashlib.sha256(combined).hexdigest()
 
 
 def _get_license_hmac_secret() -> str:

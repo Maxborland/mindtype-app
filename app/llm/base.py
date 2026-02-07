@@ -7,14 +7,17 @@
 - Динамическая загрузка моделей из API
 """
 
+import codecs
+import json
 import logging
 import ssl
 import time
+import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Any, Generator
+from typing import Callable, Dict, List, Optional, Any, Generator, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +309,170 @@ class LLMProvider(ABC):
             if m.id == model:
                 return m
         return None
+
+    # =========================================================================
+    # HTTP и SSE утилиты (общие для всех провайдеров)
+    # =========================================================================
+
+    def _get_headers(self) -> Dict[str, str]:
+        """
+        Получить HTTP заголовки для запроса.
+        Переопределить в провайдере для кастомных заголовков.
+        """
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _make_request(
+        self,
+        url: str,
+        method: str = "GET",
+        data: Optional[Dict] = None,
+        stream: bool = False,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        """
+        Выполнить HTTP запрос к API.
+
+        Args:
+            url: URL для запроса
+            method: HTTP метод
+            data: Данные для отправки (будут сериализованы в JSON)
+            stream: Если True, возвращает response объект для стриминга
+            extra_headers: Дополнительные заголовки
+
+        Returns:
+            JSON ответ или response объект (если stream=True)
+
+        Raises:
+            LLMError: При ошибке запроса
+        """
+        headers = self._get_headers()
+        if extra_headers:
+            headers.update(extra_headers)
+
+        req_data = json.dumps(data).encode("utf-8") if data else None
+        request = urllib.request.Request(url, data=req_data, headers=headers, method=method)
+
+        try:
+            response = urlopen_with_ssl(request, timeout=self.timeout)
+            if stream:
+                return response
+            return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8") if e.fp else ""
+            self._handle_http_error(e.code, error_body)
+        except urllib.error.URLError as e:
+            raise LLMConnectionError(f"Ошибка подключения к {self.PROVIDER_NAME}: {e.reason}")
+
+    def _handle_http_error(self, status_code: int, body: str) -> None:
+        """
+        Обработать HTTP ошибку.
+        Переопределить в провайдере для специфичной обработки (например, 402).
+
+        Args:
+            status_code: HTTP код ответа
+            body: Тело ответа
+
+        Raises:
+            LLMAuthError: При 401
+            LLMRateLimitError: При 429
+            LLMInvalidModelError: При 404
+            LLMError: При других ошибках
+        """
+        try:
+            error_data = json.loads(body)
+            message = error_data.get("error", {}).get("message", body)
+        except json.JSONDecodeError:
+            message = body
+
+        if status_code == 401:
+            raise LLMAuthError(f"Неверный API ключ {self.PROVIDER_NAME}: {message}")
+        elif status_code == 429:
+            raise LLMRateLimitError(f"Превышен лимит запросов {self.PROVIDER_NAME}: {message}")
+        elif status_code == 404:
+            raise LLMInvalidModelError(f"Модель не найдена: {message}")
+        else:
+            raise LLMError(f"Ошибка {self.PROVIDER_NAME} API ({status_code}): {message}")
+
+    @staticmethod
+    def _extract_nested(data: Dict, path: Tuple[Union[str, int], ...]) -> Optional[str]:
+        """
+        Извлечь значение из вложенной структуры по пути.
+
+        Args:
+            data: Словарь с данными
+            path: Кортеж ключей/индексов, например ("choices", 0, "delta", "content")
+
+        Returns:
+            Извлечённое значение или None
+        """
+        current = data
+        for key in path:
+            if isinstance(current, dict):
+                current = current.get(key)
+            elif isinstance(current, list) and isinstance(key, int):
+                if 0 <= key < len(current):
+                    current = current[key]
+                else:
+                    return None
+            else:
+                return None
+            if current is None:
+                return None
+        return current if isinstance(current, str) else None
+
+    def _parse_sse_stream(
+        self,
+        response,
+        on_token: "TokenCallback",
+        content_path: Tuple[Union[str, int], ...] = ("choices", 0, "delta", "content"),
+    ) -> str:
+        """
+        Парсинг SSE потока. Общий для OpenAI-совместимых провайдеров.
+
+        Args:
+            response: HTTP response объект
+            on_token: Callback для каждого токена
+            content_path: Путь к content в JSON (по умолчанию OpenAI формат)
+
+        Returns:
+            Полный текст ответа
+        """
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffer = ""
+        full_response: List[str] = []
+
+        while True:
+            chunk = response.read(1024)
+            if not chunk:
+                final = decoder.decode(b"", final=True)
+                if final:
+                    buffer += final
+                break
+            buffer += decoder.decode(chunk)
+
+            # Парсим SSE события
+            while "\n\n" in buffer:
+                event, buffer = buffer.split("\n\n", 1)
+
+                for line in event.split("\n"):
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            continue
+
+                        try:
+                            data = json.loads(data_str)
+                            content = self._extract_nested(data, content_path)
+                            if content:
+                                full_response.append(content)
+                                on_token(content)
+                        except json.JSONDecodeError:
+                            pass
+
+        return "".join(full_response)
 
 
 # Утилиты для парсинга ответов

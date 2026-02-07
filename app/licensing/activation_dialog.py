@@ -27,6 +27,11 @@ SUPPORT_EMAIL = "help@mindtype.space"
 from .license_manager import LicenseManager, LicenseStatus, LicenseInfo, ValidationResult
 from .key_validator import KeyValidator
 
+# B&W status icons
+STATUS_OK = "✓"
+STATUS_WARNING = "!"
+STATUS_ERROR = "✗"
+
 
 class ActivationWorker(QThread):
     """Воркер для асинхронной активации лицензии."""
@@ -38,8 +43,11 @@ class ActivationWorker(QThread):
         self._license_key = license_key
 
     def run(self):
-        result, message, data = self._manager.activate_online(self._license_key)
-        self.finished.emit(result, message, data)
+        try:
+            result, message, data = self._manager.activate_online(self._license_key)
+            self.finished.emit(result, message, data)
+        except Exception as e:
+            self.finished.emit(ValidationResult.SERVER_ERROR, str(e), None)
 
 
 class DeactivationWorker(QThread):
@@ -51,8 +59,11 @@ class DeactivationWorker(QThread):
         self._manager = manager
 
     def run(self):
-        success, message = self._manager.deactivate_online()
-        self.finished.emit(success, message)
+        try:
+            success, message = self._manager.deactivate_online()
+            self.finished.emit(success, message)
+        except Exception as e:
+            self.finished.emit(False, str(e))
 
 
 class LicenseActivationDialog(QDialog):
@@ -82,7 +93,7 @@ class LicenseActivationDialog(QDialog):
             QDialog {
                 background-color: #ffffff;
                 color: #000000;
-                font-family: "MS Sans Serif", "Geneva", "Arial", sans-serif;
+                font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
             }
             QLabel {
                 color: #000000;
@@ -95,7 +106,7 @@ class LicenseActivationDialog(QDialog):
             QLabel#status {
                 font-size: 12px;
                 padding: 6px 10px;
-                border: 2px solid #000000;
+                border: 1.5px solid #000000;
                 background-color: #dddddd;
             }
             QLabel#statusActive {
@@ -111,52 +122,55 @@ class LicenseActivationDialog(QDialog):
                 font-size: 10px;
                 color: #666666;
             }
+            /* Focus inversion - system.css style */
             QLineEdit {
                 background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
+                border: 1.5px solid #000000;
                 padding: 8px;
                 font-size: 14px;
                 font-family: monospace;
+                color: #000000;
+            }
+            QLineEdit::placeholder {
+                color: #808080;
             }
             QLineEdit:focus {
-                border-color: #000000;
+                background-color: #000000;
+                color: #ffffff;
+                selection-background-color: #ffffff;
+                selection-color: #000000;
             }
             QLineEdit:disabled {
-                background-color: #eeeeee;
-            }
-            QPushButton {
                 background-color: #dddddd;
-                border: 2px solid;
-                border-top-color: #ffffff;
-                border-left-color: #ffffff;
-                border-right-color: #000000;
-                border-bottom-color: #000000;
+                color: #808080;
+            }
+            /* Rounded buttons - system.css style */
+            QPushButton {
+                background-color: #ffffff;
+                border: 1.5px solid #000000;
+                border-radius: 6px;
                 padding: 6px 16px;
                 min-height: 20px;
             }
             QPushButton:hover {
-                background-color: #eeeeee;
+                background-color: #f0f0f0;
             }
             QPushButton:pressed {
-                background-color: #cccccc;
-                border-top-color: #000000;
-                border-left-color: #000000;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
+                background-color: #000000;
+                color: #ffffff;
             }
             QPushButton:disabled {
                 background-color: #dddddd;
                 color: #808080;
+                border-color: #808080;
             }
             QPushButton#primary {
                 font-weight: bold;
+                border: 3px solid #000000;
+                border-radius: 8px;
             }
             QPushButton#danger {
-                color: #cc0000;
+                font-weight: bold;
             }
             QFrame#separator {
                 background-color: #000000;
@@ -164,11 +178,7 @@ class LicenseActivationDialog(QDialog):
             }
             QProgressBar {
                 background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
+                border: 1.5px solid #000000;
                 height: 16px;
                 text-align: center;
             }
@@ -245,13 +255,16 @@ class LicenseActivationDialog(QDialog):
         self._message_label.setVisible(False)
         layout.addWidget(self._message_label)
 
-        # Кнопка покупки лицензии
+        # Кнопка покупки лицензии (Primary button style)
         self._buy_btn = QPushButton(self._t("buy_license_button"))
         self._buy_btn.setStyleSheet("""
             QPushButton {
                 background-color: #000000;
                 color: #ffffff;
                 font-weight: bold;
+                border: 3px solid #000000;
+                border-radius: 8px;
+                padding: 8px 16px;
             }
             QPushButton:hover {
                 background-color: #333333;
@@ -318,11 +331,11 @@ class LicenseActivationDialog(QDialog):
         self._update_status()
 
     def _update_status(self):
-        """Обновить отображение статуса лицензии."""
+        """Обновить отображение статуса лицензии (B&W theme)."""
         info = self._manager.get_license_info()
 
         if info.status == LicenseStatus.VALID:
-            self._status_label.setText(f"✓ {self._t('license_active')}")
+            self._status_label.setText(f"{STATUS_OK} {self._t('license_active')}")
             self._status_label.setObjectName("statusActive")
 
             # Показываем детали плана
@@ -357,7 +370,7 @@ class LicenseActivationDialog(QDialog):
             self._buy_btn.setVisible(False)  # Скрываем кнопку покупки
 
         elif info.status == LicenseStatus.TRIAL:
-            self._status_label.setText(f"[!] {self._t('trial_mode')}")
+            self._status_label.setText(f"[{STATUS_WARNING}] {self._t('trial_mode')}")
             self._status_label.setObjectName("statusTrial")
             remaining_min = int(info.trial_remaining_minutes)
             self._status_details.setText(
@@ -373,7 +386,7 @@ class LicenseActivationDialog(QDialog):
             self._buy_btn.setVisible(True)  # Показываем кнопку покупки
 
         elif info.status == LicenseStatus.TRIAL_EXPIRED:
-            self._status_label.setText(f"✗ {self._t('trial_expired')}")
+            self._status_label.setText(f"{STATUS_ERROR} {self._t('trial_expired')}")
             self._status_label.setObjectName("statusExpired")
             self._status_details.setText(self._t('trial_expired_message'))
             self._plan_info.setVisible(False)
@@ -414,12 +427,14 @@ class LicenseActivationDialog(QDialog):
         self._message_label.setVisible(False)
 
     def _show_message(self, message: str, is_error: bool = False):
-        """Показать сообщение пользователю."""
+        """Показать сообщение пользователю (B&W style)."""
         self._message_label.setText(message)
         if is_error:
-            self._message_label.setStyleSheet("font-size: 11px; color: #cc0000;")
+            # B&W: черный текст с bold для ошибок
+            self._message_label.setStyleSheet("font-size: 11px; color: #000000; font-weight: bold;")
         else:
-            self._message_label.setStyleSheet("font-size: 11px; color: #006600;")
+            # B&W: черный текст для успеха
+            self._message_label.setStyleSheet("font-size: 11px; color: #000000;")
         self._message_label.setVisible(True)
 
     def _set_loading(self, loading: bool):
@@ -564,7 +579,7 @@ class TrialExpiredDialog(QDialog):
             QDialog {
                 background-color: #ffffff;
                 color: #000000;
-                font-family: "MS Sans Serif", "Geneva", "Arial", sans-serif;
+                font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
             }
             QLabel {
                 color: #000000;
@@ -577,44 +592,54 @@ class TrialExpiredDialog(QDialog):
             QLabel#message {
                 font-size: 12px;
                 padding: 10px;
-                border: 2px solid #cc0000;
-                background-color: #ffeeee;
+                border: 1.5px solid #000000;
+                background-color: #dddddd;
             }
+            /* Focus inversion - system.css style */
             QLineEdit {
                 background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
+                border: 1.5px solid #000000;
                 padding: 8px;
                 font-size: 14px;
                 font-family: monospace;
+                color: #000000;
             }
+            QLineEdit::placeholder {
+                color: #808080;
+            }
+            QLineEdit:focus {
+                background-color: #000000;
+                color: #ffffff;
+            }
+            /* Rounded buttons - system.css style */
             QPushButton {
-                background-color: #dddddd;
-                border: 2px solid;
-                border-top-color: #ffffff;
-                border-left-color: #ffffff;
-                border-right-color: #000000;
-                border-bottom-color: #000000;
+                background-color: #ffffff;
+                border: 1.5px solid #000000;
+                border-radius: 6px;
                 padding: 6px 16px;
                 min-height: 20px;
             }
             QPushButton:hover {
-                background-color: #eeeeee;
+                background-color: #f0f0f0;
             }
-            QPushButton#primary {
+            QPushButton:pressed {
                 background-color: #000000;
                 color: #ffffff;
-                font-weight: bold;
             }
-            QPushButton#primary:hover {
-                background-color: #333333;
+            QPushButton#primary {
+                background-color: #ffffff;
+                color: #000000;
+                font-weight: bold;
+                border: 3px solid #000000;
+                border-radius: 8px;
+            }
+            QPushButton#primary:pressed {
+                background-color: #000000;
+                color: #ffffff;
             }
             QProgressBar {
                 background-color: #ffffff;
-                border: 2px solid #808080;
+                border: 1.5px solid #000000;
                 height: 16px;
             }
             QProgressBar::chunk {
@@ -667,9 +692,9 @@ class TrialExpiredDialog(QDialog):
         self._progress.setVisible(False)
         layout.addWidget(self._progress)
 
-        # Сообщение об ошибке
+        # Сообщение об ошибке (B&W style)
         self._error_label = QLabel()
-        self._error_label.setStyleSheet("color: #cc0000; font-size: 11px;")
+        self._error_label.setStyleSheet("color: #000000; font-size: 11px; font-weight: bold;")
         self._error_label.setVisible(False)
         layout.addWidget(self._error_label)
 
@@ -678,12 +703,9 @@ class TrialExpiredDialog(QDialog):
         self._activate_btn.setEnabled(False)
         self._activate_btn.setStyleSheet("""
             color: #000000;
-            background-color: #dddddd;
-            border: 2px solid;
-            border-top-color: #ffffff;
-            border-left-color: #ffffff;
-            border-right-color: #808080;
-            border-bottom-color: #808080;
+            background-color: #ffffff;
+            border: 1.5px solid #000000;
+            border-radius: 6px;
             padding: 6px 16px;
         """)
         self._activate_btn.clicked.connect(self._on_activate)
@@ -694,12 +716,9 @@ class TrialExpiredDialog(QDialog):
         self._support_btn.setStyleSheet("""
             font-size: 10px;
             color: #000000;
-            background-color: #dddddd;
-            border: 2px solid;
-            border-top-color: #ffffff;
-            border-left-color: #ffffff;
-            border-right-color: #808080;
-            border-bottom-color: #808080;
+            background-color: #ffffff;
+            border: 1.5px solid #000000;
+            border-radius: 6px;
         """)
         self._support_btn.clicked.connect(self._on_contact_support)
         layout.addWidget(self._support_btn)
@@ -858,12 +877,12 @@ class LicenseStatusWidget(QFrame):
         layout.addLayout(text_layout, stretch=1)
 
     def _update_status(self):
-        """Обновить отображение статуса."""
+        """Обновить отображение статуса (B&W theme)."""
         info = self._manager.get_license_info()
 
         if info.status == LicenseStatus.VALID:
-            self._icon_label.setText("[OK]")
-            self._icon_label.setStyleSheet("font-weight: bold; color: #006600;")
+            self._icon_label.setText(f"[{STATUS_OK}]")
+            self._icon_label.setStyleSheet("font-weight: bold; color: #000000;")
             self._status_label.setText(self._t("license_active"))
 
             details = []
@@ -874,8 +893,8 @@ class LicenseStatusWidget(QFrame):
             self._details_label.setText(" | ".join(details) if details else "")
 
         elif info.status == LicenseStatus.TRIAL:
-            self._icon_label.setText("[!]")
-            self._icon_label.setStyleSheet("font-weight: bold; color: #cc6600;")
+            self._icon_label.setText(f"[{STATUS_WARNING}]")
+            self._icon_label.setStyleSheet("font-weight: bold; color: #000000;")
             self._status_label.setText(self._t("trial_mode"))
             remaining_min = int(info.trial_remaining_minutes)
             self._details_label.setText(
@@ -883,8 +902,8 @@ class LicenseStatusWidget(QFrame):
             )
 
         elif info.status == LicenseStatus.TRIAL_EXPIRED:
-            self._icon_label.setText("[X]")
-            self._icon_label.setStyleSheet("font-weight: bold; color: #cc0000;")
+            self._icon_label.setText(f"[{STATUS_ERROR}]")
+            self._icon_label.setStyleSheet("font-weight: bold; color: #000000;")
             self._status_label.setText(self._t("trial_expired"))
             self._details_label.setText(self._t("buy_license"))
 

@@ -14,6 +14,48 @@ from collections import deque
 logger = logging.getLogger("repetition_filter")
 
 
+
+# Известные галлюцинации Whisper (нормализованные, lowercase, без пунктуации)
+# Whisper натренирован на YouTube — часто выдаёт эти фразы на тишине/шуме
+KNOWN_HALLUCINATIONS = {
+    "реклама",
+    "конец",
+    "продолжение следует",
+    "субтитры создал",
+    "субтитры сделал",
+    "субтитры подготовил",
+    "субтитры отредактировал",
+    "спасибо за просмотр",
+    "подписывайтесь на канал",
+    "ставьте лайки",
+    "thanks for watching",
+    "subscribe",
+    "thank you for watching",
+    "please subscribe",
+    "like and subscribe",
+    "music",
+    "applause",
+    "silence",
+    "you",
+    "the end",
+}
+
+
+def is_known_hallucination(text: str) -> bool:
+    """Проверяет, является ли текст известной галлюцинацией Whisper."""
+    normalized = re.sub(r'[^\w\s]', '', text.lower().strip())
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    if not normalized:
+        return True
+    if normalized in KNOWN_HALLUCINATIONS:
+        return True
+    # Проверяем вхождение (например "субтитры создал dimaTorzworker")
+    for pattern in KNOWN_HALLUCINATIONS:
+        if len(pattern) > 5 and normalized.startswith(pattern):
+            return True
+    return False
+
+
 class HallucinationDetector:
     """
     Детектор зацикливания (hallucination loop) в реальном времени.
@@ -35,7 +77,7 @@ class HallucinationDetector:
         similarity_threshold: float = 0.80,
         max_similar_segments: int = 3,
         history_size: int = 5,
-        min_segment_length: int = 15,
+        min_segment_length: int = 3,
     ):
         """
         Args:
@@ -72,14 +114,27 @@ class HallucinationDetector:
 
     def check(self, segment_text: str) -> bool:
         """
-        Проверяет сегмент на повторение.
+        Проверяет сегмент на повторение или известную галлюцинацию.
 
         Args:
             segment_text: Текст нового сегмента
 
         Returns:
-            True если сегмент является повторением и его нужно ПРОПУСТИТЬ
+            True если сегмент является повторением/галлюцинацией и его нужно ПРОПУСТИТЬ
         """
+        # Проверяем блоклист известных галлюцинаций
+        if is_known_hallucination(segment_text):
+            self._similar_count += 1
+            self._last_similar_text = segment_text[:50]
+            if self._similar_count >= 2:
+                if not self._hallucination_detected:
+                    self._hallucination_detected = True
+                    logger.warning(
+                        f"Известная галлюцинация Whisper: '{self._last_similar_text}'"
+                    )
+                return True
+            return False
+
         normalized = self._normalize(segment_text)
 
         # Слишком короткие сегменты пропускаем проверку
@@ -179,9 +234,17 @@ def filter_hallucinated_segments(
 
         filtered.append(seg)
 
+    # Если были галлюцинации — дополнительно убираем все сегменты из блоклиста
+    # (первый сегмент мог проскочить детектор до набора порога)
     if hallucination_detected:
+        before_cleanup = len(filtered)
+        filtered = [
+            seg for seg in filtered
+            if not is_known_hallucination(seg.get("text", ""))
+        ]
+        skipped_count += before_cleanup - len(filtered)
         logger.info(
-            f"Фильтрация: пропущено {skipped_count} повторяющихся сегментов, "
+            f"Фильтрация: пропущено {skipped_count} галлюцинаций/повторов, "
             f"сохранено {len(filtered)} из {len(segments)}"
         )
 
@@ -359,6 +422,54 @@ def _cleanup_text(text: str) -> str:
     text = re.sub(r'\s+([.!?,;:])', r'\1', text)
 
     return text.strip()
+
+
+def check_transcription_quality(
+    segments: List[dict],
+    duration_seconds: float,
+    min_words_per_minute: float = 30.0,
+) -> Tuple[bool, str]:
+    """
+    Проверяет качество транскрипции по соотношению слов к длительности.
+
+    Нормальная речь: 100-160 слов/мин (русский).
+    Порог 30 слов/мин — очень консервативный, ловит только явные галлюцинации.
+
+    Args:
+        segments: Сегменты транскрипции
+        duration_seconds: Длительность аудио в секундах
+        min_words_per_minute: Минимально ожидаемая скорость речи
+
+    Returns:
+        (is_ok, warning_message) — True если качество приемлемое
+    """
+    if duration_seconds < 10 or not segments:
+        return True, ""
+
+    total_words = sum(len(s.get("text", "").split()) for s in segments)
+    duration_minutes = duration_seconds / 60.0
+    words_per_minute = total_words / duration_minutes if duration_minutes > 0 else 0
+
+    # Проверяем долю галлюцинаций
+    hallucination_count = sum(
+        1 for s in segments if is_known_hallucination(s.get("text", ""))
+    )
+    hallucination_ratio = hallucination_count / len(segments) if segments else 0
+
+    if hallucination_ratio > 0.5:
+        return False, (
+            f"Транскрипция содержит {hallucination_ratio:.0%} галлюцинаций Whisper. "
+            f"Попробуйте модель large-v3 или проверьте качество аудио."
+        )
+
+    if words_per_minute < min_words_per_minute:
+        return False, (
+            f"Подозрительно мало слов: {total_words} слов на {duration_minutes:.1f} мин "
+            f"({words_per_minute:.0f} сл/мин, норма >100). "
+            f"Возможна галлюцинация Whisper. Попробуйте модель large-v3."
+        )
+
+    return True, ""
 
 
 def detect_repetition_ratio(text: str, window_size: int = 100) -> float:

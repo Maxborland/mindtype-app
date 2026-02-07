@@ -261,13 +261,33 @@ class WhisperCppTranscriber:
         repo_id = "ggerganov/whisper.cpp"
         filename = f"ggml-{model_name}.bin"
 
+        # tqdm adapter to forward download progress via callback
+        tqdm_cls = None
+        if progress_callback:
+            class _ProgressAdapter:
+                """Minimal tqdm-compatible class that forwards progress to callback."""
+                def __init__(self, *args, **kwargs):
+                    self.total = kwargs.get("total", 0) or 0
+                    self.n = 0
+                def update(self, n=1):
+                    self.n += n
+                    progress_callback("downloading_model", int(self.n), int(self.total))
+                def close(self): pass
+                def set_description(self, *a, **kw): pass
+                def set_postfix(self, *a, **kw): pass
+                def refresh(self, *a, **kw): pass
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+
+            tqdm_cls = _ProgressAdapter
+
         try:
             logger.info(f"Скачивание {filename} из {repo_id}...")
             downloaded_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
                 local_dir=str(models_dir),
-                local_dir_use_symlinks=False,
+                tqdm_class=tqdm_cls,
             )
             self.model_path = Path(downloaded_path)
             logger.info(f"Модель успешно скачана: {self.model_path}")
@@ -402,7 +422,13 @@ class WhisperCppTranscriber:
                 thread.daemon = True
                 thread.start()
 
-            stdout_bytes, stderr_bytes = process.communicate()
+            try:
+                # Timeout: 30 minutes max for transcription
+                stdout_bytes, stderr_bytes = process.communicate(timeout=1800)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()  # Clean up
+                raise RuntimeError("Транскрипция прервана: превышено время ожидания (30 мин)")
             stdout = self._decode_bytes(stdout_bytes)
             stderr = self._decode_bytes(stderr_bytes)
 
@@ -491,7 +517,13 @@ class WhisperCppTranscriber:
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
 
-            stdout_bytes, stderr_bytes = process.communicate()
+            try:
+                # Timeout: 30 minutes max for transcription
+                stdout_bytes, stderr_bytes = process.communicate(timeout=1800)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()  # Clean up
+                raise RuntimeError("Транскрипция прервана: превышено время ожидания (30 мин)")
             stdout = self._decode_bytes(stdout_bytes)
             stderr = self._decode_bytes(stderr_bytes)
 
@@ -607,7 +639,12 @@ class WhisperCppTranscriber:
                         full_text = (full_text + " " + clean_text).strip()
                         yield full_text, language, 1.0
 
-            process.wait()
+            try:
+                process.wait(timeout=1800)  # 30 minutes max
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                logger.error("Транскрипция прервана: превышено время ожидания")
         finally:
             if is_temp_wav and working_audio_path.exists():
                 try:

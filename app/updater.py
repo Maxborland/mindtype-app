@@ -201,7 +201,16 @@ class Updater:
 
             temp_dir = Path(os.getenv("TEMP", "/tmp")) / "MindTypeUpdates"
             temp_dir.mkdir(parents=True, exist_ok=True)
-            self._temp_path = temp_dir / f"MindType_Setup_{self.latest_info.get('version', 'update')}{ext}"
+
+            # Sanitize version string to prevent path traversal
+            import re
+            raw_version = self.latest_info.get('version', 'update')
+            # Only allow alphanumeric, dots, hyphens (valid semver chars)
+            safe_version = re.sub(r'[^a-zA-Z0-9.\-]', '', raw_version)[:32]
+            if not safe_version:
+                safe_version = 'update'
+
+            self._temp_path = temp_dir / f"MindType_Setup_{safe_version}{ext}"
 
             logger.info(f"Скачивание обновления: {url} -> {self._temp_path}")
 

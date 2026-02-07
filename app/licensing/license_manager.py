@@ -6,12 +6,15 @@
 import hashlib
 import hmac
 import json
+import logging
 import os
 import platform
 import socket
 import sys
+import threading
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -20,6 +23,8 @@ from typing import Optional, Tuple, Dict, Any
 
 from .key_validator import KeyValidator
 from .trial import TrialManager, TRIAL_DURATION_DAYS, TRIAL_TRANSCRIPTION_LIMIT_SECONDS
+
+logger = logging.getLogger("mindtype.license")
 
 
 class LicenseStatus(Enum):
@@ -86,8 +91,16 @@ def _get_data_dir() -> Path:
     return base / "MindType"
 
 
-def _get_device_id() -> str:
+# P9: Cache for device ID to avoid repeated expensive computation
+_cached_device_id: Optional[str] = None
+_device_id_lock = threading.Lock()
+_device_id_future: Optional[Future] = None
+_background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="license-bg")
+
+
+def _compute_device_id() -> str:
     """
+    Internal function to compute device ID. Called in background thread.
     Генерация уникального ID устройства на основе hardware fingerprint.
     Используется для привязки лицензии к конкретному компьютеру.
     """
@@ -144,6 +157,49 @@ def _get_device_id() -> str:
     # Создаём хеш из всех компонентов
     combined = "|".join(info_parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
+
+
+def _start_device_id_computation() -> None:
+    """P9: Start device ID computation in background thread at module load time."""
+    global _device_id_future
+    with _device_id_lock:
+        if _device_id_future is None:
+            _device_id_future = _background_executor.submit(_compute_device_id)
+
+
+def _get_device_id() -> str:
+    """
+    P9: Get device ID, computing lazily if needed.
+    If background computation is in progress, wait for it.
+    If not started, compute synchronously (fallback).
+    """
+    global _cached_device_id, _device_id_future
+
+    # Fast path: already computed
+    if _cached_device_id is not None:
+        return _cached_device_id
+
+    with _device_id_lock:
+        # Double-check after acquiring lock
+        if _cached_device_id is not None:
+            return _cached_device_id
+
+        # If background computation was started, wait for it
+        if _device_id_future is not None:
+            try:
+                _cached_device_id = _device_id_future.result(timeout=10.0)
+                return _cached_device_id
+            except Exception as e:
+                logger.warning(f"Background device ID computation failed: {e}")
+                # Fall through to synchronous computation
+
+        # Fallback: compute synchronously
+        _cached_device_id = _compute_device_id()
+        return _cached_device_id
+
+
+# P9: Start background computation when module is loaded
+_start_device_id_computation()
 
 
 def _get_device_name() -> str:
@@ -289,6 +345,34 @@ class LicenseManager:
 
         except Exception as e:
             return None, f"error_{str(e)}"
+
+    def _make_api_request_async(
+        self,
+        endpoint: str,
+        data: dict,
+        callback: Optional[callable] = None
+    ) -> Future:
+        """
+        P10: Non-blocking API request that runs in background thread.
+
+        Args:
+            endpoint: API endpoint
+            data: Request data
+            callback: Optional callback(response, error) called when complete
+
+        Returns:
+            Future that will contain (response_data, error_code) tuple
+        """
+        def _do_request():
+            result = self._make_api_request(endpoint, data)
+            if callback:
+                try:
+                    callback(result[0], result[1])
+                except Exception as e:
+                    logger.error(f"API callback error: {e}")
+            return result
+
+        return _background_executor.submit(_do_request)
 
     def activate_online(self, license_key: str) -> Tuple[ValidationResult, str, Optional[dict]]:
         """

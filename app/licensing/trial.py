@@ -214,9 +214,11 @@ class TrialManager:
                 try:
                     last_activity_dt = datetime.fromisoformat(last_activity)
                     now = datetime.now()
-                    # Если текущее время меньше последней активности более чем на 1 час
-                    # значит часы были переведены назад
-                    if now < last_activity_dt - timedelta(hours=1):
+                    # S23: Reduced tolerance from 5 minutes to 30 seconds
+                    # Tighter tolerance prevents repeated small clock shifts from extending trial
+                    # If current time is more than 30 seconds before last activity,
+                    # system clock was moved backwards
+                    if now < last_activity_dt - timedelta(seconds=30):
                         logger.warning("System clock was moved backwards - trial expired!")
                         data["duration_days"] = 0
                         data["_clock_tampered"] = True

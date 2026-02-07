@@ -2,6 +2,7 @@
 Виджеты для UI MindType.
 
 Этот модуль содержит виджеты истории транскрипций, журнала и другие UI компоненты.
+Рефакторинг: использует design tokens вместо inline стилей.
 """
 
 from datetime import datetime
@@ -18,7 +19,10 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QApplication,
 )
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QLinearGradient, QBrush
+from PyQt6.QtGui import QColor, QPainter, QPainterPath
+
+from .icons import STATUS_OK_BRACKET, STATUS_ERROR_BRACKET, STATUS_PENDING_BRACKET
+from .tokens import COLORS, SPACING, TYPOGRAPHY, get_color
 
 
 class TranscriptionEntry:
@@ -44,34 +48,29 @@ class TranscriptionHistoryWidget(QWidget):
         self._update_labels()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet("background-color: #ffffff;")
+        self.setObjectName("historyWidget")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(SPACING["sm"])
 
         # Заголовок секции
         header = QHBoxLayout()
         self._title_label = QLabel(self._translate("history"))
-        self._title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self._title_label.setObjectName("panelTitle")
         header.addWidget(self._title_label)
         header.addStretch()
         layout.addLayout(header)
 
         # Последняя транскрипция (крупная)
         last_section = QFrame()
-        last_section.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
+        last_section.setObjectName("cardElevated")
         last_layout = QVBoxLayout(last_section)
-        last_layout.setContentsMargins(8, 8, 8, 8)
-        last_layout.setSpacing(6)
+        last_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        last_layout.setSpacing(SPACING["xs"] + 2)
 
         last_header = QHBoxLayout()
         self._last_label = QLabel(self._translate("last_transcription"))
-        self._last_label.setStyleSheet("font-size: 11px;")
+        self._last_label.setObjectName("caption")
         last_header.addWidget(self._last_label)
         last_header.addStretch()
 
@@ -83,7 +82,7 @@ class TranscriptionHistoryWidget(QWidget):
         last_layout.addLayout(last_header)
 
         self._last_text = QLabel(self._translate("no_transcriptions"))
-        self._last_text.setStyleSheet("font-size: 12px;")
+        self._last_text.setObjectName("body")
         self._last_text.setWordWrap(True)
         self._last_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         last_layout.addWidget(self._last_text)
@@ -94,13 +93,13 @@ class TranscriptionHistoryWidget(QWidget):
         self._history_scroll = QScrollArea()
         self._history_scroll.setWidgetResizable(True)
         self._history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._history_scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
+        self._history_scroll.setObjectName("scrollArea")
 
         self._history_content = QWidget()
-        self._history_content.setStyleSheet("background-color: #ffffff;")
+        self._history_content.setObjectName("scrollContent")
         self._history_layout = QVBoxLayout(self._history_content)
-        self._history_layout.setContentsMargins(0, 0, 8, 0)
-        self._history_layout.setSpacing(4)
+        self._history_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        self._history_layout.setSpacing(SPACING["xs"])
         self._history_layout.addStretch()
 
         self._history_scroll.setWidget(self._history_content)
@@ -150,31 +149,23 @@ class TranscriptionHistoryWidget(QWidget):
     def _create_history_item(self, entry: TranscriptionEntry) -> QWidget:
         """Создать элемент истории."""
         widget = QFrame()
-        widget.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-            QFrame:hover {
-                background-color: #dddddd;
-            }
-        """)
+        widget.setObjectName("cardInteractive")
         widget.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(8)
+        layout.setContentsMargins(SPACING["xs"] + 2, SPACING["xs"], SPACING["xs"] + 2, SPACING["xs"])
+        layout.setSpacing(SPACING["sm"])
 
         # Время
         time_label = QLabel(entry.time.strftime("%H:%M"))
-        time_label.setStyleSheet("font-size: 11px;")
+        time_label.setObjectName("caption")
         time_label.setFixedWidth(40)
         layout.addWidget(time_label)
 
         # Текст (обрезаем если длинный)
         text = entry.text[:80] + "..." if len(entry.text) > 80 else entry.text
         text_label = QLabel(text)
-        text_label.setStyleSheet("font-size: 11px;")
+        text_label.setObjectName("caption")
         text_label.setWordWrap(False)
         layout.addWidget(text_label, stretch=1)
 
@@ -237,7 +228,7 @@ class JournalWidget(QWidget):
         self._rebuild_ui()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet("background-color: #ffffff;")
+        self.setObjectName("journalWidget")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -246,13 +237,13 @@ class JournalWidget(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
+        scroll.setObjectName("scrollArea")
 
         self._content = QWidget()
-        self._content.setStyleSheet("background-color: #ffffff;")
+        self._content.setObjectName("scrollContent")
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 0, 8, 0)
-        self._content_layout.setSpacing(8)
+        self._content_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        self._content_layout.setSpacing(SPACING["sm"])
         self._content_layout.addStretch()
 
         scroll.setWidget(self._content)
@@ -292,32 +283,22 @@ class JournalWidget(QWidget):
     def _create_entry_widget(self, entry: JournalEntry) -> QWidget:
         """Создать виджет записи."""
         widget = QFrame()
-        widget.setObjectName("journalEntry")
+        widget.setObjectName("card")
         widget.setFrameShape(QFrame.Shape.StyledPanel)
-        widget.setStyleSheet("""
-            QFrame#journalEntry {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-            QFrame#journalEntry QLabel {
-                background: transparent;
-            }
-        """)
 
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(SPACING["sm"], SPACING["xs"] + 2, SPACING["sm"], SPACING["xs"] + 2)
+        layout.setSpacing(SPACING["sm"])
 
         # Время
         time_label = QLabel(entry.time.strftime("%H:%M:%S"))
-        time_label.setObjectName("journalTime")
+        time_label.setObjectName("bodyBold")
         time_label.setFixedWidth(60)
-        time_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(time_label)
 
         # Статус-индикатор (точка)
         status_dot = QLabel("*")
-        status_dot.setStyleSheet("font-size: 12px;")
+        status_dot.setObjectName("body")
         status_dot.setFixedWidth(16)
         layout.addWidget(status_dot)
 
@@ -325,24 +306,25 @@ class JournalWidget(QWidget):
         content_layout = QVBoxLayout()
         content_layout.setSpacing(2)
 
-        # Заголовок со статусом
+        # Заголовок со статусом (B&W icons)
         title_row = QHBoxLayout()
 
         status_label = QLabel()
         if entry.status == "success":
-            status_label.setText("[OK]")
-            status_label.setStyleSheet("font-weight: bold;")
+            status_label.setText(STATUS_OK_BRACKET)
+            status_label.setObjectName("bodyBold")
         elif entry.status == "pending":
-            status_label.setText("[...]")
+            status_label.setText(STATUS_PENDING_BRACKET)
+            status_label.setObjectName("muted")
         else:
-            status_label.setText("[X]")
-            status_label.setStyleSheet("font-weight: bold;")
+            status_label.setText(STATUS_ERROR_BRACKET)
+            status_label.setObjectName("bodyBold")
         title_row.addWidget(status_label)
 
         # Переводим заголовок если нужно
         title_text = self._translate(entry.title_key) if entry.is_translatable else entry.title_key
         title_label = QLabel(title_text)
-        title_label.setStyleSheet("font-weight: bold;")
+        title_label.setObjectName("bodyBold")
         title_row.addWidget(title_label)
         title_row.addStretch()
 
@@ -351,7 +333,7 @@ class JournalWidget(QWidget):
         # Текст (если есть)
         if entry.text:
             text_label = QLabel(entry.text[:100] + "..." if len(entry.text) > 100 else entry.text)
-            text_label.setObjectName("journalText")
+            text_label.setObjectName("body")
             text_label.setWordWrap(True)
             content_layout.addWidget(text_label)
 
@@ -360,7 +342,7 @@ class JournalWidget(QWidget):
             # Переводим extra если нужно
             extra_text = self._translate(entry.extra_key) if entry.is_translatable else entry.extra_key
             extra_label = QLabel(extra_text)
-            extra_label.setStyleSheet("font-size: 11px; font-style: italic;")
+            extra_label.setObjectName("captionItalic")
             content_layout.addWidget(extra_label)
 
         layout.addLayout(content_layout, stretch=1)
@@ -393,19 +375,14 @@ class AssistantDialogHistoryWidget(QWidget):
         self._update_labels()
 
     def _build_ui(self) -> None:
-        self.setStyleSheet("background-color: #ffffff;")
+        self.setObjectName("assistantDialogWidget")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(SPACING["sm"])
 
         # === Левая панель: список диалогов ===
         left_panel = QFrame()
-        left_panel.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
+        left_panel.setObjectName("cardElevated")
         left_panel.setFixedWidth(200)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -413,18 +390,12 @@ class AssistantDialogHistoryWidget(QWidget):
 
         # Заголовок
         header = QFrame()
+        header.setObjectName("titleBar")
         header.setFixedHeight(24)
-        header.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
-                border: none;
-            }
-        """)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 2, 8, 2)
+        header_layout.setContentsMargins(SPACING["sm"], 2, SPACING["sm"], 2)
         self._title_label = QLabel(self._translate("assistant_dialogs"))
-        self._title_label.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 10px;")
+        self._title_label.setObjectName("titleBarLabel")
         header_layout.addWidget(self._title_label)
         left_layout.addWidget(header)
 
@@ -432,13 +403,13 @@ class AssistantDialogHistoryWidget(QWidget):
         self._dialog_scroll = QScrollArea()
         self._dialog_scroll.setWidgetResizable(True)
         self._dialog_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._dialog_scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
+        self._dialog_scroll.setObjectName("scrollArea")
 
         self._dialog_list = QWidget()
-        self._dialog_list.setStyleSheet("background-color: #ffffff;")
+        self._dialog_list.setObjectName("scrollContent")
         self._dialog_list_layout = QVBoxLayout(self._dialog_list)
-        self._dialog_list_layout.setContentsMargins(4, 4, 4, 4)
-        self._dialog_list_layout.setSpacing(4)
+        self._dialog_list_layout.setContentsMargins(SPACING["xs"], SPACING["xs"], SPACING["xs"], SPACING["xs"])
+        self._dialog_list_layout.setSpacing(SPACING["xs"])
         self._dialog_list_layout.addStretch()
 
         self._dialog_scroll.setWidget(self._dialog_list)
@@ -446,17 +417,7 @@ class AssistantDialogHistoryWidget(QWidget):
 
         # Кнопка "Очистить всё"
         self._clear_all_btn = QPushButton(self._translate("clear_all_dialogs"))
-        self._clear_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-                padding: 4px 8px;
-                font-size: 10px;
-            }
-            QPushButton:hover {
-                background-color: #c0c0c0;
-            }
-        """)
+        self._clear_all_btn.setObjectName("smallButton")
         self._clear_all_btn.clicked.connect(self._on_clear_all)
         left_layout.addWidget(self._clear_all_btn)
 
@@ -464,30 +425,19 @@ class AssistantDialogHistoryWidget(QWidget):
 
         # === Правая панель: просмотр диалога ===
         right_panel = QFrame()
-        right_panel.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid #000000;
-            }
-        """)
+        right_panel.setObjectName("cardElevated")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
 
         # Заголовок
         preview_header = QFrame()
+        preview_header.setObjectName("titleBar")
         preview_header.setFixedHeight(24)
-        preview_header.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
-                border: none;
-            }
-        """)
         preview_header_layout = QHBoxLayout(preview_header)
-        preview_header_layout.setContentsMargins(8, 2, 8, 2)
+        preview_header_layout.setContentsMargins(SPACING["sm"], 2, SPACING["sm"], 2)
         self._preview_label = QLabel(self._translate("dialog_preview"))
-        self._preview_label.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 10px;")
+        self._preview_label.setObjectName("titleBarLabel")
         preview_header_layout.addWidget(self._preview_label)
         right_layout.addWidget(preview_header)
 
@@ -495,16 +445,16 @@ class AssistantDialogHistoryWidget(QWidget):
         self._preview_scroll = QScrollArea()
         self._preview_scroll.setWidgetResizable(True)
         self._preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._preview_scroll.setStyleSheet("QScrollArea { background-color: #ffffff; border: none; }")
+        self._preview_scroll.setObjectName("scrollArea")
 
         self._preview_content = QWidget()
-        self._preview_content.setStyleSheet("background-color: #ffffff;")
+        self._preview_content.setObjectName("scrollContent")
         self._preview_layout = QVBoxLayout(self._preview_content)
-        self._preview_layout.setContentsMargins(8, 8, 8, 8)
-        self._preview_layout.setSpacing(6)
+        self._preview_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        self._preview_layout.setSpacing(SPACING["xs"] + 2)
 
         self._placeholder_label = QLabel(self._translate("select_dialog"))
-        self._placeholder_label.setStyleSheet("color: #808080; font-style: italic;")
+        self._placeholder_label.setObjectName("mutedItalic")
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_layout.addWidget(self._placeholder_label)
         self._preview_layout.addStretch()
@@ -514,10 +464,10 @@ class AssistantDialogHistoryWidget(QWidget):
 
         # Кнопки управления
         controls = QFrame()
-        controls.setStyleSheet("QFrame { background-color: #ffffff; border-top: 1px solid #808080; }")
+        controls.setObjectName("controlBar")
         controls_layout = QHBoxLayout(controls)
-        controls_layout.setContentsMargins(8, 6, 8, 6)
-        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(SPACING["sm"], SPACING["xs"] + 2, SPACING["sm"], SPACING["xs"] + 2)
+        controls_layout.setSpacing(SPACING["sm"])
 
         self._continue_btn = QPushButton(self._translate("continue_dialog"))
         self._continue_btn.setEnabled(False)
@@ -565,7 +515,7 @@ class AssistantDialogHistoryWidget(QWidget):
 
         if not self._dialogs:
             no_dialogs = QLabel(self._translate("no_dialogs"))
-            no_dialogs.setStyleSheet("color: #808080; font-style: italic; font-size: 10px;")
+            no_dialogs.setObjectName("mutedItalic")
             no_dialogs.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._dialog_list_layout.insertWidget(0, no_dialogs)
             return
@@ -577,26 +527,17 @@ class AssistantDialogHistoryWidget(QWidget):
     def _create_dialog_item(self, dialog: Any) -> QWidget:
         """Создать элемент списка диалогов."""
         item = QFrame()
-        item.setObjectName(f"dialog_{dialog.id}")
-        item.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #808080;
-            }
-            QFrame:hover {
-                background-color: #e0e0e0;
-            }
-        """)
+        item.setObjectName("cardInteractive")
         item.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(item)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(SPACING["xs"] + 2, SPACING["xs"], SPACING["xs"] + 2, SPACING["xs"])
         layout.setSpacing(2)
 
         # Заголовок (обрезанный)
         title = dialog.title or "Новый диалог"
         title_label = QLabel(title[:30] + "..." if len(title) > 30 else title)
-        title_label.setStyleSheet("font-weight: bold; font-size: 10px; background: transparent;")
+        title_label.setObjectName("smallBold")
         layout.addWidget(title_label)
 
         # Дата
@@ -606,7 +547,7 @@ class AssistantDialogHistoryWidget(QWidget):
         except Exception:
             date_str = dialog.timestamp[:16] if hasattr(dialog, 'timestamp') else ""
         date_label = QLabel(date_str)
-        date_label.setStyleSheet("color: #808080; font-size: 9px; background: transparent;")
+        date_label.setObjectName("tinyMuted")
         layout.addWidget(date_label)
 
         # Клик для выбора
@@ -633,17 +574,12 @@ class AssistantDialogHistoryWidget(QWidget):
         # System prompt (если есть)
         if hasattr(dialog, 'system_prompt') and dialog.system_prompt:
             sys_frame = QFrame()
-            sys_frame.setStyleSheet("""
-                QFrame {
-                    background-color: #f0f0f0;
-                    border: 1px dashed #808080;
-                }
-            """)
+            sys_frame.setObjectName("infoBox")
             sys_layout = QVBoxLayout(sys_frame)
-            sys_layout.setContentsMargins(6, 4, 6, 4)
+            sys_layout.setContentsMargins(SPACING["xs"] + 2, SPACING["xs"], SPACING["xs"] + 2, SPACING["xs"])
             sys_label = QLabel("System: " + dialog.system_prompt[:100] + ("..." if len(dialog.system_prompt) > 100 else ""))
             sys_label.setWordWrap(True)
-            sys_label.setStyleSheet("font-size: 9px; color: #606060; background: transparent;")
+            sys_label.setObjectName("tinySecondary")
             sys_layout.addWidget(sys_label)
             self._preview_layout.addWidget(sys_frame)
 
@@ -663,18 +599,13 @@ class AssistantDialogHistoryWidget(QWidget):
         row.setSpacing(0)
 
         bubble = QFrame()
-        bubble.setStyleSheet("""
-            QFrame {
-                border: 1px solid #000000;
-                background-color: %s;
-            }
-        """ % ("#dddddd" if role == "user" else "#ffffff"))
+        bubble.setObjectName("userBubble" if role == "user" else "assistantBubble")
         bubble_layout = QVBoxLayout(bubble)
-        bubble_layout.setContentsMargins(6, 4, 6, 4)
+        bubble_layout.setContentsMargins(SPACING["xs"] + 2, SPACING["xs"], SPACING["xs"] + 2, SPACING["xs"])
 
         label = QLabel(content[:200] + ("..." if len(content) > 200 else ""))
         label.setWordWrap(True)
-        label.setStyleSheet("font-size: 10px; color: #000000; background: transparent;")
+        label.setObjectName("small")
         bubble_layout.addWidget(label)
 
         if role == "user":
@@ -713,7 +644,7 @@ class AssistantDialogHistoryWidget(QWidget):
                     item.widget().deleteLater()
 
             self._placeholder_label = QLabel(self._translate("select_dialog"))
-            self._placeholder_label.setStyleSheet("color: #808080; font-style: italic;")
+            self._placeholder_label.setObjectName("mutedItalic")
             self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._preview_layout.addWidget(self._placeholder_label)
             self._preview_layout.addStretch()
@@ -741,14 +672,14 @@ class AssistantDialogHistoryWidget(QWidget):
                 item.widget().deleteLater()
 
         self._placeholder_label = QLabel(self._translate("select_dialog"))
-        self._placeholder_label.setStyleSheet("color: #808080; font-style: italic;")
+        self._placeholder_label.setObjectName("mutedItalic")
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_layout.addWidget(self._placeholder_label)
         self._preview_layout.addStretch()
 
 
 class MicLevelWidget(QWidget):
-    """Индикатор уровня микрофона с цветовой шкалой."""
+    """Индикатор уровня микрофона в B&W стиле (system.css)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -778,33 +709,21 @@ class MicLevelWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w, h = self.width(), self.height()
-        radius = 4
 
-        # Фон
-        bg_path = QPainterPath()
-        bg_path.addRoundedRect(0, 0, w, h, radius, radius)
-        painter.fillPath(bg_path, QColor(30, 30, 35, 200))
+        # Фон - белый с чёрной рамкой (system.css style)
+        painter.fillRect(0, 0, w, h, QColor(255, 255, 255))
+        painter.setPen(QColor(0, 0, 0))
+        painter.drawRect(0, 0, w - 1, h - 1)
 
-        # Градиент для индикатора уровня
+        # Уровень - чёрная полоса (B&W style)
         level_width = max(0, int((w - 4) * self._level))
         if level_width > 0:
-            gradient = QLinearGradient(2, 0, w - 2, 0)
-            gradient.setColorAt(0.0, QColor(80, 200, 120))     # Зелёный
-            gradient.setColorAt(0.6, QColor(200, 200, 80))     # Жёлтый
-            gradient.setColorAt(0.85, QColor(255, 140, 80))    # Оранжевый
-            gradient.setColorAt(1.0, QColor(255, 80, 80))      # Красный
+            painter.fillRect(2, 2, level_width, h - 4, QColor(0, 0, 0))
 
-            level_path = QPainterPath()
-            level_path.addRoundedRect(2, 2, level_width, h - 4, radius - 1, radius - 1)
-            painter.fillPath(level_path, QBrush(gradient))
-
-        # Индикатор пика (вертикальная линия)
+        # Индикатор пика (вертикальная линия) - чёрный на белом
         if self._peak > 0.05:
             peak_x = 2 + int((w - 4) * self._peak)
-            peak_color = QColor(255, 255, 255, 180)
-            painter.setPen(peak_color)
-            painter.drawLine(peak_x, 3, peak_x, h - 3)
-
-        # Рамка
-        painter.setPen(QColor(60, 60, 65))
-        painter.drawRoundedRect(0, 0, w - 1, h - 1, radius, radius)
+            # Рисуем пик только если он за пределами текущего уровня
+            if peak_x > 2 + level_width:
+                painter.setPen(QColor(0, 0, 0))
+                painter.drawLine(peak_x, 2, peak_x, h - 3)

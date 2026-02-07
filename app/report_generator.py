@@ -97,11 +97,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         /* Информационная панель */
         .info-panel {{
             background-color: #ffffff;
-            border: 2px solid;
-            border-top-color: #808080;
-            border-left-color: #808080;
-            border-right-color: #ffffff;
-            border-bottom-color: #ffffff;
+            border: 1.5px solid #000000;
             padding: 12px;
             margin-bottom: 16px;
         }}
@@ -134,11 +130,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         /* Полный текст */
         .full-text {{
             background-color: #ffffff;
-            border: 2px solid;
-            border-top-color: #808080;
-            border-left-color: #808080;
-            border-right-color: #ffffff;
-            border-bottom-color: #ffffff;
+            border: 1.5px solid #000000;
             padding: 16px;
             margin-bottom: 16px;
             line-height: 1.8;
@@ -148,11 +140,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         /* Сегменты транскрипции */
         .segments {{
             background-color: #ffffff;
-            border: 2px solid;
-            border-top-color: #808080;
-            border-left-color: #808080;
-            border-right-color: #ffffff;
-            border-bottom-color: #ffffff;
+            border: 1.5px solid #000000;
         }}
 
         .segment {{

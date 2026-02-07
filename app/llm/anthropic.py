@@ -7,21 +7,17 @@ Anthropic Claude LLM провайдер.
 - Streaming с thinking блоками
 """
 
+import codecs
 import json
 import logging
-import urllib.request
 import urllib.error
 from typing import Dict, List, Optional, Any
-import codecs
 
 from .base import (
     LLMProvider,
     LLMModel,
     LLMError,
-    LLMAuthError,
-    LLMRateLimitError,
     LLMConnectionError,
-    LLMInvalidModelError,
     ReasoningConfig,
     TokenCallback,
     ThinkingCallback,
@@ -52,56 +48,21 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, api_key: str, timeout: int = 180):
         super().__init__(api_key=api_key, timeout=timeout)
+        self._use_beta = False  # Флаг для extended thinking
 
-    def _make_request(
-        self,
-        url: str,
-        method: str = "GET",
-        data: Optional[Dict] = None,
-        stream: bool = False,
-        use_beta: bool = False,
-    ) -> Any:
-        """Выполнить HTTP запрос к Anthropic API."""
+    def _get_headers(self) -> Dict[str, str]:
+        """Заголовки Anthropic API."""
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": ANTHROPIC_VERSION,
             "Content-Type": "application/json",
         }
-
         # Для extended thinking нужен beta header
-        if use_beta:
+        if self._use_beta:
             headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+        return headers
 
-        req_data = json.dumps(data).encode("utf-8") if data else None
-        request = urllib.request.Request(url, data=req_data, headers=headers, method=method)
-
-        try:
-            response = urlopen_with_ssl(request, timeout=self.timeout)
-            if stream:
-                return response
-            return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8") if e.fp else ""
-            self._handle_http_error(e.code, error_body)
-        except urllib.error.URLError as e:
-            raise LLMConnectionError(f"Ошибка подключения к Anthropic: {e.reason}")
-
-    def _handle_http_error(self, status_code: int, body: str) -> None:
-        """Обработать HTTP ошибку."""
-        try:
-            error_data = json.loads(body)
-            message = error_data.get("error", {}).get("message", body)
-        except json.JSONDecodeError:
-            message = body
-
-        if status_code == 401:
-            raise LLMAuthError(f"Неверный API ключ Anthropic: {message}")
-        elif status_code == 429:
-            raise LLMRateLimitError(f"Превышен лимит запросов Anthropic: {message}")
-        elif status_code == 404:
-            raise LLMInvalidModelError(f"Модель не найдена: {message}")
-        else:
-            raise LLMError(f"Ошибка Anthropic API ({status_code}): {message}")
+    # Используем базовые _make_request и _handle_http_error из LLMProvider
 
     def _fetch_models_from_api(self) -> List[LLMModel]:
         """
@@ -192,11 +153,10 @@ class AnthropicProvider(LLMProvider):
             data["system"] = system
 
         # Extended thinking для поддерживающих моделей
-        use_beta = False
         is_thinking_model = model in THINKING_MODELS or "sonnet" in model.lower()
 
         if reasoning and reasoning.enabled and is_thinking_model:
-            use_beta = True
+            self._use_beta = True
             data["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": reasoning.budget_tokens,
@@ -204,9 +164,10 @@ class AnthropicProvider(LLMProvider):
             # Для thinking нужен больший max_tokens
             data["max_tokens"] = max(max_tokens, 16000)
         else:
+            self._use_beta = False
             data["temperature"] = temperature
 
-        response = self._make_request(MESSAGES_ENDPOINT, method="POST", data=data, use_beta=use_beta)
+        response = self._make_request(MESSAGES_ENDPOINT, method="POST", data=data)
 
         # Извлекаем текст из ответа (может содержать thinking блоки)
         content_blocks = response.get("content", [])
@@ -241,94 +202,85 @@ class AnthropicProvider(LLMProvider):
         if system:
             data["system"] = system
 
-        use_beta = False
         is_thinking_model = model in THINKING_MODELS or "sonnet" in model.lower()
 
         if reasoning and reasoning.enabled and is_thinking_model:
-            use_beta = True
+            self._use_beta = True
             data["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": reasoning.budget_tokens,
             }
             data["max_tokens"] = max(max_tokens, 16000)
         else:
+            self._use_beta = False
             data["temperature"] = temperature
 
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "Content-Type": "application/json",
-        }
-
-        if use_beta:
-            headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
-
-        req_data = json.dumps(data).encode("utf-8")
-        request = urllib.request.Request(MESSAGES_ENDPOINT, data=req_data, headers=headers, method="POST")
-
-        full_response = []
-        current_block_type = None
-
         try:
-            with urlopen_with_ssl(request, timeout=self.timeout) as response:
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                buffer = ""
-
-                while True:
-                    chunk = response.read(1024)
-                    if not chunk:
-                        final = decoder.decode(b"", final=True)
-                        if final:
-                            buffer += final
-                        break
-                    buffer += decoder.decode(chunk)
-
-                    # Парсим SSE события
-                    while "\n\n" in buffer:
-                        event, buffer = buffer.split("\n\n", 1)
-
-                        event_type = None
-                        event_data = None
-
-                        for line in event.split("\n"):
-                            if line.startswith("event: "):
-                                event_type = line[7:]
-                            elif line.startswith("data: "):
-                                try:
-                                    event_data = json.loads(line[6:])
-                                except json.JSONDecodeError:
-                                    pass
-
-                        if not event_data:
-                            continue
-
-                        # Обрабатываем события
-                        if event_type == "content_block_start":
-                            block = event_data.get("content_block", {})
-                            current_block_type = block.get("type")
-
-                        elif event_type == "content_block_delta":
-                            delta = event_data.get("delta", {})
-                            delta_type = delta.get("type")
-
-                            if delta_type == "thinking_delta":
-                                # Thinking блок
-                                thinking_text = delta.get("thinking", "")
-                                if thinking_text and on_thinking:
-                                    on_thinking(thinking_text)
-
-                            elif delta_type == "text_delta":
-                                # Обычный текст
-                                text = delta.get("text", "")
-                                if text:
-                                    full_response.append(text)
-                                    on_token(text)
-
+            response = self._make_request(MESSAGES_ENDPOINT, method="POST", data=data, stream=True)
+            return self._parse_anthropic_sse_stream(response, on_token, on_thinking)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             self._handle_http_error(e.code, error_body)
         except urllib.error.URLError as e:
             raise LLMConnectionError(f"Ошибка подключения к Anthropic: {e.reason}")
+        return ""
+
+    def _parse_anthropic_sse_stream(
+        self,
+        response,
+        on_token: TokenCallback,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> str:
+        """Парсинг SSE потока Anthropic с поддержкой thinking блоков."""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffer = ""
+        full_response: List[str] = []
+
+        while True:
+            chunk = response.read(1024)
+            if not chunk:
+                final = decoder.decode(b"", final=True)
+                if final:
+                    buffer += final
+                break
+            buffer += decoder.decode(chunk)
+
+            # Парсим SSE события
+            while "\n\n" in buffer:
+                event, buffer = buffer.split("\n\n", 1)
+
+                event_type = None
+                event_data = None
+
+                for line in event.split("\n"):
+                    if line.startswith("event: "):
+                        event_type = line[7:]
+                    elif line.startswith("data: "):
+                        try:
+                            event_data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            pass
+
+                if not event_data:
+                    continue
+
+                # Обрабатываем события content_block_delta
+                if event_type == "content_block_delta":
+                    delta = event_data.get("delta", {})
+                    delta_type = delta.get("type")
+
+                    if delta_type == "thinking_delta":
+                        # Thinking блок
+                        thinking_text = delta.get("thinking", "")
+                        if thinking_text and on_thinking:
+                            on_thinking(thinking_text)
+
+                    elif delta_type == "text_delta":
+                        # Обычный текст
+                        text = delta.get("text", "")
+                        if text:
+                            full_response.append(text)
+                            on_token(text)
 
         return "".join(full_response)
 

@@ -4,6 +4,8 @@
 Этот модуль содержит:
 - DropZoneWidget: зона drag-and-drop для файлов
 - FileQueueItemWidget: элемент очереди файлов
+
+Рефакторинг: использует design tokens вместо inline стилей.
 """
 
 from pathlib import Path
@@ -35,6 +37,8 @@ from ..file_transcriber import (
     ALL_EXTENSIONS,
     is_supported_file,
 )
+from .icons import STATUS_OK, STATUS_ERROR, STATUS_PENDING, STATUS_PROGRESS
+from .tokens import COLORS, SPACING, TYPOGRAPHY
 
 
 class DropZoneWidget(QFrame):
@@ -47,7 +51,7 @@ class DropZoneWidget(QFrame):
         super().__init__(parent)
         self._translate = translate_func or (lambda x: x)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(100)
+        self.setMinimumHeight(120)
         self._build_ui()
 
     def set_translate_func(self, func: Callable) -> None:
@@ -81,47 +85,35 @@ class DropZoneWidget(QFrame):
         return pixmap
 
     def _build_ui(self) -> None:
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QFrame:hover {
-                background-color: #f0f0f0;
-            }
-        """)
+        self.setObjectName("cardInteractive")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(4)
+        layout.setSpacing(SPACING["xs"])
 
         # Пиксельная иконка папки
         icon_label = QLabel()
         icon_label.setPixmap(self._create_folder_icon())
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setStyleSheet("border: none; background: transparent;")
+        icon_label.setObjectName("iconLabel")
         layout.addWidget(icon_label)
 
         # Основной текст
         self._main_label = QLabel(self._translate("drag_drop_files"))
-        self._main_label.setStyleSheet("font-weight: bold; font-size: 12px; border: none; background: transparent;")
+        self._main_label.setObjectName("bodyBold")
         self._main_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._main_label)
 
         # Подсказка
         self._sub_label = QLabel(self._translate("or_click_to_select"))
-        self._sub_label.setStyleSheet("font-size: 11px; color: #808080; border: none; background: transparent;")
+        self._sub_label.setObjectName("caption")
         self._sub_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._sub_label)
 
         # Форматы
         self._formats_label = QLabel(self._translate("supported_formats"))
-        self._formats_label.setStyleSheet("font-size: 10px; color: #808080; border: none; background: transparent;")
+        self._formats_label.setObjectName("small")
         self._formats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._formats_label.setWordWrap(True)
         layout.addWidget(self._formats_label)
@@ -143,44 +135,24 @@ class DropZoneWidget(QFrame):
                 path = Path(url.toLocalFile())
                 if is_supported_file(path):
                     event.acceptProposedAction()
-                    self.setStyleSheet("""
-                        QFrame {
-                            background-color: #dddddd;
-                            border: 2px solid #000000;
-                        }
-                    """)
+                    self.setObjectName("cardElevated")
+                    # Force style refresh
+                    self.style().unpolish(self)
+                    self.style().polish(self)
                     return
         event.ignore()
 
     def dragLeaveEvent(self, event) -> None:
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QFrame:hover {
-                background-color: #f0f0f0;
-            }
-        """)
+        self.setObjectName("cardInteractive")
+        # Force style refresh
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 2px solid;
-                border-top-color: #808080;
-                border-left-color: #808080;
-                border-right-color: #ffffff;
-                border-bottom-color: #ffffff;
-            }
-            QFrame:hover {
-                background-color: #f0f0f0;
-            }
-        """)
+        self.setObjectName("cardInteractive")
+        # Force style refresh
+        self.style().unpolish(self)
+        self.style().polish(self)
 
         files = []
         for url in event.mimeData().urls():
@@ -281,22 +253,17 @@ class FileQueueItemWidget(QFrame):
         return pixmap
 
     def _build_ui(self) -> None:
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #000000;
-            }
-        """)
+        self.setObjectName("card")
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(SPACING["sm"], SPACING["xs"] + 2, SPACING["sm"], SPACING["xs"] + 2)
+        layout.setSpacing(SPACING["sm"])
 
         # Иконка типа файла (пиксельная)
         icon_label = QLabel()
         icon_label.setPixmap(self._create_file_icon(self.task.is_video))
         icon_label.setFixedWidth(24)
-        icon_label.setStyleSheet("border: none;")
+        icon_label.setObjectName("iconLabel")
         layout.addWidget(icon_label)
 
         # Информация о файле
@@ -305,12 +272,11 @@ class FileQueueItemWidget(QFrame):
 
         # Имя файла
         self._name_label = QLabel(self.task.file_name)
-        self._name_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self._name_label.setObjectName("bodyBold")
         info_layout.addWidget(self._name_label)
 
         # Статус
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("font-size: 11px; color: #808080;")
         info_layout.addWidget(self._status_label)
 
         layout.addLayout(info_layout, stretch=1)
@@ -326,19 +292,7 @@ class FileQueueItemWidget(QFrame):
         # Кнопка открыть/удалить
         self._action_btn = QPushButton("×")
         self._action_btn.setFixedSize(24, 24)
-        self._action_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                font-weight: bold;
-                border: 1px solid #000000;
-                background: #ffffff;
-                padding: 0;
-            }
-            QPushButton:hover {
-                background: #000000;
-                color: #ffffff;
-            }
-        """)
+        self._action_btn.setObjectName("iconButton")
         self._action_btn.setText("")
         self._action_btn.setIconSize(QSize(12, 12))
         self._action_btn.clicked.connect(self._on_action_clicked)
@@ -351,26 +305,34 @@ class FileQueueItemWidget(QFrame):
             self.remove_clicked.emit(self.task)
 
     def update_status(self) -> None:
-        """Обновить отображение статуса."""
+        """Обновить отображение статуса (B&W theme)."""
+        # Status map: (translation_key, status_icon, objectName)
+        # Using ObjectName for styling instead of inline styles
         status_map = {
-            FileStatus.PENDING: ("status_pending", "#808080"),
-            FileStatus.EXTRACTING: ("status_extracting", "#0066cc"),
-            FileStatus.TRANSCRIBING: ("status_transcribing", "#0066cc"),
-            FileStatus.SUMMARIZING: ("status_summarizing", "#9900cc"),
-            FileStatus.GENERATING: ("status_generating", "#0066cc"),
-            FileStatus.COMPLETED: ("status_completed", "#008800"),
-            FileStatus.ERROR: ("status_error", "#cc0000"),
-            FileStatus.CANCELLED: ("status_cancelled", "#808080"),
+            FileStatus.PENDING: ("status_pending", STATUS_PENDING, "fileStatusPending"),
+            FileStatus.EXTRACTING: ("status_extracting", STATUS_PROGRESS, "fileStatusProgress"),
+            FileStatus.TRANSCRIBING: ("status_transcribing", STATUS_PROGRESS, "fileStatusProgress"),
+            FileStatus.SUMMARIZING: ("status_summarizing", STATUS_PROGRESS, "fileStatusProgress"),
+            FileStatus.GENERATING: ("status_generating", STATUS_PROGRESS, "fileStatusProgress"),
+            FileStatus.COMPLETED: ("status_completed", STATUS_OK, "fileStatusComplete"),
+            FileStatus.ERROR: ("status_error", STATUS_ERROR, "fileStatusError"),
+            FileStatus.CANCELLED: ("status_cancelled", STATUS_PENDING, "fileStatusPending"),
         }
 
-        key, color = status_map.get(self.task.status, ("status_pending", "#808080"))
-        status_text = self._translate(key)
+        key, icon, object_name = status_map.get(
+            self.task.status,
+            ("status_pending", STATUS_PENDING, "fileStatusPending")
+        )
+        status_text = f"{icon} {self._translate(key)}"
 
         if self.task.status == FileStatus.ERROR and self.task.error_message:
             status_text += f": {self.task.error_message[:50]}"
 
         self._status_label.setText(status_text)
-        self._status_label.setStyleSheet(f"font-size: 11px; color: {color};")
+        self._status_label.setObjectName(object_name)
+        # Force style refresh
+        self._status_label.style().unpolish(self._status_label)
+        self._status_label.style().polish(self._status_label)
 
         # Прогресс
         self._progress.setValue(self.task.progress)
