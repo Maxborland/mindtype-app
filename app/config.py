@@ -234,7 +234,11 @@ class ConfigManager:
                     if stored_key:
                         merged[key_field] = stored_key
                 except Exception as e:
-                    logger.error(f"Ошибка загрузки {key_field} из keyring: {e}")
+                    # SECURITY: Don't log key names or key values.
+                    logger.error(
+                        "Ошибка загрузки ключа из keyring (redacted): %s",
+                        type(e).__name__,
+                    )
 
         # In compiled mode, verify model exists or fallback to available one
         if is_app_frozen():
@@ -294,13 +298,17 @@ class ConfigManager:
                         # Маскируем ключ в JSON файле - никогда не сохраняем plaintext
                         data_to_save[key_field] = "key_in_keyring"
                     except Exception as e:
-                        logger.error(f"Ошибка сохранения {key_field} в keyring: {e}")
+                        # SECURITY: Don't log key names or key values.
+                        logger.error(
+                            "Ошибка сохранения ключа в keyring (redacted): %s",
+                            type(e).__name__,
+                        )
                         # SECURITY: Don't save plaintext key to JSON on keyring failure
                         data_to_save[key_field] = ""
-                        logger.warning(f"API ключ {key_field} НЕ сохранён из-за ошибки keyring")
+                        logger.warning("API ключ НЕ сохранён из-за ошибки keyring")
                 else:
                     # SECURITY: keyring not available - don't save plaintext keys
-                    logger.warning(f"keyring недоступен - API ключ {key_field} не будет сохранён")
+                    logger.warning("keyring недоступен - API ключ не будет сохранён")
                     data_to_save[key_field] = ""
 
         with self.config_path.open("w", encoding="utf-8") as fh:
