@@ -8,7 +8,7 @@ import time
 import shutil
 import numpy as np
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union, Iterable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 from .accelerator import get_best_provider, get_provider_options
 
@@ -212,6 +212,106 @@ class WhisperCppTranscriber:
             except UnicodeDecodeError:
                 continue
         return b.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _extract_whisper_json_items(data: Any) -> List[Dict[str, Any]]:
+        """
+        whisper.cpp JSON shape can vary by version/flags.
+
+        Known variants:
+        - {"transcription": [ ... ]}
+        - {"segments": [ ... ]}
+        - {"result": {"transcription": [ ... ]}}
+        - {"result": {"segments": [ ... ]}}
+        - [ ... ] (rare; treat as already-a-list)
+        """
+        if isinstance(data, dict):
+            if isinstance(data.get("transcription"), list):
+                return [x for x in data.get("transcription", []) if isinstance(x, dict)]
+            if isinstance(data.get("segments"), list):
+                return [x for x in data.get("segments", []) if isinstance(x, dict)]
+
+            result = data.get("result")
+            if isinstance(result, dict):
+                if isinstance(result.get("transcription"), list):
+                    return [x for x in result.get("transcription", []) if isinstance(x, dict)]
+                if isinstance(result.get("segments"), list):
+                    return [x for x in result.get("segments", []) if isinstance(x, dict)]
+
+            return []
+
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+
+        return []
+
+    @staticmethod
+    def _parse_timestamp_to_seconds(ts: Any) -> Optional[float]:
+        if not isinstance(ts, str):
+            return None
+        ts = ts.strip()
+        # Formats: HH:MM:SS.mmm or HH:MM:SS,mmm
+        m = re.match(r"^(\\d{2,}):(\\d{2}):(\\d{2})[\\.,](\\d{1,3})$", ts)
+        if not m:
+            return None
+        h = int(m.group(1))
+        mi = int(m.group(2))
+        s = int(m.group(3))
+        ms = int(m.group(4).ljust(3, "0"))
+        return h * 3600 + mi * 60 + s + (ms / 1000.0)
+
+    @classmethod
+    def _extract_segment_times(cls, seg: Dict[str, Any]) -> Tuple[float, float]:
+        offsets = seg.get("offsets")
+        if isinstance(offsets, dict):
+            start_ms = offsets.get("from")
+            end_ms = offsets.get("to")
+            if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)):
+                return float(start_ms) / 1000.0, float(end_ms) / 1000.0
+
+        timestamps = seg.get("timestamps")
+        if isinstance(timestamps, dict):
+            s = cls._parse_timestamp_to_seconds(timestamps.get("from"))
+            e = cls._parse_timestamp_to_seconds(timestamps.get("to"))
+            if s is not None and e is not None:
+                return s, e
+
+        for a, b in (("start", "end"), ("from", "to"), ("t0", "t1")):
+            sa = seg.get(a)
+            sb = seg.get(b)
+            if isinstance(sa, (int, float)) and isinstance(sb, (int, float)):
+                s = float(sa)
+                e = float(sb)
+                # Heuristic: segment lengths in ms are usually thousands; in seconds usually < 60.
+                if (e - s) > 100:
+                    s /= 1000.0
+                    e /= 1000.0
+                return s, e
+
+        return 0.0, 0.0
+
+    @staticmethod
+    def _clean_stdout_text(stdout: str) -> str:
+        if not stdout:
+            return ""
+
+        filtered_lines: List[str] = []
+        for line in stdout.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            # Some whisper.cpp builds can emit logs to stdout.
+            if s.startswith(("ggml_", "whisper_", "output_json:", "system_info:")):
+                continue
+            filtered_lines.append(s)
+
+        text = "\\n".join(filtered_lines)
+        text = re.sub(
+            r"\\[\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s*-+>\\s*\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\]\\s*",
+            "",
+            text,
+        )
+        return " ".join(text.split()).strip()
 
     def load_model(
         self,
@@ -687,16 +787,15 @@ class WhisperCppTranscriber:
                     except OSError:
                         pass
 
-                    if "transcription" in data:
-                        full_text = " ".join([seg.get("text", "").strip() for seg in data["transcription"]])
+                    items = self._extract_whisper_json_items(data)
+                    if items:
+                        full_text = " ".join([str(seg.get("text", "")).strip() for seg in items])
 
                 # Если из JSON ничего не получили, чистим stdout от таймкодов
                 if not full_text.strip():
                     logger.warning("JSON пуст или не найден, используем stdout.")
                     # Очищаем [00:00:00.000 --> 00:00:00.000] или [00:00:00.000 -> 00:00:00.000]
-                    full_text = re.sub(r'\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-+>\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*', '', stdout)
-                    # Убираем лишние пустые строки и пробелы
-                    full_text = " ".join(full_text.split())
+                    full_text = self._clean_stdout_text(stdout)
 
                 logger.info(f"Транскрипция завершена. Символов: {len(full_text)}")
                 return full_text.strip(), language, 1.0
@@ -704,8 +803,7 @@ class WhisperCppTranscriber:
                 logger.error(f"Ошибка парсинга: {e}")
                 # Если JSON упал, но есть очищенный stdout - используем его
                 if stdout:
-                    clean_stdout = re.sub(r'\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-+>\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*', '', stdout)
-                    clean_stdout = " ".join(clean_stdout.split())
+                    clean_stdout = self._clean_stdout_text(stdout)
                     if clean_stdout:
                         return clean_stdout.strip(), language, 1.0
                 raise RuntimeError(f"Не удалось распарсить результат: {e}")
@@ -781,19 +879,31 @@ class WhisperCppTranscriber:
                     except OSError:
                         pass
 
-                    segments = []
-                    for seg in data.get("transcription", []):
-                        offsets = seg.get("offsets", {})
-                        start_ms = offsets.get("from", 0)
-                        end_ms = offsets.get("to", 0)
+                    items = self._extract_whisper_json_items(data)
 
+                    segments: List[Dict[str, Any]] = []
+                    for seg in items:
+                        start_s, end_s = self._extract_segment_times(seg)
                         segments.append({
-                            "start": start_ms / 1000.0,
-                            "end": end_ms / 1000.0,
-                            "text": seg.get("text", "").strip()
+                            "start": start_s,
+                            "end": end_s,
+                            "text": str(seg.get("text", "")).strip(),
                         })
 
-                    res_lang = data.get("result", {}).get("language", language)
+                    # If JSON exists but doesn't include any segments we can parse,
+                    # fall back to stdout. This can happen if whisper.cpp changes JSON keys.
+                    if not segments:
+                        text = self._clean_stdout_text(stdout)
+                        if text:
+                            segments = [{"start": 0.0, "end": 0.0, "text": text}]
+
+                    res_lang = language
+                    if isinstance(data, dict):
+                        res_lang = (
+                            (data.get("result") or {}).get("language")
+                            or data.get("language")
+                            or res_lang
+                        )
                     logger.info(f"Получено {len(segments)} сегментов.")
                     return segments, res_lang, 1.0
                 else:
@@ -815,6 +925,9 @@ class WhisperCppTranscriber:
                             })
                     if segments:
                         return segments, language, 1.0
+                    text = self._clean_stdout_text(stdout)
+                    if text:
+                        return [{"start": 0.0, "end": 0.0, "text": text}], language, 1.0
                     return [], language, 0.0
             except Exception as e:
                 logger.error(f"JSON error: {e}")
