@@ -375,13 +375,27 @@ class WhisperCppTranscriber:
             with urllib.request.urlopen(req, **open_kwargs) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
 
-                # If resume is not supported, restart.
+                # If resume is not supported by this source, don't clobber the
+                # existing partial download (it might be resumable from another source).
                 if downloaded > 0 and status != 206:
-                    downloaded = 0
-                    try:
-                        part_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                    # Some servers respond 416 when the Range starts at EOF.
+                    if status == 416:
+                        try:
+                            cr = (resp.headers.get("Content-Range") or "").strip()
+                            # e.g. "bytes */77691713"
+                            m = re.search(r"/\s*(\d+)\s*$", cr)
+                            total_full = int(m.group(1)) if m else 0
+                        except Exception:
+                            total_full = 0
+
+                        try:
+                            if total_full > 0 and part_path.exists() and part_path.stat().st_size == total_full:
+                                part_path.replace(dest_path)
+                                return
+                        except Exception:
+                            pass
+
+                    raise RuntimeError(f"resume not supported (status {status})")
 
                 total = 0
                 try:
@@ -452,31 +466,73 @@ class WhisperCppTranscriber:
 
             part_path.replace(dest_path)
 
-        errors: List[str] = []
-        for src in sources_to_try:
-            url = _build_url(src)
-            parsed = urllib.parse.urlparse(url)
-            if parsed.scheme not in ("https", "http"):
-                errors.append(f"{url} (unsupported scheme)")
-                continue
+        part_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
+        def _part_size() -> int:
             try:
-                logger.info(f"Скачивание {filename} из {url}...")
-                _download_url(url)
-                self.model_path = dest_path
-                logger.info(f"Модель успешно скачана: {self.model_path}")
-                return
-            except InterruptedError:
-                # Cancellation should stop immediately and propagate to the worker/UI.
-                raise
-            except Exception as e:
-                msg = f"{url}: {e}"
-                errors.append(msg)
-                logger.warning(f"Ошибка скачивания: {msg}")
+                if part_path.exists():
+                    return int(part_path.stat().st_size)
+            except Exception:
+                return 0
+            return 0
+
+        # Large model downloads can be flaky in some networks (abrupt EOF / connection resets).
+        # We keep retrying across sources while we are making progress (resume via .part + Range).
+        last_progress_size = _part_size()
+        no_progress_rounds = 0
+        max_no_progress_rounds = 2
+        errors_by_url: Dict[str, str] = {}
+
+        while True:
+            round_progress = False
+
+            for src in sources_to_try:
+                url = _build_url(src)
+                parsed = urllib.parse.urlparse(url)
+                if parsed.scheme not in ("https", "http"):
+                    errors_by_url[url] = "unsupported scheme"
+                    continue
+
+                before = _part_size()
+                try:
+                    logger.info(f"Скачивание {filename} из {url}...")
+                    _download_url(url)
+                    self.model_path = dest_path
+                    logger.info(f"Модель успешно скачана: {self.model_path}")
+                    return
+                except InterruptedError:
+                    # Cancellation should stop immediately and propagate to the worker/UI.
+                    raise
+                except Exception as e:
+                    errors_by_url[url] = str(e)
+                    after = _part_size()
+                    if after > before:
+                        round_progress = True
+                    logger.warning(f"Ошибка скачивания: {url}: {e}")
+                    # Avoid hammering the same endpoint in tight loops.
+                    time.sleep(0.5)
+                    continue
+
+            current_size = _part_size()
+            if current_size > last_progress_size:
+                round_progress = True
+                last_progress_size = current_size
+
+            if round_progress:
+                no_progress_rounds = 0
                 continue
 
-        err_summary = "; ".join(errors[:4]) + ("; ..." if len(errors) > 4 else "")
-        raise RuntimeError(f"Не удалось скачать модель {model_name}. {err_summary}")
+            no_progress_rounds += 1
+            if no_progress_rounds >= max_no_progress_rounds:
+                break
+
+        # Summarize last errors per URL (keep it short for UI).
+        error_items = [f"{u}: {m}" for (u, m) in list(errors_by_url.items())[:4]]
+        err_summary = "; ".join(error_items) + ("; ..." if len(errors_by_url) > 4 else "")
+        raise RuntimeError(
+            f"Не удалось скачать модель {model_name}."
+            f" partial={_part_size()} bytes. {err_summary}"
+        )
 
     def download_model(
         self,
