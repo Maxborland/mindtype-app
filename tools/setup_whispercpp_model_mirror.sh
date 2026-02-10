@@ -99,8 +99,16 @@ parse_args() {
 }
 
 parse_content_length() {
-  # Reads headers from stdin, prints Content-Length value (or empty).
-  awk 'BEGIN{IGNORECASE=1} $1=="content-length:"{print $2; exit}' | tr -d '\r'
+  # Reads headers from stdin, prints the LAST numeric Content-Length (or empty).
+  # With -L curl prints headers for redirects too; we want the final response size.
+  awk '
+    BEGIN{IGNORECASE=1}
+    $1=="content-length:"{
+      gsub("\r","",$2);
+      if ($2 ~ /^[0-9]+$/) { val=$2 }
+    }
+    END{ if (val) print val }
+  '
 }
 
 download_one() {
@@ -137,6 +145,10 @@ download_one() {
     if expected="$(curl -fsSLI --connect-timeout 10 "$url" 2>/dev/null | parse_content_length || true)"; then
       expected="${expected:-}"
     else
+      expected=""
+    fi
+    # Some providers return a small Content-Length for redirects/error pages; ignore it.
+    if [[ -n "$expected" && "$expected" -lt $((5 * 1024 * 1024)) ]]; then
       expected=""
     fi
 
