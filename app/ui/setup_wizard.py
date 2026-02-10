@@ -260,11 +260,10 @@ QPushButton:disabled {
 
 # Wizard page IDs
 PAGE_LANGUAGE = 0
-PAGE_PROVIDER_CHOICE = 1
-PAGE_CREDIT_PACK = 2
-PAGE_API_KEY = 3
-PAGE_MODEL_DOWNLOAD = 4
-PAGE_COMPLETION = 5
+PAGE_KEY_OR_DEMO = 1
+PAGE_LICENSE_KEY = 2
+PAGE_MODEL_DOWNLOAD = 3
+PAGE_COMPLETION = 4
 
 
 def create_card_frame(selected: bool = False) -> QFrame:
@@ -402,6 +401,262 @@ class LanguagePage(QWizardPage):
         if btn:
             return btn.property("lang_code")
         return "en"
+
+
+class KeyOrDemoPage(QWizardPage):
+    """Step 2: Choose between license key activation or demo mode."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: #ffffff;")
+        self._t = lambda x: x
+        self._build_ui()
+
+    def set_translate_func(self, t: Callable):
+        self._t = t
+        self._update_texts()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(30, 24, 30, 24)
+
+        self.title = create_title_label(self._t("setup_key_or_demo_title"))
+        layout.addWidget(self.title)
+
+        self.desc = create_subtitle_label(self._t("setup_key_or_demo_description"))
+        self.desc.setWordWrap(True)
+        layout.addWidget(self.desc)
+
+        layout.addSpacing(16)
+
+        self.choice_group = QButtonGroup(self)
+
+        # License key option
+        self.key_frame = create_card_frame(selected=False)
+        key_layout = QVBoxLayout(self.key_frame)
+        key_layout.setSpacing(8)
+        key_layout.setContentsMargins(16, 12, 16, 12)
+
+        self.key_radio = QRadioButton(self._t("setup_option_license_key"))
+        self.key_radio.setStyleSheet("font-weight: bold; font-size: 13px; background: transparent;")
+        self.key_radio.toggled.connect(self._update_card_styles)
+        self.choice_group.addButton(self.key_radio, 0)
+        key_layout.addWidget(self.key_radio)
+
+        self.key_desc = QLabel(self._t("setup_option_license_key_desc"))
+        self.key_desc.setStyleSheet("color: #808080; font-size: 11px; margin-left: 22px; background: transparent;")
+        self.key_desc.setWordWrap(True)
+        key_layout.addWidget(self.key_desc)
+
+        layout.addWidget(self.key_frame)
+
+        layout.addSpacing(8)
+
+        # Demo option
+        self.demo_frame = create_card_frame(selected=True)
+        demo_layout = QVBoxLayout(self.demo_frame)
+        demo_layout.setSpacing(8)
+        demo_layout.setContentsMargins(16, 12, 16, 12)
+
+        self.demo_radio = QRadioButton(self._t("setup_option_demo"))
+        self.demo_radio.setStyleSheet("font-weight: bold; font-size: 13px; background: transparent;")
+        self.demo_radio.setChecked(True)
+        self.demo_radio.toggled.connect(self._update_card_styles)
+        self.choice_group.addButton(self.demo_radio, 1)
+        demo_layout.addWidget(self.demo_radio)
+
+        self.demo_desc = QLabel(self._t("setup_option_demo_desc"))
+        self.demo_desc.setStyleSheet("color: #808080; font-size: 11px; margin-left: 22px; background: transparent;")
+        self.demo_desc.setWordWrap(True)
+        demo_layout.addWidget(self.demo_desc)
+
+        layout.addWidget(self.demo_frame)
+
+        layout.addStretch()
+        self._update_texts()
+
+    def _update_card_styles(self):
+        selected_style = "QFrame { background-color: #ffffff; border: 2px solid #000000; }"
+        normal_style = "QFrame { background-color: #ffffff; border: 1.5px solid #000000; }"
+        if self.demo_radio.isChecked():
+            self.demo_frame.setStyleSheet(selected_style)
+            self.key_frame.setStyleSheet(normal_style)
+        else:
+            self.demo_frame.setStyleSheet(normal_style)
+            self.key_frame.setStyleSheet(selected_style)
+
+    def _update_texts(self):
+        self.title.setText(self._t("setup_key_or_demo_title"))
+        self.desc.setText(self._t("setup_key_or_demo_description"))
+        self.key_radio.setText(self._t("setup_option_license_key"))
+        self.key_desc.setText(self._t("setup_option_license_key_desc"))
+        self.demo_radio.setText(self._t("setup_option_demo"))
+        self.demo_desc.setText(self._t("setup_option_demo_desc"))
+
+    def is_demo_selected(self) -> bool:
+        return self.demo_radio.isChecked()
+
+
+class LicenseKeyPage(QWizardPage):
+    """Step 3 (optional): Activate MindType license key for MindType Cloud."""
+
+    def __init__(self, license_manager, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: #ffffff;")
+        self._t = lambda x: x
+        self._license_manager = license_manager
+        self._activated = False
+        self._activation_worker = None
+        self._build_ui()
+
+    def set_translate_func(self, t: Callable):
+        self._t = t
+        self._update_texts()
+
+    def _build_ui(self):
+        from ..licensing.key_validator import KeyValidator
+        from PyQt6.QtWidgets import QProgressBar
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(30, 24, 30, 24)
+
+        self.title = create_title_label(self._t("setup_license_key_title"))
+        layout.addWidget(self.title)
+
+        self.desc = create_subtitle_label(self._t("setup_license_key_description"))
+        self.desc.setWordWrap(True)
+        layout.addWidget(self.desc)
+
+        layout.addSpacing(12)
+
+        key_frame = create_card_frame()
+        key_layout = QVBoxLayout(key_frame)
+        key_layout.setContentsMargins(16, 12, 16, 12)
+        key_layout.setSpacing(8)
+
+        key_row = QHBoxLayout()
+        self.key_label = QLabel(self._t("license_key") + ":")
+        self.key_label.setStyleSheet("font-weight: bold; background: transparent;")
+        key_row.addWidget(self.key_label)
+
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("ABCD-EFGH-JKMN-PQRS")
+        self.key_input.textChanged.connect(lambda _: self._update_buttons())
+        key_row.addWidget(self.key_input, 1)
+        key_layout.addLayout(key_row)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #808080; font-size: 11px; background: transparent;")
+        key_layout.addWidget(self.status_label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)  # indeterminate
+        self.progress.setVisible(False)
+        key_layout.addWidget(self.progress)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.activate_btn = create_primary_button(self._t("activate"))
+        self.activate_btn.clicked.connect(self._on_activate_clicked)
+        self.activate_btn.setEnabled(False)
+        btn_row.addWidget(self.activate_btn)
+        key_layout.addLayout(btn_row)
+
+        layout.addWidget(key_frame)
+
+        # Credits hint
+        info_frame = create_info_frame()
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(12, 10, 12, 10)
+        info_layout.setSpacing(6)
+
+        self.credits_hint = QLabel(self._t("setup_credits_hint"))
+        self.credits_hint.setWordWrap(True)
+        self.credits_hint.setStyleSheet("background: transparent;")
+        info_layout.addWidget(self.credits_hint)
+
+        self.buy_credits_btn = QPushButton(self._t("buy_credits"))
+        self.buy_credits_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://mindtype.space/buy-credits")))
+        info_layout.addWidget(self.buy_credits_btn)
+
+        layout.addWidget(info_frame)
+
+        layout.addStretch()
+        self._update_texts()
+        self._update_buttons()
+
+    def _update_texts(self):
+        self.title.setText(self._t("setup_license_key_title"))
+        self.desc.setText(self._t("setup_license_key_description"))
+        self.key_label.setText(self._t("license_key") + ":")
+        self.activate_btn.setText(self._t("activate"))
+        self.credits_hint.setText(self._t("setup_credits_hint"))
+        self.buy_credits_btn.setText(self._t("buy_credits"))
+
+    def _set_loading(self, loading: bool):
+        from ..licensing.key_validator import KeyValidator
+
+        self.progress.setVisible(loading)
+        self.key_input.setEnabled(not loading and not self._activated)
+        self.activate_btn.setEnabled(not loading and not self._activated and KeyValidator.validate(self.key_input.text()))
+
+    def _update_buttons(self):
+        from ..licensing.key_validator import KeyValidator
+        if self._activated:
+            self.activate_btn.setEnabled(False)
+            return
+        self.activate_btn.setEnabled(KeyValidator.validate(self.key_input.text()))
+
+    def _on_activate_clicked(self):
+        from ..licensing.activation_dialog import ActivationWorker
+
+        key = self.key_input.text().strip()
+        if not key:
+            return
+
+        self.status_label.setText(self._t("setup_activation_in_progress"))
+        self._set_loading(True)
+
+        self._activation_worker = ActivationWorker(self._license_manager, key)
+        self._activation_worker.finished.connect(self._on_activation_finished)
+        self._activation_worker.start()
+
+    def _on_activation_finished(self, result, message: str, data):
+        from ..licensing.license_manager import ValidationResult
+
+        self._set_loading(False)
+
+        if result == ValidationResult.SUCCESS:
+            self._activated = True
+            self.status_label.setStyleSheet("color: #000000; font-size: 11px; background: transparent;")
+            self.status_label.setText("✓ " + self._t("activation_success"))
+            self.completeChanged.emit()
+            self._update_buttons()
+            return
+
+        # Error mapping (same semantics as activation dialog).
+        error_messages = {
+            ValidationResult.INVALID_KEY: self._t("invalid_key"),
+            ValidationResult.NOT_FOUND: self._t("license_not_found"),
+            ValidationResult.EXPIRED: self._t("license_expired_error"),
+            ValidationResult.DEACTIVATED: self._t("license_deactivated_error"),
+            ValidationResult.DEVICE_LIMIT: self._t("device_limit_error"),
+            ValidationResult.NETWORK_ERROR: self._t("network_error"),
+            ValidationResult.RATE_LIMITED: self._t("rate_limited"),
+            ValidationResult.SERVER_ERROR: self._t("server_error"),
+        }
+        error_text = error_messages.get(result, message)
+        self.status_label.setStyleSheet("color: #000000; font-size: 11px; background: transparent;")
+        self.status_label.setText(error_text)
+        self._update_buttons()
+
+    def isComplete(self) -> bool:
+        return self._activated
 
 
 class ProviderChoicePage(QWizardPage):
@@ -982,7 +1237,7 @@ class ModelDownloadPage(QWizardPage):
         self.progress_bar.setValue(percent)
         self.size_label.setText(f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB")
 
-    def download_finished(self, success: bool):
+    def download_finished(self, success: bool, error: str = ""):
         if success:
             self._download_complete = True
             self.progress_label.setText("✓ " + self._t("download_complete"))
@@ -992,7 +1247,11 @@ class ModelDownloadPage(QWizardPage):
             self.download_btn.setEnabled(True)
             self.small_radio.setEnabled(True)
             self.large_radio.setEnabled(True)
-            self.progress_label.setText(self._t("download_failed"))
+            # Show a helpful error message instead of a generic failure label.
+            if error:
+                self.progress_label.setText(f"{self._t('download_failed')}: {error}")
+            else:
+                self.progress_label.setText(self._t("download_failed"))
 
     def isComplete(self) -> bool:
         return self._download_complete
@@ -1065,9 +1324,11 @@ class CompletionPage(QWizardPage):
         tip_layout.setContentsMargins(16, 12, 16, 12)
         tip_layout.setSpacing(6)
 
-        self.balance_label = QLabel("Your balance: 750 credits")
-        self.balance_label.setStyleSheet("font-weight: bold; background: transparent;")
-        tip_layout.addWidget(self.balance_label)
+        self.mode_note = QLabel("")
+        self.mode_note.setWordWrap(True)
+        self.mode_note.setStyleSheet("font-weight: bold; background: transparent;")
+        self.mode_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tip_layout.addWidget(self.mode_note)
 
         self.tip = QLabel("Tip: Use Ctrl+Alt+V to start recording from any application")
         self.tip.setWordWrap(True)
@@ -1082,26 +1343,41 @@ class CompletionPage(QWizardPage):
         self.title.setText(self._t("setup_complete"))
         self.instructions.setText(self._t("setup_complete_instructions"))
         self.tip.setText(self._t("setup_tip_tray"))
-        self.balance_label.setText(self._t("your_balance") + ": 750 " + self._t("credits"))
+        # mode_note is set in initializePage() based on wizard choices
 
+    def initializePage(self) -> None:
+        """Update completion texts based on wizard flow (demo vs license key)."""
+        super().initializePage()
+        wiz = self.wizard()
+        is_demo = bool(getattr(wiz, "demo_mode", False))
+        use_cloud = bool(getattr(wiz, "use_mindtype_cloud", False))
+        if is_demo or not use_cloud:
+            self.mode_note.setText(self._t("setup_complete_demo_note"))
+        else:
+            self.mode_note.setText(self._t("setup_complete_cloud_note"))
+
+    # Backward-compat shim (older code may call this).
     def set_credits_balance(self, credits: int):
-        self.balance_label.setText(self._t("your_balance") + f": {credits} " + self._t("credits"))
+        self.mode_note.setText(self._t("your_balance") + f": {credits} " + self._t("credits"))
 
 
 class SetupWizard(QWizard):
     """First-run setup wizard."""
 
-    def __init__(self, config: ConfigManager, translate_func: Callable, parent=None):
+    def __init__(self, config: ConfigManager, translate_func: Callable, license_manager=None, parent=None):
         super().__init__(parent)
         self.config = config
         self._t = translate_func
         self._current_lang = "en"
 
         # Store choices
-        self.use_mindtype_cloud = True
-        self.selected_pack: Optional[str] = None
-        self.api_key: Optional[str] = None
-        self.provider: Optional[str] = None
+        self.demo_mode = True
+        self.use_mindtype_cloud = False
+        if license_manager is None:
+            from ..licensing.license_manager import LicenseManager
+            self.license_manager = LicenseManager()
+        else:
+            self.license_manager = license_manager
 
         self._setup_ui()
         self._setup_pages()
@@ -1132,14 +1408,11 @@ class SetupWizard(QWizard):
         self.language_page.language_changed.connect(self._on_language_changed)
         self.setPage(PAGE_LANGUAGE, self.language_page)
 
-        self.provider_page = ProviderChoicePage(self)
-        self.setPage(PAGE_PROVIDER_CHOICE, self.provider_page)
+        self.key_or_demo_page = KeyOrDemoPage(self)
+        self.setPage(PAGE_KEY_OR_DEMO, self.key_or_demo_page)
 
-        self.credit_pack_page = CreditPackPage(self)
-        self.setPage(PAGE_CREDIT_PACK, self.credit_pack_page)
-
-        self.api_key_page = ApiKeyPage(self)
-        self.setPage(PAGE_API_KEY, self.api_key_page)
+        self.license_key_page = LicenseKeyPage(self.license_manager, self)
+        self.setPage(PAGE_LICENSE_KEY, self.license_key_page)
 
         self.model_page = ModelDownloadPage(self)
         self.setPage(PAGE_MODEL_DOWNLOAD, self.model_page)
@@ -1159,9 +1432,8 @@ class SetupWizard(QWizard):
     def _update_all_translations(self):
         """Update translations on all pages."""
         self.language_page.set_translate_func(self._t)
-        self.provider_page.set_translate_func(self._t)
-        self.credit_pack_page.set_translate_func(self._t)
-        self.api_key_page.set_translate_func(self._t)
+        self.key_or_demo_page.set_translate_func(self._t)
+        self.license_key_page.set_translate_func(self._t)
         self.model_page.set_translate_func(self._t)
         self.completion_page.set_translate_func(self._t)
         self._update_wizard_texts()
@@ -1176,22 +1448,16 @@ class SetupWizard(QWizard):
         current = self.currentId()
 
         if current == PAGE_LANGUAGE:
-            return PAGE_PROVIDER_CHOICE
+            return PAGE_KEY_OR_DEMO
 
-        if current == PAGE_PROVIDER_CHOICE:
-            self.use_mindtype_cloud = self.provider_page.is_mindtype_cloud_selected()
-            if self.use_mindtype_cloud:
-                return PAGE_CREDIT_PACK
-            else:
-                return PAGE_API_KEY
+        if current == PAGE_KEY_OR_DEMO:
+            self.demo_mode = self.key_or_demo_page.is_demo_selected()
+            self.use_mindtype_cloud = not self.demo_mode
+            if self.demo_mode:
+                return PAGE_MODEL_DOWNLOAD
+            return PAGE_LICENSE_KEY
 
-        if current == PAGE_CREDIT_PACK:
-            self.selected_pack = self.credit_pack_page.get_selected_pack()
-            return PAGE_MODEL_DOWNLOAD
-
-        if current == PAGE_API_KEY:
-            self.provider = self.api_key_page.get_provider()
-            self.api_key = self.api_key_page.get_api_key()
+        if current == PAGE_LICENSE_KEY:
             return PAGE_MODEL_DOWNLOAD
 
         if current == PAGE_MODEL_DOWNLOAD:
@@ -1209,24 +1475,15 @@ class SetupWizard(QWizard):
             use_mindtype_cloud=self.use_mindtype_cloud,
         )
 
+        # Demo mode: do not touch AI summary provider/settings. User can configure later in Settings.
         if self.use_mindtype_cloud:
             self.config.update(llm_provider="mindtype_cloud")
-        else:
-            provider = self.api_key_page.get_provider()
-            api_key = self.api_key_page.get_api_key()
-            self.config.update(llm_provider=provider)
-
-            if provider == "openai":
-                self.config.update(openai_api_key=api_key)
-            elif provider == "anthropic":
-                self.config.update(anthropic_api_key=api_key)
-            elif provider == "gemini":
-                self.config.update(gemini_api_key=api_key)
-            elif provider == "openrouter":
-                self.config.update(openrouter_api_key=api_key)
 
         model = self.model_page.get_selected_model()
         self.config.update(model_size=model)
 
-        logger.info(f"Setup wizard completed: language={ui_language}, cloud={self.use_mindtype_cloud}")
+        logger.info(
+            f"Setup wizard completed: language={ui_language}, "
+            f"demo={self.demo_mode}, cloud={self.use_mindtype_cloud}"
+        )
         super().accept()

@@ -27,18 +27,80 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR = _get_base_dir()
-DEFAULT_MODELS_DIR = BASE_DIR / "models"
+
+def _get_bundled_models_dir() -> Path:
+    """
+    Locate models shipped with the app.
+
+    Layouts differ between dev and packagers:
+    - Dev: <repo>/models
+    - PyInstaller onedir: <exe_dir>/_internal/models (and sometimes <exe_dir>/models)
+    - PyInstaller onefile: sys._MEIPASS/models
+    - Nuitka: typically <exe_dir>/models
+    """
+    candidates: list[Path] = [BASE_DIR / "models"]
+
+    if is_app_frozen():
+        # PyInstaller onedir commonly puts data under _internal.
+        candidates.append(BASE_DIR / "_internal" / "models")
+
+        # PyInstaller onefile extracts to a temp dir pointed by _MEIPASS.
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            mp = Path(meipass)
+            candidates.append(mp / "models")
+            candidates.append(mp / "_internal" / "models")
+
+    for p in candidates:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            continue
+
+    # Default to the first candidate even if it doesn't exist yet.
+    return candidates[0]
+
+
+# Models bundled with the app (read-only in many installs, especially on Windows).
+BUNDLED_MODELS_DIR = _get_bundled_models_dir()
+
+
+def _get_default_models_dir() -> Path:
+    """
+    Get a writable default directory for downloaded transcription models.
+
+    On Windows we keep everything under %APPDATA%\\MindType to avoid
+    write-permission issues in Program Files / app install folders.
+    """
+    if sys.platform == "win32":
+        base = Path(os.getenv("APPDATA", Path.home()))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+    return base / "MindType" / "models"
+
+
+# Writable location for downloaded models.
+DEFAULT_MODELS_DIR = _get_default_models_dir()
 
 
 def _get_default_model() -> str:
     """Get default model - use tiny in compiled mode if large not available."""
     if is_app_frozen():
         # In compiled mode, check which models are available
-        tiny_path = DEFAULT_MODELS_DIR / "tiny"
-        large_path = DEFAULT_MODELS_DIR / "large-v3"
-        if large_path.exists():
+        ggml_large = BUNDLED_MODELS_DIR / "ggml-large-v3.bin"
+        ggml_tiny = BUNDLED_MODELS_DIR / "ggml-tiny.bin"
+
+        # Support both whisper.cpp GGML layout and HF-style dirs used by some backends.
+        large_dir = BUNDLED_MODELS_DIR / "large-v3"
+        tiny_dir = BUNDLED_MODELS_DIR / "tiny"
+
+        if ggml_large.exists() or large_dir.exists():
             return "large-v3"
-        elif tiny_path.exists():
+        if ggml_tiny.exists() or tiny_dir.exists():
             return "tiny"
     return "large-v3"
 
@@ -62,6 +124,9 @@ def _default_config() -> Dict[str, Any]:
         "cpu_threads": 4,
         "num_workers": 1,
         "models_dir": str(DEFAULT_MODELS_DIR),
+        # Optional override for transcription model download sources (whisper.cpp ggml-*.bin).
+        # If empty, the app uses built-in defaults (CDN/mirrors + Hugging Face).
+        "model_download_sources": [],
         "accelerator": "auto",               # auto, npu, gpu, cpu
         "transcriber_backend": "whisper_cpp", # whisper_cpp, faster_whisper, onnx
         # Overlay настройки
@@ -174,14 +239,42 @@ class ConfigManager:
         # In compiled mode, verify model exists or fallback to available one
         if is_app_frozen():
             model_size = merged.get("model_size", "tiny")
-            model_path = DEFAULT_MODELS_DIR / model_size
-            if not model_path.exists():
-                # Try to find any available model
-                if DEFAULT_MODELS_DIR.exists():
-                    for subdir in DEFAULT_MODELS_DIR.iterdir():
-                        if subdir.is_dir() and (subdir / "model.bin").exists():
-                            merged["model_size"] = subdir.name
-                            break
+            # Prefer models in the configured models_dir (writable), but also
+            # support bundled models shipped with the app.
+            search_roots = []
+            try:
+                search_roots.append(Path(merged.get("models_dir", str(DEFAULT_MODELS_DIR))))
+            except Exception:
+                pass
+            search_roots.append(BUNDLED_MODELS_DIR)
+
+            def _has_model(root: Path, name: str) -> bool:
+                # whisper.cpp GGML models
+                if (root / f"ggml-{name}.bin").exists():
+                    return True
+                # HuggingFace-style model dirs (legacy/other backends)
+                if (root / name).is_dir() and ((root / name) / "model.bin").exists():
+                    return True
+                return False
+
+            if not any(_has_model(r, model_size) for r in search_roots):
+                # Try to find any available model in any root (GGML first).
+                for root in search_roots:
+                    try:
+                        if not root.exists():
+                            continue
+                        for f in root.iterdir():
+                            if f.is_file() and f.name.startswith("ggml-") and f.name.endswith(".bin"):
+                                merged["model_size"] = f.name[len("ggml-"):-len(".bin")]
+                                raise StopIteration
+                        for subdir in root.iterdir():
+                            if subdir.is_dir() and (subdir / "model.bin").exists():
+                                merged["model_size"] = subdir.name
+                                raise StopIteration
+                    except StopIteration:
+                        break
+                    except Exception:
+                        continue
 
         self.config = merged
         return self.config
@@ -216,4 +309,3 @@ class ConfigManager:
     def update(self, **kwargs: Any) -> None:
         self.config.update(kwargs)
         self.save()
-

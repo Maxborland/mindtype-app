@@ -115,6 +115,7 @@ mindtype-tauri/
 .tmp_appdata/
 .pytest_cache_local/
 pytest-cache-files-*/
+pytest-tmp/
 
 # Build artifacts
 *.spec

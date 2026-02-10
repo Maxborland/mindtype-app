@@ -16,11 +16,16 @@ from .accelerator import get_best_provider, get_provider_options
 logger = logging.getLogger("transcriber_cpp")
 if not logger.handlers:
     logger.setLevel(logging.DEBUG)
-    log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(log_dir / "transcriber_cpp.log", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(handler)
+    try:
+        log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_dir / "transcriber_cpp.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        logger.addHandler(handler)
+    except Exception:
+        # In restricted environments (tests/sandbox), writing outside the workspace
+        # can fail. Don't crash on import: fall back to a no-op handler.
+        logger.addHandler(logging.NullHandler())
 
 class VADFilter:
     """Лёгкий фильтр голоса на основе Silero VAD (ONNX)."""
@@ -111,10 +116,26 @@ class WhisperCppTranscriber:
         self.gpu_backend: str = self._detect_gpu_backend()
         self.threads: int = 4
         self._vad = None
+        # Preferred model download sources (CDN/mirrors). If empty, _download_model()
+        # falls back to built-in defaults.
+        self._download_sources: List[str] = []
 
         # Убеждаемся, что бинарник есть и готов к работе
         self._ensure_binary()
         logger.info(f"Инициализирован WhisperCppTranscriber. Платформа: {sys.platform}, Backend: {self.gpu_backend}, Бинарник: {self.binary_path}")
+
+    def set_download_sources(self, sources: List[str]) -> None:
+        """Set ordered list of download sources for GGML whisper.cpp models."""
+        cleaned: List[str] = []
+        for src in sources or []:
+            try:
+                s = str(src).strip()
+            except Exception:
+                continue
+            if not s:
+                continue
+            cleaned.append(s)
+        self._download_sources = cleaned
 
     def _detect_gpu_backend(self) -> str:
         """Определить доступный GPU backend."""
@@ -240,10 +261,30 @@ class WhisperCppTranscriber:
         logger.info(f"Загрузка модели: {model_name}, ожидаемый файл: {self.model_path}")
 
         if not self.model_path.exists():
+            # Prefer bundled models shipped with the app when available (offline/first-run UX).
+            try:
+                from .config import BUNDLED_MODELS_DIR
+
+                bundled_path = (BUNDLED_MODELS_DIR / model_filename)
+                if bundled_path.exists():
+                    self.model_path = bundled_path
+                    logger.info(f"Используем встроенную модель: {self.model_path}")
+                    if progress_callback:
+                        progress_callback("model_loaded", 100, 100)
+                    return
+            except Exception:
+                # If config can't be imported in restricted environments/tests, ignore.
+                pass
+
             logger.info(f"Файл модели не найден, начинаем загрузку...")
             if progress_callback:
                 progress_callback("downloading_model", 0, 100)
-            self._download_model(model_name, models_dir, progress_callback)
+            self._download_model(
+                model_name,
+                models_dir,
+                progress_callback,
+                sources=self._download_sources or None,
+            )
         else:
             logger.info(f"Файл модели уже существует.")
             if progress_callback:
@@ -254,46 +295,188 @@ class WhisperCppTranscriber:
         model_name: str,
         models_dir: Path,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        sources: Optional[List[str]] = None,
     ) -> None:
-        """Скачать GGML модель с HuggingFace (ggerganov/whisper.cpp)."""
-        from huggingface_hub import hf_hub_download
+        """
+        Скачать GGML модель.
+
+        В некоторых регионах Hugging Face может быть недоступен или работать
+        нестабильно, поэтому мы поддерживаем несколько источников (CDN/зеркала)
+        и скачиваем модель напрямую по URL.
+
+        Каждый источник может быть:
+        - базовым URL (скачиваем <base>/<filename>)
+        - шаблоном с {repo_id} и {filename}
+        """
+        import urllib.parse
+        import urllib.request
+        import urllib.error
 
         repo_id = "ggerganov/whisper.cpp"
         filename = f"ggml-{model_name}.bin"
+        dest_path = models_dir / filename
 
-        # tqdm adapter to forward download progress via callback
-        tqdm_cls = None
-        if progress_callback:
-            class _ProgressAdapter:
-                """Minimal tqdm-compatible class that forwards progress to callback."""
-                def __init__(self, *args, **kwargs):
-                    self.total = kwargs.get("total", 0) or 0
-                    self.n = 0
-                def update(self, n=1):
-                    self.n += n
-                    progress_callback("downloading_model", int(self.n), int(self.total))
-                def close(self): pass
-                def set_description(self, *a, **kw): pass
-                def set_postfix(self, *a, **kw): pass
-                def refresh(self, *a, **kw): pass
-                def __enter__(self): return self
-                def __exit__(self, *a): pass
+        default_sources: List[str] = [
+            # MindType CDN (if available)
+            "https://cdn.mindtype.space/models/whispercpp",
+            "https://mindtype.space/models/whispercpp",
+            # HF mirrors and HF
+            "https://hf-mirror.com/{repo_id}/resolve/main/{filename}",
+            "https://huggingface.co/{repo_id}/resolve/main/{filename}",
+        ]
 
-            tqdm_cls = _ProgressAdapter
+        sources_to_try: List[str] = list(sources or default_sources)
 
-        try:
-            logger.info(f"Скачивание {filename} из {repo_id}...")
-            downloaded_path = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                local_dir=str(models_dir),
-                tqdm_class=tqdm_cls,
-            )
-            self.model_path = Path(downloaded_path)
-            logger.info(f"Модель успешно скачана: {self.model_path}")
-        except Exception as e:
-            logger.error(f"Ошибка при скачивании модели: {e}")
-            raise RuntimeError(f"Не удалось скачать модель {model_name}: {e}")
+        # Emergency override (comma-separated) for support/debugging.
+        env_sources = os.getenv("MINDTYPE_MODEL_DOWNLOAD_SOURCES", "").strip()
+        if env_sources:
+            parsed = [s.strip() for s in env_sources.split(",") if s.strip()]
+            if parsed:
+                sources_to_try = parsed
+
+        def _build_url(src: str) -> str:
+            if "{" in src and "}" in src:
+                try:
+                    return src.format(repo_id=repo_id, filename=filename)
+                except Exception:
+                    pass
+            return src.rstrip("/") + "/" + filename
+
+        def _download_url(url: str) -> None:
+            part_path = dest_path.with_suffix(dest_path.suffix + ".part")
+
+            headers = {"User-Agent": "MindType"}
+
+            downloaded = 0
+            try:
+                if part_path.exists():
+                    downloaded = int(part_path.stat().st_size)
+            except Exception:
+                downloaded = 0
+
+            if downloaded > 0:
+                headers["Range"] = f"bytes={downloaded}-"
+
+            req = urllib.request.Request(url, headers=headers)
+
+            # Use certifi bundle when available (packaged apps can lack system CA store).
+            context = None
+            try:
+                import ssl
+                import certifi
+                context = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                context = None
+
+            open_kwargs = {"timeout": 30}
+            if context is not None:
+                open_kwargs["context"] = context
+
+            with urllib.request.urlopen(req, **open_kwargs) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+
+                # If resume is not supported, restart.
+                if downloaded > 0 and status != 206:
+                    downloaded = 0
+                    try:
+                        part_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                total = 0
+                try:
+                    clen = resp.headers.get("Content-Length")
+                    if clen:
+                        total = int(clen)
+                except Exception:
+                    total = 0
+                if status == 206 and total > 0:
+                    total += downloaded
+
+                # Sanity checks: protect against HTML error pages / wrong content.
+                ctype = ""
+                try:
+                    ctype = (resp.headers.get("Content-Type") or "").lower()
+                except Exception:
+                    ctype = ""
+                if ctype and ("text/html" in ctype or "application/json" in ctype):
+                    # If we only have a tiny partial, it's almost certainly an error page.
+                    try:
+                        if part_path.exists() and part_path.stat().st_size < 1024 * 1024:
+                            part_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"unexpected content type: {ctype}")
+
+                if total > 0 and total < 5 * 1024 * 1024:
+                    # Whisper models are much larger than a few MB.
+                    try:
+                        if part_path.exists() and part_path.stat().st_size < 1024 * 1024:
+                            part_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"unexpected file size: {total} bytes")
+
+                if progress_callback:
+                    progress_callback("downloading_model", downloaded, total)
+
+                mode = "ab" if downloaded > 0 else "wb"
+                with open(part_path, mode) as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            progress_callback("downloading_model", downloaded, total)
+
+            if not part_path.exists() or part_path.stat().st_size <= 0:
+                raise RuntimeError("downloaded file is empty")
+
+            # If we know expected size, ensure we downloaded the whole file.
+            if total > 0 and downloaded != total:
+                raise RuntimeError(f"incomplete download: {downloaded}/{total} bytes")
+
+            # Extra safety: if the downloaded file is suspiciously small, reject it.
+            try:
+                if part_path.stat().st_size < 5 * 1024 * 1024:
+                    try:
+                        part_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise RuntimeError("downloaded file is too small")
+            except Exception:
+                # If stat fails, treat as error.
+                raise
+
+            part_path.replace(dest_path)
+
+        errors: List[str] = []
+        for src in sources_to_try:
+            url = _build_url(src)
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ("https", "http"):
+                errors.append(f"{url} (unsupported scheme)")
+                continue
+
+            try:
+                logger.info(f"Скачивание {filename} из {url}...")
+                _download_url(url)
+                self.model_path = dest_path
+                logger.info(f"Модель успешно скачана: {self.model_path}")
+                return
+            except InterruptedError:
+                # Cancellation should stop immediately and propagate to the worker/UI.
+                raise
+            except Exception as e:
+                msg = f"{url}: {e}"
+                errors.append(msg)
+                logger.warning(f"Ошибка скачивания: {msg}")
+                continue
+
+        err_summary = "; ".join(errors[:4]) + ("; ..." if len(errors) > 4 else "")
+        raise RuntimeError(f"Не удалось скачать модель {model_name}. {err_summary}")
 
     def download_model(
         self,

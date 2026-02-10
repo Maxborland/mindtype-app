@@ -27,16 +27,19 @@ def _setup_logger():
     logger = logging.getLogger("diarization")
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
+        try:
+            log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "diarization.log"
 
-        log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "diarization.log"
-
-        handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(message)s"
-        ))
-        logger.addHandler(handler)
+            handler = logging.FileHandler(log_file, encoding="utf-8")
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(message)s"
+            ))
+            logger.addHandler(handler)
+        except Exception:
+            # Restricted environments (tests/sandbox) may disallow writing outside the workspace.
+            logger.addHandler(logging.NullHandler())
     return logger
 
 logger = _setup_logger()

@@ -28,15 +28,19 @@ def _setup_logger():
         logger.setLevel(logging.DEBUG)
 
         # Файл логов в %APPDATA%/MindType/file_transcriber.log
-        log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "file_transcriber.log"
+        try:
+            log_dir = Path(os.getenv("APPDATA", Path.home())) / "MindType"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "file_transcriber.log"
 
-        handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(message)s"
-        ))
-        logger.addHandler(handler)
+            handler = logging.FileHandler(log_file, encoding="utf-8")
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(message)s"
+            ))
+            logger.addHandler(handler)
+        except Exception:
+            # Restricted environments (tests/sandbox) may disallow writing outside the workspace.
+            logger.addHandler(logging.NullHandler())
     return logger
 
 logger = _setup_logger()
@@ -899,5 +903,4 @@ class FileTranscriptionQueue:
     def total_count(self) -> int:
         """Общее количество задач."""
         return len(self._tasks)
-
 

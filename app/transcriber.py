@@ -255,6 +255,15 @@ class Transcriber:
     def __init__(self, backend: str = "auto"):
         self._impl = create_transcriber(backend)
 
+    def set_download_sources(self, sources: List[str]) -> None:
+        """Configure where transcription models are downloaded from (if supported)."""
+        if hasattr(self._impl, "set_download_sources"):
+            try:
+                self._impl.set_download_sources(sources)
+            except Exception:
+                # Don't fail app startup if backend ignores/doesn't accept sources.
+                pass
+
     def load_model(self, *args, **kwargs):
         return self._impl.load_model(*args, **kwargs)
 

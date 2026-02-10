@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -54,7 +55,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush, QDesktopServices, QDragEnterEvent, QDropEvent
 
 from .audio import AudioRecorder
-from .config import ConfigManager, DEFAULT_MODELS_DIR
+from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
 from .accelerator import has_npu, detect_available_providers
 from .file_transcriber import (
     FileTranscriptionQueue,
@@ -357,24 +358,55 @@ class MainWindow(QMainWindow):
         self.audio = AudioRecorder()
         backend = self.config.config.get("transcriber_backend", "auto")
         self.transcriber = Transcriber(backend=backend)
+        # Configure transcription model download sources (CDN/mirrors) to reduce
+        # dependency on Hugging Face availability in certain regions.
+        try:
+            sources = self.config.config.get("model_download_sources", [])
+            if isinstance(sources, str):
+                sources = [s.strip() for s in sources.split(",") if s.strip()]
+            if isinstance(sources, list):
+                self.transcriber.set_download_sources(sources)
+        except Exception:
+            pass
         self.hotkey_listener: Optional[HotkeyListener] = None
         self.hotkey_recorder: Optional[HotkeyRecorder] = None
 
-        # Determine models directory
-        exe_path = Path(sys.executable).resolve()
-        exe_dir = exe_path.parent
+        # Determine models directory (must be writable for model downloads).
+        desired_models_dir = Path(self.config.config.get("models_dir", str(DEFAULT_MODELS_DIR)))
 
-        # Check if we're in Nuitka standalone dist (MindType.exe next to python.exe)
-        is_nuitka_dist = (exe_dir / "MindType.exe").exists()
-        is_compiled = getattr(sys, 'frozen', False) or hasattr(sys, "__compiled__") or is_nuitka_dist
+        def _is_writable_dir(path: Path) -> bool:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                probe = path / ".write_probe"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+                return True
+            except Exception:
+                try:
+                    (path / ".write_probe").unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False
 
-        if is_compiled:
-            self.models_dir = exe_dir / "models"
+        if not _is_writable_dir(desired_models_dir):
+            # Fallback to a safe per-user location (e.g. %APPDATA%\\MindType\\models on Windows).
+            fallback_models_dir = Path(DEFAULT_MODELS_DIR)
+            if _is_writable_dir(fallback_models_dir):
+                logger.warning(
+                    f"Configured models_dir is not writable: {desired_models_dir}. "
+                    f"Falling back to: {fallback_models_dir}"
+                )
+                self.models_dir = fallback_models_dir
+                self.config.update(models_dir=str(self.models_dir))
+            else:
+                # Worst-case: keep the configured dir, but downloads may fail.
+                logger.error(
+                    f"Neither configured models_dir nor fallback is writable. "
+                    f"Configured: {desired_models_dir}, fallback: {fallback_models_dir}"
+                )
+                self.models_dir = desired_models_dir
         else:
-            self.models_dir = Path(self.config.config.get("models_dir", str(DEFAULT_MODELS_DIR)))
-
-        # Ensure models directory exists
-        self.models_dir.mkdir(parents=True, exist_ok=True)
+            self.models_dir = desired_models_dir
         self._transcribe_thread: Optional[TranscribeWorker] = None
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
@@ -457,7 +489,7 @@ class MainWindow(QMainWindow):
 
     def _show_setup_wizard(self) -> None:
         """Show the first-run setup wizard."""
-        wizard = SetupWizard(self.config, self._t, self)
+        wizard = SetupWizard(self.config, self._t, self.license_manager, self)
 
         # Connect model download signal - pass wizard directly via lambda
         wizard.model_page.download_requested.connect(
@@ -493,7 +525,7 @@ class MainWindow(QMainWindow):
             )
         )
         downloader.finished.connect(
-            lambda path, err: wizard.model_page.download_finished(err == "")
+            lambda path, err: wizard.model_page.download_finished(err == "", err)
         )
         downloader.start()
         self._download_worker = downloader  # Keep reference
@@ -592,44 +624,74 @@ class MainWindow(QMainWindow):
         if use_cloud:
             self._init_mindtype_cloud()
 
+        # Update default state of AI Summary checkbox (safe defaults).
+        if hasattr(self, "enable_summary_checkbox") and self.enable_summary_checkbox:
+            llm_provider = cfg.get("llm_provider", "openrouter")
+            enable_summary_default = False
+            if llm_provider == "mindtype_cloud":
+                try:
+                    enable_summary_default = bool(self.license_manager.get_license_info().is_active)
+                except Exception:
+                    enable_summary_default = False
+            elif llm_provider == "ollama":
+                enable_summary_default = False
+            else:
+                enable_summary_default = bool(cfg.get(f"{llm_provider}_api_key", ""))
+            self.enable_summary_checkbox.setChecked(enable_summary_default)
+
         logger.info("Configuration applied from setup wizard")
 
     def _has_any_model(self) -> bool:
-        """Check if at least one model is downloaded."""
-        if not self.models_dir.exists():
-            return False
+        """Check if at least one model is available (downloaded or bundled)."""
+        search_roots: List[Path] = []
+        try:
+            search_roots.append(self.models_dir)
+        except Exception:
+            pass
+        try:
+            if BUNDLED_MODELS_DIR not in search_roots:
+                search_roots.append(BUNDLED_MODELS_DIR)
+        except Exception:
+            pass
 
-        # Проверяем ggml-*.bin файлы в корне (whisper.cpp модели)
-        for f in self.models_dir.iterdir():
-            if f.is_file() and f.name.startswith("ggml-") and f.name.endswith(".bin"):
-                return True
-
-        # Проверяем подпапки с HuggingFace моделями
-        for subdir in self.models_dir.iterdir():
-            if not subdir.is_dir():
+        for root in search_roots:
+            if not root.exists():
                 continue
 
-            # HuggingFace модели содержат config.json
-            if (subdir / "config.json").exists():
-                # Дополнительно проверяем наличие весов модели
-                has_weights = (
-                    (subdir / "model.bin").exists() or
-                    (subdir / "model.safetensors").exists() or
-                    (subdir / "pytorch_model.bin").exists() or
-                    any(f.name.endswith(".safetensors") for f in subdir.iterdir() if f.is_file())
-                )
-                if has_weights:
+            # GGML whisper.cpp models (ggml-*.bin) in root.
+            for f in root.iterdir():
+                if f.is_file() and f.name.startswith("ggml-") and f.name.endswith(".bin"):
                     return True
-                # Если есть только config.json без весов - модель не полностью загружена
-                # но config.json достаточно для определения что модель начала качаться
-                # Для пользователя важнее не показывать диалог если модель есть
-                # Проверим размер папки - если > 50MB, считаем что модель есть
-                try:
-                    total_size = sum(f.stat().st_size for f in subdir.rglob("*") if f.is_file())
-                    if total_size > 50 * 1024 * 1024:  # 50 MB
+
+            # HuggingFace-style model dirs (legacy/other backends).
+            for subdir in root.iterdir():
+                if not subdir.is_dir():
+                    continue
+
+                if (subdir / "config.json").exists():
+                    has_weights = (
+                        (subdir / "model.bin").exists()
+                        or (subdir / "model.safetensors").exists()
+                        or (subdir / "pytorch_model.bin").exists()
+                        or any(
+                            f.name.endswith(".safetensors")
+                            for f in subdir.iterdir()
+                            if f.is_file()
+                        )
+                    )
+                    if has_weights:
                         return True
-                except Exception:
-                    pass
+
+                    # If config exists but weights are incomplete, consider the model present
+                    # if the directory is already reasonably large (download likely in progress).
+                    try:
+                        total_size = sum(
+                            f.stat().st_size for f in subdir.rglob("*") if f.is_file()
+                        )
+                        if total_size > 50 * 1024 * 1024:  # 50 MB
+                            return True
+                    except Exception:
+                        pass
 
         return False
 
@@ -725,10 +787,14 @@ class MainWindow(QMainWindow):
         for name in models:
             # Check both formats: ggml-*.bin (whisper.cpp) and name/model.bin (ONNX)
             ggml_path = self.models_dir / f"ggml-{name}.bin"
+            ggml_bundled_path = BUNDLED_MODELS_DIR / f"ggml-{name}.bin"
             onnx_path = self.models_dir / name
+            onnx_bundled_path = BUNDLED_MODELS_DIR / name
             is_downloaded = (
                 ggml_path.exists()
+                or ggml_bundled_path.exists()
                 or (onnx_path.exists() and (onnx_path / "model.bin").exists())
+                or (onnx_bundled_path.exists() and (onnx_bundled_path / "model.bin").exists())
             )
 
             if is_downloaded:
@@ -1481,6 +1547,53 @@ class MainWindow(QMainWindow):
         self._model_path_row = perf_section.form.add_row(self._t("model_path"), self.models_path_edit)
         self.model_path_label = self._model_path_row.label
 
+        # Источники загрузки моделей (опциональный override, если HF недоступен)
+        sources_widget = QWidget()
+        sources_layout = QVBoxLayout(sources_widget)
+        sources_layout.setContentsMargins(0, 0, 0, 0)
+        sources_layout.setSpacing(SPACING["xs"])
+
+        self.model_sources_edit = QPlainTextEdit()
+        self.model_sources_edit.setFixedHeight(90)
+        try:
+            self.model_sources_edit.setPlaceholderText(
+                "\n".join(
+                    [
+                        "https://cdn.mindtype.space/models/whispercpp",
+                        "https://mindtype.space/models/whispercpp",
+                        "https://hf-mirror.com/{repo_id}/resolve/main/{filename}",
+                        "https://huggingface.co/{repo_id}/resolve/main/{filename}",
+                    ]
+                )
+            )
+        except Exception:
+            pass
+        sources_layout.addWidget(self.model_sources_edit)
+
+        self.model_sources_hint = QLabel(self._t("model_download_sources_hint"))
+        self.model_sources_hint.setObjectName("tinyMuted")
+        self.model_sources_hint.setWordWrap(True)
+        sources_layout.addWidget(self.model_sources_hint)
+
+        sources_btns = QWidget()
+        sources_btns_layout = QHBoxLayout(sources_btns)
+        sources_btns_layout.setContentsMargins(0, 0, 0, 0)
+        sources_btns_layout.setSpacing(SPACING["sm"])
+        sources_btns_layout.addStretch()
+
+        self.model_sources_save_btn = QPushButton(self._t("save"))
+        self.model_sources_save_btn.clicked.connect(self._save_model_download_sources)
+        sources_btns_layout.addWidget(self.model_sources_save_btn)
+
+        self.model_sources_reset_btn = QPushButton(self._t("reset_to_default"))
+        self.model_sources_reset_btn.clicked.connect(self._reset_model_download_sources)
+        sources_btns_layout.addWidget(self.model_sources_reset_btn)
+
+        sources_layout.addWidget(sources_btns)
+
+        self._model_sources_row = perf_section.form.add_row(self._t("model_download_sources"), sources_widget)
+        self.model_sources_label = self._model_sources_row.label
+
         scroll.content_layout.addWidget(perf_section)
 
         # === Секция Overlay ===
@@ -1811,7 +1924,21 @@ class MainWindow(QMainWindow):
 
         # Включить суммаризацию (checkbox напрямую)
         self.enable_summary_checkbox = QCheckBox(self._t("enable_summary"))
-        self.enable_summary_checkbox.setChecked(True)
+        # Default should be safe: enable only when provider is configured.
+        cfg = self.config.config
+        llm_provider = cfg.get("llm_provider", "openrouter")
+        enable_summary_default = False
+        if llm_provider == "mindtype_cloud":
+            try:
+                enable_summary_default = bool(self.license_manager.get_license_info().is_active)
+            except Exception:
+                enable_summary_default = False
+        elif llm_provider == "ollama":
+            # Ollama may not be running; leave off by default.
+            enable_summary_default = False
+        else:
+            enable_summary_default = bool(cfg.get(f"{llm_provider}_api_key", ""))
+        self.enable_summary_checkbox.setChecked(enable_summary_default)
         self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
         layout.addWidget(self.enable_summary_checkbox)
 
@@ -2148,6 +2275,17 @@ class MainWindow(QMainWindow):
 
         self.config.update(models_dir=str(self.models_dir))
 
+        # Model download sources override (empty = defaults).
+        if hasattr(self, "model_sources_edit") and self.model_sources_edit:
+            sources = cfg.get("model_download_sources", [])
+            if isinstance(sources, str):
+                # Support legacy/hand-edited config formats.
+                sources = [s.strip() for s in sources.splitlines() if s.strip()]
+            if not isinstance(sources, list):
+                sources = []
+            cleaned = [str(s).strip() for s in sources if str(s).strip()]
+            self.model_sources_edit.setPlainText("\n".join(cleaned))
+
         # Загрузка настроек ассистента
         self._load_assistant_settings()
 
@@ -2237,6 +2375,46 @@ class MainWindow(QMainWindow):
         if model:
             self.config.update(model_size=model)
 
+    def _parse_model_download_sources(self, text: str) -> List[str]:
+        raw = (text or "").strip()
+        if not raw:
+            return []
+
+        parts: List[str]
+        if "\n" not in raw and "," in raw:
+            parts = raw.split(",")
+        else:
+            parts = raw.splitlines()
+
+        out: List[str] = []
+        for p in parts:
+            s = str(p).strip()
+            if not s:
+                continue
+            out.append(s)
+        return out
+
+    def _save_model_download_sources(self) -> None:
+        """Save optional model download sources override and apply immediately."""
+        if not hasattr(self, "model_sources_edit") or not self.model_sources_edit:
+            return
+
+        sources = self._parse_model_download_sources(self.model_sources_edit.toPlainText())
+        self.config.update(model_download_sources=sources)
+        try:
+            self.transcriber.set_download_sources(sources)
+        except Exception:
+            pass
+
+    def _reset_model_download_sources(self) -> None:
+        """Reset model download sources override to built-in defaults."""
+        if not hasattr(self, "model_sources_edit") or not self.model_sources_edit:
+            return
+
+        # Empty list means "use defaults" (see hint text in UI).
+        self.model_sources_edit.setPlainText("")
+        self._save_model_download_sources()
+
     def _on_beam_change(self, value: int) -> None:
         """Обработчик изменения beam size."""
         self.beam_value_label.setText(str(value))
@@ -2305,6 +2483,14 @@ class MainWindow(QMainWindow):
         self.vad_label.setText(self._t("vad_filter"))
         self.beam_label.setText(self._t("beam_size"))
         self.model_path_label.setText(self._t("model_path"))
+        if hasattr(self, "model_sources_label"):
+            self.model_sources_label.setText(self._t("model_download_sources"))
+        if hasattr(self, "model_sources_hint"):
+            self.model_sources_hint.setText(self._t("model_download_sources_hint"))
+        if hasattr(self, "model_sources_save_btn"):
+            self.model_sources_save_btn.setText(self._t("save"))
+        if hasattr(self, "model_sources_reset_btn"):
+            self.model_sources_reset_btn.setText(self._t("reset_to_default"))
 
         self.overlay_section_label.setTitle(self._t("overlay_section"))
         self.app_section_label.setTitle(self._t("app_section"))
