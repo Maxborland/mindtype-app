@@ -252,7 +252,7 @@ class Updater:
             if sys.platform == "win32":
                 subprocess.Popen([str(self._temp_path)])
             elif sys.platform == "linux":
-                os.chmod(self._temp_path, 0o755)
+                os.chmod(self._temp_path, 0o700)
                 subprocess.Popen([str(self._temp_path)])
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(self._temp_path)])
