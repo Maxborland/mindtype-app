@@ -1,5 +1,5 @@
 # Основные зависимости
-PyQt6>=6.6.0
+PyQt6>=6.11.0
 sounddevice>=0.4.6
 numpy>=1.26
 huggingface-hub>=0.20.0
