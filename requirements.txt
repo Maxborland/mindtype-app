@@ -8,7 +8,7 @@ pyperclip>=1.8.2
 # ONNX runtime с поддержкой NPU и GPU
 onnxruntime-openvino>=1.17.0; sys_platform == 'win32'
 onnxruntime>=1.17.0; sys_platform != 'win32'
-optimum[onnxruntime]>=1.17.0
+optimum[onnxruntime]>=2.1.0
 
 # Transformers для Whisper ONNX
 transformers>=4.37.0
