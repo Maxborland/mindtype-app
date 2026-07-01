@@ -16,6 +16,7 @@ LLM провайдеры для MindType.
     response = provider.complete(messages, model="gpt-4o-mini")
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -53,14 +54,46 @@ class ProviderType(Enum):
     MINDTYPE_CLOUD = "mindtype_cloud"
 
 
-# Человекочитаемые имена провайдеров
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    """Метаданные провайдера: единый источник правды о ключах/полях/плейсхолдерах."""
+    id: str
+    label: str
+    needs_api_key: bool
+    needs_base_url: bool
+    key_placeholder: str = ""
+
+    @property
+    def api_key_field(self) -> str:
+        return f"{self.id}_api_key"
+
+    @property
+    def model_field(self) -> str:
+        return f"{self.id}_model"
+
+
+# Реестр провайдеров — заменяет разбросанные паттерны f"{provider}_api_key",
+# списки no_key_providers и ветвления is_ollama/is_mindtype_cloud.
+PROVIDER_REGISTRY = {
+    "openai": ProviderDescriptor("openai", "OpenAI", True, False, "sk-..."),
+    "anthropic": ProviderDescriptor("anthropic", "Claude (Anthropic)", True, False, "sk-ant-..."),
+    "gemini": ProviderDescriptor("gemini", "Gemini (Google)", True, False, "AIza..."),
+    "ollama": ProviderDescriptor("ollama", "Ollama (Local)", False, True, ""),
+    "openrouter": ProviderDescriptor("openrouter", "OpenRouter (Private)", True, False, "sk-or-..."),
+    "mindtype_cloud": ProviderDescriptor("mindtype_cloud", "MindType Cloud", False, False, ""),
+}
+
+
+def get_provider_descriptor(name: str) -> Optional[ProviderDescriptor]:
+    """Дескриптор провайдера по строковому id (или None)."""
+    return PROVIDER_REGISTRY.get(name)
+
+
+# Человекочитаемые имена — производны от реестра (один источник правды).
+# .get с фолбэком: новый ProviderType без записи в реестре не уронит импорт app.
 PROVIDER_NAMES = {
-    ProviderType.OPENAI: "OpenAI",
-    ProviderType.ANTHROPIC: "Claude (Anthropic)",
-    ProviderType.GEMINI: "Gemini (Google)",
-    ProviderType.OLLAMA: "Ollama (Local)",
-    ProviderType.OPENROUTER: "OpenRouter (Private)",
-    ProviderType.MINDTYPE_CLOUD: "MindType Cloud",
+    ptype: (PROVIDER_REGISTRY[ptype.value].label if ptype.value in PROVIDER_REGISTRY else ptype.value)
+    for ptype in ProviderType
 }
 
 
@@ -157,8 +190,9 @@ def requires_api_key(provider_type: ProviderType) -> bool:
     Returns:
         True если требуется API ключ
     """
-    # Ollama не требует ключа, MindType Cloud использует лицензионный ключ (не API ключ)
-    return provider_type not in (ProviderType.OLLAMA, ProviderType.MINDTYPE_CLOUD)
+    # Источник правды — реестр (Ollama без ключа, MindType Cloud — лицензия, не API-ключ)
+    desc = PROVIDER_REGISTRY.get(provider_type.value)
+    return desc.needs_api_key if desc else True
 
 
 __all__ = [
@@ -197,8 +231,11 @@ __all__ = [
     "requires_api_key",
     "parse_thinking_blocks",
 
-    # Константы
+    # Константы / реестр
     "PROVIDER_NAMES",
+    "PROVIDER_REGISTRY",
+    "ProviderDescriptor",
+    "get_provider_descriptor",
 
     # SSL
     "get_ssl_context",

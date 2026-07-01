@@ -163,6 +163,19 @@ begin
   Result := True;
 end;
 
+// System-7 вид: белый фон, чёрный текст, жирные заголовки (плоско, B&W).
+// Только цвет/шрифт стандартных контролов — без риска для разметки визарда.
+procedure InitializeWizard();
+begin
+  WizardForm.Color := clWhite;
+  WizardForm.MainPanel.Color := clWhite;
+  WizardForm.InnerNotebook.Color := clWhite;
+  WizardForm.OuterNotebook.Color := clWhite;
+  WizardForm.PageNameLabel.Font.Style := [fsBold];
+  WizardForm.WelcomeLabel1.Font.Style := [fsBold];
+  WizardForm.FinishedHeadingLabel.Font.Style := [fsBold];
+end;
+
 // Initialize uninstall
 function InitializeUninstall(): Boolean;
 var

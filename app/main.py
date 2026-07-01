@@ -26,7 +26,7 @@ ASSISTANT_FEATURE_ENABLED = False
 # Смещение оверлея ассистента относительно основного оверлея по вертикали
 ASSISTANT_OVERLAY_OFFSET = 50
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt, QRectF, QUrl, QSize
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt, QRectF, QUrl, QSize, QEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizeGrip,
     QSlider,
     QSystemTrayIcon,
     QTabWidget,
@@ -63,6 +64,9 @@ from .file_transcriber import (
     FileStatus,
     ALL_EXTENSIONS,
     is_supported_file,
+    TranscribeOptions,
+    SummaryOptions,
+    PostProcessOptions,
 )
 from .hotkeys import HotkeyListener, HotkeyRecorder
 from .inserter import insert_text, focus_manager
@@ -70,10 +74,10 @@ from .licensing import LicenseManager, LicenseStatus
 from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusWidget, TrialExpiredDialog
 from .ui.setup_wizard import SetupWizard
 from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, CreditsHistoryDialog, CreditsHistoryWorker
-from .ui.mode_manager import ModeManager, ModeToggleWidget
 from .overlay import OverlayWidget
 from .report_generator import ReportGenerator
 from .transcriber import Transcriber
+from .dictation_state import DictationState
 from .translations import (
     get_text,
     UI_LANGUAGES,
@@ -101,6 +105,7 @@ from .updater import Updater, UpdateInfo
 from .ui.styles import STYLESHEET
 from .ui.tokens import COLORS, SPACING, TYPOGRAPHY
 from .ui.icons import create_app_icon
+from .ui.components import apply_system7_titlebar
 from .ui.workers import (
     TranscribeWorker,
     ModelDownloadWorker,
@@ -150,21 +155,31 @@ class PromptCustomizationDialog(QMainWindow):
         self.config = config_manager
 
         self.setWindowTitle(self._t("customize_prompts"))
-        self.setFixedSize(700, 550)
+        self.setMinimumSize(740, 640)
+        self.resize(900, 780)
 
         # Загружаем пресеты
-        from .summary_presets import PRESETS, get_preset_prompts, DEFAULT_PRESET
+        from .summary_presets import PRESETS, get_preset_prompts, DEFAULT_PRESET, PROMPT_KEYS
         self._presets = PRESETS
         self._get_preset_prompts = get_preset_prompts
         self._default_preset = DEFAULT_PRESET
+        self._prompt_keys = PROMPT_KEYS
 
-        # Текущий пресет из конфига
+        # Пользовательские пресеты (рабочая копия). Отбрасываем повреждённые (не-dict)
+        # записи из конфига, чтобы write-пути (save/rename) не падали на них.
+        self._user_presets = {
+            k: v for k, v in (self.config.config.get("user_presets", {}) or {}).items()
+            if isinstance(v, dict)
+        }
+
+        # Текущий пресет из конфига (встроенный или пользовательский)
         self._current_preset = self.config.config.get("summary_preset", DEFAULT_PRESET)
-        if self._current_preset not in self._presets:
+        if self._current_preset not in self._presets and self._current_preset not in self._user_presets:
             self._current_preset = DEFAULT_PRESET
 
         self._build_ui()
-        self._load_prompts()
+        self._populate_preset_combo()
+        self._load_editors(self._prompts_for(self._current_preset))
 
     def _build_ui(self):
         central = QWidget()
@@ -184,22 +199,28 @@ class PromptCustomizationDialog(QMainWindow):
         preset_layout.addWidget(preset_label)
 
         self.preset_combo = QComboBox()
-        self.preset_combo.setMinimumWidth(200)
-        for preset_id, preset_data in self._presets.items():
-            # Формат: "Название — описание" (переведённые)
-            name = self._t(preset_data.get('name_key', preset_id))
-            desc = self._t(preset_data.get('description_key', ''))
-            display_text = f"{name} — {desc}"
-            self.preset_combo.addItem(display_text, preset_id)
-        # Устанавливаем текущий пресет
-        for i in range(self.preset_combo.count()):
-            if self.preset_combo.itemData(i) == self._current_preset:
-                self.preset_combo.setCurrentIndex(i)
-                break
+        self.preset_combo.setMinimumWidth(220)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         preset_layout.addWidget(self.preset_combo)
         preset_layout.addStretch()
         layout.addLayout(preset_layout)
+
+        # CRUD-кнопки пользовательских пресетов
+        crud_layout = QHBoxLayout()
+        self.new_preset_btn = QPushButton(self._t("preset_new"))
+        self.new_preset_btn.clicked.connect(self._on_new_preset)
+        self.duplicate_preset_btn = QPushButton(self._t("preset_duplicate"))
+        self.duplicate_preset_btn.clicked.connect(self._on_duplicate_preset)
+        self.rename_preset_btn = QPushButton(self._t("preset_rename"))
+        self.rename_preset_btn.clicked.connect(self._on_rename_preset)
+        self.delete_preset_btn = QPushButton(self._t("preset_delete"))
+        self.delete_preset_btn.setObjectName("dangerButton")
+        self.delete_preset_btn.clicked.connect(self._on_delete_preset)
+        for _b in (self.new_preset_btn, self.duplicate_preset_btn,
+                   self.rename_preset_btn, self.delete_preset_btn):
+            crud_layout.addWidget(_b)
+        crud_layout.addStretch()
+        layout.addLayout(crud_layout)
 
         # Табы для разных промптов (используют глобальный STYLESHEET)
         self.prompt_tabs = QTabWidget()
@@ -264,6 +285,7 @@ class PromptCustomizationDialog(QMainWindow):
         layout.addLayout(buttons_layout)
 
         self.setCentralWidget(central)
+        apply_system7_titlebar(self, self._t("customize_prompts"))
 
     def _get_prompt_description(self, key: str) -> str:
         desc_keys = {
@@ -274,63 +296,237 @@ class PromptCustomizationDialog(QMainWindow):
         }
         return self._t(desc_keys.get(key, ""))
 
-    def _get_current_preset_prompts(self) -> dict:
-        """Получить промпты текущего пресета."""
-        return self._get_preset_prompts(self._current_preset)
+    # ---- helpers --------------------------------------------------------
+    def _preset_display_name(self, preset_id: str) -> str:
+        """Отображаемое имя: user — как есть; встроенный — перевод name_key."""
+        if preset_id in self._user_presets:
+            data = self._user_presets[preset_id]
+            return data.get("name", preset_id) if isinstance(data, dict) else preset_id
+        p = self._presets.get(preset_id, {})
+        return self._t(p.get("name_key", preset_id))
 
-    def _on_preset_changed(self, index: int):
-        """Обработка смены пресета."""
-        preset_id = self.preset_combo.itemData(index)
-        if preset_id and preset_id != self._current_preset:
-            self._current_preset = preset_id
-            # Заполняем редакторы промптами из нового пресета
-            preset_prompts = self._get_current_preset_prompts()
-            for key, editor in self.prompt_editors.items():
-                editor.setPlainText(preset_prompts.get(key, ""))
-
-    def _load_prompts(self):
-        """Загрузить промпты из конфига или использовать пресет."""
+    def _prompts_for(self, preset_id: str) -> dict:
+        """Промпты для редакторов: user → его набор; встроенный → пресет (+ сохранённые custom для активного)."""
+        if preset_id in self._user_presets:
+            return self._get_preset_prompts(preset_id, self._user_presets)
+        base = self._get_preset_prompts(preset_id)
         saved = self.config.config.get("custom_prompts", {})
-        preset_prompts = self._get_current_preset_prompts()
+        active = self.config.config.get("summary_preset")
+        if saved and preset_id == active:
+            return {**base, **saved}
+        return dict(base)
 
+    def _load_editors(self, prompts: dict) -> None:
         for key, editor in self.prompt_editors.items():
-            # Если есть сохранённый кастомный промпт — используем его, иначе из пресета
-            text = saved.get(key, preset_prompts.get(key, ""))
-            editor.setPlainText(text)
+            editor.setPlainText(prompts.get(key, ""))
+
+    def _editor_prompts(self) -> dict:
+        return {k: self.prompt_editors[k].toPlainText().strip() for k in self.prompt_editors}
+
+    def _new_user_id(self) -> str:
+        n = 1
+        while f"user-{n}" in self._user_presets:
+            n += 1
+        return f"user-{n}"
+
+    def _populate_preset_combo(self) -> None:
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        for preset_id, preset_data in self._presets.items():
+            name = self._t(preset_data.get("name_key", preset_id))
+            desc = self._t(preset_data.get("description_key", ""))
+            self.preset_combo.addItem(f"{name} — {desc}", preset_id)
+        for preset_id, data in self._user_presets.items():
+            nm = data.get("name", preset_id) if isinstance(data, dict) else preset_id
+            self.preset_combo.addItem(f"★ {nm}", preset_id)
+        idx = self.preset_combo.findData(self._current_preset)
+        if idx >= 0:
+            self.preset_combo.setCurrentIndex(idx)
+        self.preset_combo.blockSignals(False)
+        is_user = self._current_preset in self._user_presets
+        self.rename_preset_btn.setEnabled(is_user)
+        self.delete_preset_btn.setEnabled(is_user)
+
+    # ---- handlers -------------------------------------------------------
+    def _on_preset_changed(self, index: int):
+        preset_id = self.preset_combo.itemData(index)
+        if not preset_id or preset_id == self._current_preset:
+            return
+        self._current_preset = preset_id
+        self._load_editors(self._prompts_for(preset_id))
+        is_user = preset_id in self._user_presets
+        self.rename_preset_btn.setEnabled(is_user)
+        self.delete_preset_btn.setEnabled(is_user)
 
     def _reset_prompt(self, key: str):
-        """Сбросить промпт к значению из текущего пресета."""
-        preset_prompts = self._get_current_preset_prompts()
-        if key in self.prompt_editors and key in preset_prompts:
-            self.prompt_editors[key].setPlainText(preset_prompts[key])
+        """Сбросить один промпт к значению пресета."""
+        prompts = self._get_preset_prompts(self._current_preset, self._user_presets)
+        if key in self.prompt_editors and key in prompts:
+            self.prompt_editors[key].setPlainText(prompts[key])
 
     def _reset_all_prompts(self):
         """Сбросить все промпты к значениям текущего пресета."""
-        preset_prompts = self._get_current_preset_prompts()
-        for key, editor in self.prompt_editors.items():
-            if key in preset_prompts:
-                editor.setPlainText(preset_prompts[key])
-        # Очищаем кастомные промпты в конфиге
-        self.config.update(custom_prompts={}, summary_preset=self._current_preset)
-        # Показываем сообщение
-        preset_name = self._presets[self._current_preset]["name"]
+        self._load_editors(self._get_preset_prompts(self._current_preset, self._user_presets))
+        if self._current_preset not in self._user_presets:
+            # для встроенного — заодно очищаем сохранённые кастомные правки
+            self.config.update(custom_prompts={}, summary_preset=self._current_preset)
         from PyQt6.QtWidgets import QMessageBox
-        msg = self._t("prompts_reset_message").replace("{preset}", preset_name)
+        name = self._preset_display_name(self._current_preset)
+        msg = self._t("prompts_reset_message").replace("{preset}", name)
         QMessageBox.information(self, self._t("prompts_reset"), msg)
 
     def _save_prompts(self):
-        """Сохранить промпты и пресет в конфиг."""
-        preset_prompts = self._get_current_preset_prompts()
-        custom_prompts = {}
-
-        for key, editor in self.prompt_editors.items():
-            text = editor.toPlainText().strip()
-            # Сохраняем только если отличается от пресета
-            if text and text != preset_prompts.get(key, ""):
-                custom_prompts[key] = text
-
-        self.config.update(custom_prompts=custom_prompts, summary_preset=self._current_preset)
+        """Сохранить промпты: user → полный набор; встроенный → diff в custom_prompts."""
+        if self._current_preset in self._user_presets:
+            self._user_presets[self._current_preset]["prompts"] = self._editor_prompts()
+            self.config.update(
+                user_presets=self._user_presets,
+                summary_preset=self._current_preset,
+                custom_prompts={},
+            )
+        else:
+            preset_prompts = self._get_preset_prompts(self._current_preset)
+            custom = {}
+            for key, text in self._editor_prompts().items():
+                if text and text != preset_prompts.get(key, ""):
+                    custom[key] = text
+            self.config.update(custom_prompts=custom, summary_preset=self._current_preset)
         self.close()
+
+    def _on_new_preset(self):
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, self._t("preset_new"), self._t("preset_name") + ":")
+        if not ok or not name.strip():
+            return
+        pid = self._new_user_id()
+        self._user_presets[pid] = {"name": name.strip(), "prompts": self._editor_prompts()}
+        self._current_preset = pid
+        self.config.update(user_presets=self._user_presets, summary_preset=pid, custom_prompts={})
+        self._populate_preset_combo()
+        self._load_editors(self._prompts_for(pid))
+
+    def _on_duplicate_preset(self):
+        prompts = self._editor_prompts()  # копируем то, что показано (учитывая правки в редакторах)
+        base_name = self._preset_display_name(self._current_preset)
+        pid = self._new_user_id()
+        self._user_presets[pid] = {
+            "name": f"{base_name} ({self._t('preset_copy_suffix')})",
+            "prompts": {k: prompts.get(k, "") for k in self._prompt_keys},
+        }
+        self._current_preset = pid
+        self.config.update(user_presets=self._user_presets, summary_preset=pid, custom_prompts={})
+        self._populate_preset_combo()
+        self._load_editors(self._prompts_for(pid))
+
+    def _on_rename_preset(self):
+        if self._current_preset not in self._user_presets:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        cur = self._user_presets[self._current_preset].get("name", "")
+        name, ok = QInputDialog.getText(self, self._t("preset_rename"), self._t("preset_name") + ":", text=cur)
+        if not ok or not name.strip():
+            return
+        self._user_presets[self._current_preset]["name"] = name.strip()
+        self.config.update(user_presets=self._user_presets)
+        self._populate_preset_combo()
+
+    def _on_delete_preset(self):
+        if self._current_preset not in self._user_presets:
+            return
+        from PyQt6.QtWidgets import QMessageBox
+        confirm = QMessageBox.question(
+            self, self._t("preset_delete"), self._t("preset_delete_confirm")
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._user_presets.pop(self._current_preset, None)
+        self._current_preset = self._default_preset
+        self.config.update(user_presets=self._user_presets, summary_preset=self._default_preset)
+        self._populate_preset_combo()
+        self._load_editors(self._prompts_for(self._current_preset))
+
+
+class AppTitleBar(QFrame):
+    """Полосатый System-7 title bar для frameless главного окна.
+
+    Перетаскивание/снап — через нативный startSystemMove (без ручного хит-теста).
+    Кнопки: свернуть / развернуть-восстановить / закрыть.
+    """
+
+    def __init__(self, window: QMainWindow, title: str):
+        super().__init__()
+        self._win = window
+        self._press_pos = None  # стартовая точка для drag (см. mouseMoveEvent)
+        self.setObjectName("appTitleBar")
+        self.setFixedHeight(24)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(4)
+
+        self._title_label = QLabel(title)
+        self._title_label.setObjectName("system7TitleLabel")
+        lay.addStretch()
+        lay.addWidget(self._title_label)
+        lay.addStretch()
+
+        for glyph, slot, name in (
+            ("–", self._win.showMinimized, "winMin"),
+            ("☐", self._toggle_max, "winMax"),
+            ("✕", self._win.close, "winClose"),
+        ):
+            btn = QPushButton(glyph)
+            btn.setObjectName(name)
+            btn.setFixedSize(18, 16)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(slot)
+            lay.addWidget(btn)
+            if name == "winMax":
+                self._max_btn = btn
+
+    def set_title(self, title: str) -> None:
+        self._title_label.setText(title)
+
+    def _toggle_max(self) -> None:
+        # Ручной maximize: showMaximized() на frameless-окне перекрывает таскбар,
+        # поэтому разворачиваем в availableGeometry (рабочая область без таскбара).
+        win = self._win
+        if getattr(win, "_user_maximized", False):
+            geom = getattr(win, "_restore_geometry", None)
+            if geom is not None:
+                win.setGeometry(geom)
+            win._user_maximized = False
+            self._max_btn.setText("☐")
+        else:
+            win._restore_geometry = win.geometry()
+            screen = win.screen() or QApplication.primaryScreen()
+            win.setGeometry(screen.availableGeometry())
+            win._user_maximized = True
+            self._max_btn.setText("❐")
+
+    def mousePressEvent(self, event) -> None:
+        # НЕ запускаем startSystemMove на press — иначе нативный move-loop съедает
+        # double-click (maximize). Запоминаем точку, тащим только при реальном движении.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.globalPosition().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press_pos is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            self._press_pos = None
+            handle = self._win.windowHandle()
+            if handle is not None:
+                handle.startSystemMove()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self._press_pos = None
+        self._toggle_max()
+        super().mouseDoubleClickEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -351,23 +547,16 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("MindType")
         self.setWindowIcon(create_app_icon(64))
-        self.setMinimumSize(950, 750)
-        self.resize(1000, 780)
+        # Frameless: своя полосатая System-7 рамка вместо нативной.
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setMinimumSize(980, 520)
+        self.resize(1060, 600)
 
         self.config = ConfigManager()
         self.audio = AudioRecorder()
         backend = self.config.config.get("transcriber_backend", "auto")
-        self.transcriber = Transcriber(backend=backend)
-        # Configure transcription model download sources (CDN/mirrors) to reduce
-        # dependency on Hugging Face availability in certain regions.
-        try:
-            sources = self.config.config.get("model_download_sources", [])
-            if isinstance(sources, str):
-                sources = [s.strip() for s in sources.split(",") if s.strip()]
-            if isinstance(sources, list):
-                self.transcriber.set_download_sources(sources)
-        except Exception:
-            pass
+        self._transcriber_backend = backend
+        self.transcriber = self._build_transcriber(backend)
         self.hotkey_listener: Optional[HotkeyListener] = None
         self.hotkey_recorder: Optional[HotkeyRecorder] = None
 
@@ -410,11 +599,9 @@ class MainWindow(QMainWindow):
         self._transcribe_thread: Optional[TranscribeWorker] = None
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
-        self._auto_insert_pending = False
-        self._recording_hotkey = False
-        self._recording_start_time = None  # Время начала записи для учёта trial
+        self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
+        self._recording_hotkey = False  # отдельная забота: идёт перепривязка хоткея в настройках
         self._really_quit = False  # Флаг для полного выхода
-        self._transcription_in_progress = False  # Флаг активной транскрипции
 
         # Текущий язык интерфейса
         self._ui_lang = self.config.config.get("ui_language", "ru")
@@ -1265,45 +1452,60 @@ class MainWindow(QMainWindow):
         # Применяем стиль Classic Mac OS
         self.setStyleSheet(STYLESHEET)
 
-        # Главный контейнер
+        # Главный контейнер: рамка окна (frameless) = полосатый title bar + контент.
         central = QWidget()
-        main_layout = QVBoxLayout(central)
+        central.setObjectName("appWindowFrame")
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._title_bar = AppTitleBar(self, "MindType")
+        outer.addWidget(self._title_bar)
+
+        content = QWidget()
+        main_layout = QVBoxLayout(content)
         main_layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
         main_layout.setSpacing(SPACING["lg"])
-
-        # Header bar с кредитами и переключателем режима
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 4)
-
-        # Credits widget (показывается только для MindType Cloud)
-        self._credits_widget = CreditsBalanceWidget(self._t, self)
-        self._credits_widget.history_requested.connect(self._on_credits_history_requested)
-        is_mindtype_cloud = self.config.config.get("llm_provider", "") == "mindtype_cloud"
-        self._credits_widget.setVisible(is_mindtype_cloud)
-        header_layout.addWidget(self._credits_widget)
-
-        # Инициализировать MindType Cloud если выбран
-        if is_mindtype_cloud:
-            self._init_mindtype_cloud()
-
-        header_layout.addStretch()
-
-        # Mode toggle (Simple/Advanced)
-        self._mode_manager = ModeManager(self, self.config, self._t)
-        self._mode_toggle = ModeToggleWidget(self._mode_manager, self._t, self)
-        header_layout.addWidget(self._mode_toggle)
-
-        main_layout.addLayout(header_layout)
+        outer.addWidget(content, stretch=1)
 
         # Вкладки - порядок: Основные, Саммари, Настройки
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_basic_tab(), self._t("basic"))
         self.tabs.addTab(self._build_files_tab(), self._t("files_tab"))
         self.tabs.addTab(self._build_additional_tab(), self._t("additional"))
-        main_layout.addWidget(self.tabs)
 
-        # Журнал событий (внизу окна)
-        main_layout.addWidget(self._build_journal_section())
+        # Угол таб-бара: кредиты (нужны только для MindType Cloud) + кнопка журнала.
+        # ponytail: simple/advanced режим удалён (мёртвый — ничего не скрывал); журнал вынесен в окно.
+        self._credits_widget = CreditsBalanceWidget(self._t, self)
+        self._credits_widget.history_requested.connect(self._on_credits_history_requested)
+        is_mindtype_cloud = self.config.config.get("llm_provider", "") == "mindtype_cloud"
+        self._credits_widget.setVisible(is_mindtype_cloud)
+
+        corner = QWidget()
+        corner_layout = QHBoxLayout(corner)
+        corner_layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        corner_layout.setSpacing(SPACING["sm"])
+        corner_layout.addWidget(self._credits_widget)
+        self.journal_btn = QPushButton(self._t("journal"))
+        self.journal_btn.setObjectName("smallButton")
+        self.journal_btn.clicked.connect(self._toggle_journal_window)
+        corner_layout.addWidget(self.journal_btn)
+        self.tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        if is_mindtype_cloud:
+            self._init_mindtype_cloud()
+
+        main_layout.addWidget(self.tabs, stretch=1)
+
+        # Ресайз frameless-окна: нативный QSizeGrip в правом-нижнем углу.
+        # ponytail: только угловой grip; ресайз со всех краёв — если попросят.
+        grip_row = QHBoxLayout()
+        grip_row.setContentsMargins(0, 0, 0, 0)
+        grip_row.addStretch()
+        grip_row.addWidget(QSizeGrip(content))
+        main_layout.addLayout(grip_row)
+
+        # Журнал событий — в отдельном окне, открывается кнопкой в углу таб-бара
+        self._journal_window = self._build_journal_window()
 
         self.setCentralWidget(central)
 
@@ -1314,12 +1516,13 @@ class MainWindow(QMainWindow):
         tab_layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
         tab_layout.setSpacing(SPACING["sm"])
 
-        # Форма с полями
-        form = FormLayout(label_width=140, spacing=SPACING["sm"])
+        # === Секция: Распознавание речи (единый стиль с вкладкой Настройки) ===
+        rec_section = SectionBox(self._t("recognition_section"), label_width=140)
+        self.recognition_section_label = rec_section
 
         # Аудио вход
         self.mic_box = QComboBox()
-        self._audio_input_row = form.add_row(self._t("audio_input"), self.mic_box)
+        self._audio_input_row = rec_section.form.add_row(self._t("audio_input"), self.mic_box)
         self.audio_input_label = self._audio_input_row.label
 
         # Хоткей
@@ -1333,7 +1536,7 @@ class MainWindow(QMainWindow):
         self.hotkey_record_btn = QPushButton(self._t("record_hotkey"))
         hotkey_layout.addWidget(self.hotkey_edit)
         hotkey_layout.addWidget(self.hotkey_record_btn)
-        self._hotkey_row = form.add_row(self._t("hotkey"), hotkey_widget)
+        self._hotkey_row = rec_section.form.add_row(self._t("hotkey"), hotkey_widget)
         self.hotkey_label = self._hotkey_row.label
 
         # Язык транскрипции
@@ -1341,20 +1544,22 @@ class MainWindow(QMainWindow):
         for code, name in WHISPER_LANGUAGES.items():
             display = f"{name} ({code.upper()})" if code != "auto" else name
             self.trans_lang_box.addItem(display, code)
-        self._trans_lang_row = form.add_row(self._t("transcription_language"), self.trans_lang_box)
+        self._trans_lang_row = rec_section.form.add_row(self._t("transcription_language"), self.trans_lang_box)
         self.trans_lang_label = self._trans_lang_row.label
 
-        # Статус лицензии
+        tab_layout.addWidget(rec_section)
+
+        # === Секция: Статус лицензии ===
+        lic_section = SectionBox(self._t("license_status"), label_width=140)
+        self.license_section_label = lic_section
         self.license_status_widget = LicenseStatusWidget(
             self.license_manager,
             translate_func=self._t
         )
         self.license_status_widget.clicked.connect(self._show_license_dialog)
-        self._license_row = form.add_row(self._t("license_status"), self.license_status_widget)
-        self.license_status_label = self._license_row.label
+        lic_section.form.add_widget(self.license_status_widget)
+        tab_layout.addWidget(lic_section)
 
-        # Добавляем форму в таб
-        tab_layout.addWidget(form)
         tab_layout.addStretch()
 
         return tab
@@ -1369,13 +1574,27 @@ class MainWindow(QMainWindow):
         # Скроллируемый контейнер
         scroll = ScrollableContent(horizontal_scroll=False)
 
+        # Две колонки: слева — AI/Промпты/Overlay/App, справа — Производительность
+        # (она самая высокая, поэтому идёт отдельной колонкой для баланса).
+        _cols = QWidget()
+        _cols_layout = QHBoxLayout(_cols)
+        _cols_layout.setContentsMargins(0, 0, 0, 0)
+        _cols_layout.setSpacing(SPACING["lg"])
+        _left_col = QVBoxLayout()
+        _left_col.setSpacing(SPACING["lg"])
+        _right_col = QVBoxLayout()
+        _right_col.setSpacing(SPACING["lg"])
+        _cols_layout.addLayout(_left_col, 1)
+        _cols_layout.addLayout(_right_col, 1)
+        scroll.content_layout.addWidget(_cols)
+
         # === Секция AI Provider ===
         ai_section = SectionBox(self._t("ai_provider"), label_width=140)
         self.ai_section_label = ai_section  # Для совместимости
 
         # Выбор провайдера
         self.provider_combo = QComboBox()
-        self.provider_combo.setMinimumWidth(200)
+        self.provider_combo.setMinimumWidth(120)
         self.provider_combo.addItem("MindType Cloud", "mindtype_cloud")
         self.provider_combo.addItem("OpenAI", "openai")
         self.provider_combo.addItem("Claude (Anthropic)", "anthropic")
@@ -1411,33 +1630,42 @@ class MainWindow(QMainWindow):
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_combo.lineEdit().setPlaceholderText(self._t("search_model"))
         self.model_combo.setObjectName("wideCombo")
+        # Показывать начало имени модели (а не хвост) при выборе длинного значения
+        self.model_combo.currentIndexChanged.connect(
+            lambda: self.model_combo.lineEdit().setCursorPosition(0)
+        )
         self.model_combo.addItem(self._t("select_model"), "")
-        self.refresh_models_btn = QPushButton(self._t("refresh_models"))
+        self.refresh_models_btn = QPushButton("↻")  # компактная иконка — больше места дропдауну
         self.refresh_models_btn.setObjectName("smallButton")
+        self.refresh_models_btn.setFixedWidth(34)
+        self.refresh_models_btn.setToolTip(self._t("refresh_models"))
         self.refresh_models_btn.clicked.connect(self._on_refresh_models)
         model_layout.addWidget(self.model_combo, stretch=1)
         model_layout.addWidget(self.refresh_models_btn)
         self._model_select_row = ai_section.form.add_row(self._t("openrouter_model"), model_widget)
         self.model_select_label = self._model_select_row.label
 
-        # Reasoning mode
+        # Reasoning mode — выравниваем по сетке формы: чекбокс занимает колонку
+        # подписей (140px), combo встаёт ровно в колонку полей под остальными.
         reasoning_widget = QWidget()
         reasoning_layout = QHBoxLayout(reasoning_widget)
         reasoning_layout.setContentsMargins(0, 0, 0, 0)
-        reasoning_layout.setSpacing(SPACING["sm"])
+        reasoning_layout.setSpacing(SPACING["md"])
         self.reasoning_checkbox = QCheckBox(self._t("reasoning_mode"))
         self.reasoning_checkbox.setToolTip(self._t("reasoning_tooltip"))
+        self.reasoning_checkbox.setFixedWidth(140)
         self.reasoning_checkbox.stateChanged.connect(self._on_reasoning_changed)
-        self.effort_label = QLabel(self._t("reasoning_effort"))
+        # «Глубина» как отдельная подпись убрана для компактности — смысл несёт сам combo
+        # (Низкая/Средняя/Высокая) + tooltip.
         self.effort_combo = QComboBox()
         self.effort_combo.addItem(self._t("effort_low"), "low")
         self.effort_combo.addItem(self._t("effort_medium"), "medium")
         self.effort_combo.addItem(self._t("effort_high"), "high")
         self.effort_combo.setCurrentIndex(1)
         self.effort_combo.setObjectName("compactCombo")
+        self.effort_combo.setToolTip(self._t("reasoning_effort"))
         self.effort_combo.currentIndexChanged.connect(self._on_effort_changed)
         reasoning_layout.addWidget(self.reasoning_checkbox)
-        reasoning_layout.addWidget(self.effort_label)
         reasoning_layout.addWidget(self.effort_combo)
         reasoning_layout.addStretch()
         ai_section.form.add_widget(reasoning_widget)
@@ -1459,7 +1687,19 @@ class MainWindow(QMainWindow):
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         self._update_provider_fields()
 
-        scroll.content_layout.addWidget(ai_section)
+        _left_col.addWidget(ai_section)
+
+        # === Секция Промпты саммари ===
+        prompts_section = SectionBox(self._t("summary_prompts_section"), label_width=140)
+        self.prompts_section_label = prompts_section
+        prompts_hint = QLabel(self._t("manage_presets_hint"))
+        prompts_hint.setObjectName("tinyMuted")
+        prompts_hint.setWordWrap(True)
+        prompts_section.form.add_widget(prompts_hint)
+        self.manage_presets_btn = QPushButton(self._t("manage_presets"))
+        self.manage_presets_btn.clicked.connect(self._on_customize_prompts)
+        prompts_section.form.add_widget(self.manage_presets_btn)
+        _left_col.addWidget(prompts_section)
 
         # === Секция Performance ===
         perf_section = SectionBox(self._t("performance_section"), label_width=140)
@@ -1511,8 +1751,30 @@ class MainWindow(QMainWindow):
         self.backend_box.addItem(self._t("backend_whispercpp"), "whisper_cpp")
         self.backend_box.addItem(self._t("backend_faster_whisper"), "faster_whisper")
         self.backend_box.addItem(self._t("backend_onnx"), "onnx")
+        self.backend_box.addItem(self._t("backend_openrouter"), "openrouter")
         self._backend_row = perf_section.form.add_row(self._t("whisper_backend"), self.backend_box)
         self.backend_label = self._backend_row.label
+
+        # Модель транскрипции OpenRouter (динамический список, как для саммари)
+        transcribe_model_widget = QWidget()
+        transcribe_model_layout = QHBoxLayout(transcribe_model_widget)
+        transcribe_model_layout.setContentsMargins(0, 0, 0, 0)
+        transcribe_model_layout.setSpacing(SPACING["sm"])
+        self.transcribe_model_combo = QComboBox()
+        self.transcribe_model_combo.setEditable(True)
+        self.transcribe_model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.transcribe_model_combo.currentIndexChanged.connect(
+            lambda: self.transcribe_model_combo.lineEdit().setCursorPosition(0)
+        )
+        self.transcribe_model_combo.addItem(self._t("select_model"), "")
+        self.transcribe_refresh_btn = QPushButton("↻")  # компактная иконка
+        self.transcribe_refresh_btn.setObjectName("smallButton")
+        self.transcribe_refresh_btn.setFixedWidth(34)
+        self.transcribe_refresh_btn.setToolTip(self._t("refresh_models"))
+        transcribe_model_layout.addWidget(self.transcribe_model_combo, 1)
+        transcribe_model_layout.addWidget(self.transcribe_refresh_btn)
+        self._transcribe_model_row = perf_section.form.add_row(self._t("transcribe_model"), transcribe_model_widget)
+        self.transcribe_model_label = self._transcribe_model_row.label
 
         # Модель
         self.model_box = QComboBox()
@@ -1594,7 +1856,7 @@ class MainWindow(QMainWindow):
         self._model_sources_row = perf_section.form.add_row(self._t("model_download_sources"), sources_widget)
         self.model_sources_label = self._model_sources_row.label
 
-        scroll.content_layout.addWidget(perf_section)
+        _right_col.addWidget(perf_section)
 
         # === Секция Overlay ===
         overlay_section = SectionBox(self._t("overlay_section"), label_width=140)
@@ -1659,7 +1921,7 @@ class MainWindow(QMainWindow):
         self._opacity_row = overlay_section.form.add_row(self._t("opacity"), opacity_widget)
         self.opacity_label = self._opacity_row.label
 
-        scroll.content_layout.addWidget(overlay_section)
+        _left_col.addWidget(overlay_section)
 
         # === Секция App ===
         app_section = SectionBox(self._t("app_section"), label_width=140)
@@ -1717,7 +1979,9 @@ class MainWindow(QMainWindow):
         self._support_row = app_section.form.add_row(self._t("contact_support"), self.support_btn)
         self.support_label = self._support_row.label
 
-        scroll.content_layout.addWidget(app_section)
+        _right_col.addWidget(app_section)
+        _left_col.addStretch()
+        _right_col.addStretch()
         scroll.content_layout.addStretch()
 
         tab_layout.addWidget(scroll)
@@ -1919,7 +2183,7 @@ class MainWindow(QMainWindow):
         self.drop_zone = DropZoneWidget(translate_func=self._t)
         self.drop_zone.files_dropped.connect(self._on_files_dropped)
         self.drop_zone.clicked.connect(self._on_select_files_clicked)
-        self.drop_zone.setFixedHeight(140)
+        self.drop_zone.setFixedHeight(120)  # минимум под иконку + 3 строки текста (иначе форматы обрезаются)
         layout.addWidget(self.drop_zone)
 
         # Включить суммаризацию (checkbox напрямую)
@@ -1942,12 +2206,25 @@ class MainWindow(QMainWindow):
         self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
         layout.addWidget(self.enable_summary_checkbox)
 
-        # Скрытые виджеты для совместимости (не отображаются в UI)
+        # Формат отчёта (HTML / PDF / оба)
+        format_row = QHBoxLayout()
+        format_row.setContentsMargins(0, 0, 0, 0)
+        format_row.setSpacing(SPACING["sm"])
+        self.output_format_label = QLabel(self._t("report_format"))
+        format_row.addWidget(self.output_format_label)
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem(self._t("format_html"), "html")
         self.output_format_combo.addItem(self._t("format_pdf"), "pdf")
         self.output_format_combo.addItem(self._t("format_both"), "both")
-        self.output_format_combo.setVisible(False)
+        saved_fmt = cfg.get("report_format", "both")
+        _fmt_idx = self.output_format_combo.findData(saved_fmt)
+        self.output_format_combo.setCurrentIndex(_fmt_idx if _fmt_idx >= 0 else self.output_format_combo.findData("both"))
+        self.output_format_combo.currentIndexChanged.connect(
+            lambda: self.config.update(report_format=self.output_format_combo.currentData())
+        )
+        format_row.addWidget(self.output_format_combo)
+        format_row.addStretch()
+        layout.addLayout(format_row)
 
         self.output_folder_edit = QLineEdit()
         self.output_folder_edit.setReadOnly(True)
@@ -2078,21 +2355,20 @@ class MainWindow(QMainWindow):
             self.config.update(ui_language=code)
             self._update_ui_texts()
 
-    def _build_journal_section(self) -> QWidget:
-        """Построить секцию журнала событий."""
-        section = QWidget()
-        section.setObjectName("whiteBackground")
-        layout = QVBoxLayout(section)
-        layout.setContentsMargins(0, SPACING["md"], 0, 0)
+    def _build_journal_window(self) -> QWidget:
+        """Журнал событий — отдельное окно (открывается кнопкой)."""
+        win = QWidget(self)
+        win.setWindowFlag(Qt.WindowType.Window)
+        win.setObjectName("whiteBackground")
+        win.setWindowTitle(self._t("journal"))
+        win.resize(640, 380)
+        layout = QVBoxLayout(win)
+        layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
         layout.setSpacing(SPACING["xs"])
 
-        # Заголовок журнала с кнопкой Clear (над рамкой)
+        # Заголовок несёт сам title bar окна — внутри только кнопка очистки (справа)
         journal_header = QHBoxLayout()
-        self.journal_title = QLabel(self._t("journal"))
-        self.journal_title.setObjectName("sectionTitle")
-        journal_header.addWidget(self.journal_title)
         journal_header.addStretch()
-
         self.clear_journal_btn = QPushButton(self._t("clear_journal"))
         self.clear_journal_btn.setObjectName("smallButton")
         self.clear_journal_btn.clicked.connect(self._clear_journal)
@@ -2107,12 +2383,21 @@ class MainWindow(QMainWindow):
         journal_frame_layout.setSpacing(0)
 
         self.journal = JournalWidget(translate_func=self._t)
-        self.journal.setMaximumHeight(100)
         journal_frame_layout.addWidget(self.journal)
 
-        layout.addWidget(journal_frame)
+        layout.addWidget(journal_frame, stretch=1)
 
-        return section
+        apply_system7_titlebar(win, self._t("journal"))
+        return win
+
+    def _toggle_journal_window(self) -> None:
+        """Показать/скрыть окно журнала."""
+        if self._journal_window.isVisible():
+            self._journal_window.hide()
+        else:
+            self._journal_window.show()
+            self._journal_window.raise_()
+            self._journal_window.activateWindow()
 
     def _build_history_tab(self) -> QWidget:
         """Построить вкладку истории и журнала."""
@@ -2187,7 +2472,9 @@ class MainWindow(QMainWindow):
         self.model_box.currentIndexChanged.connect(self._on_model_change)
         self.compute_box.currentTextChanged.connect(lambda v: self.config.update(compute_type=v))
         self.accel_box.currentTextChanged.connect(lambda v: self.config.update(accelerator=v))
-        self.backend_box.currentIndexChanged.connect(lambda i: self.config.update(transcriber_backend=self.backend_box.itemData(i)))
+        self.backend_box.currentIndexChanged.connect(self._on_backend_change)
+        self.transcribe_refresh_btn.clicked.connect(self._on_refresh_transcribe_models)
+        self.transcribe_model_combo.currentIndexChanged.connect(self._on_transcribe_model_changed)
         self.mic_box.currentTextChanged.connect(self._on_mic_change)
         self.hotkey_record_btn.clicked.connect(self._start_hotkey_recording)
 
@@ -2237,6 +2524,15 @@ class MainWindow(QMainWindow):
         idx = self.backend_box.findData(backend)
         if idx >= 0:
             self.backend_box.setCurrentIndex(idx)
+
+        # Предзаполнить выбранную STT-модель OpenRouter (до первого "Обновить")
+        saved_transcribe_model = cfg.get("openrouter_transcribe_model", "")
+        if saved_transcribe_model:
+            self.transcribe_model_combo.clear()
+            self.transcribe_model_combo.addItem(self._t("select_model"), "")
+            self.transcribe_model_combo.addItem(saved_transcribe_model, saved_transcribe_model)
+            self.transcribe_model_combo.setCurrentIndex(1)
+        self._update_transcribe_ui_visibility()
 
         # Хоткей
         hotkey = cfg.get("hotkey", "ctrl+alt+v")
@@ -2469,7 +2765,10 @@ class MainWindow(QMainWindow):
         self.hotkey_record_btn.setText(self._t("record_hotkey"))
         self.ui_lang_label.setText(self._t("ui_language"))
         self.trans_lang_label.setText(self._t("transcription_language"))
-        self.license_status_label.setText(self._t("license_status"))
+        if hasattr(self, "recognition_section_label"):
+            self.recognition_section_label.setTitle(self._t("recognition_section"))
+        if hasattr(self, "license_section_label"):
+            self.license_section_label.setTitle(self._t("license_status"))
 
         # Дополнительная вкладка - модель и устройство
         self.model_label.setText(self._t("model"))
@@ -2477,6 +2776,12 @@ class MainWindow(QMainWindow):
         self.quant_label.setText(self._t("quantization"))
         self.accel_label.setText(self._t("device"))
         self.download_btn.setText(self._t("download_model"))
+        if hasattr(self, "transcribe_model_label"):
+            self.transcribe_model_label.setText(self._t("transcribe_model"))
+        if hasattr(self, "transcribe_refresh_btn"):
+            self.transcribe_refresh_btn.setToolTip(self._t("refresh_models"))
+        if hasattr(self, "refresh_models_btn"):
+            self.refresh_models_btn.setToolTip(self._t("refresh_models"))
 
         # Дополнительная вкладка
         self.perf_section_label.setTitle(self._t("performance_section"))
@@ -2527,7 +2832,10 @@ class MainWindow(QMainWindow):
         self._no_files_label.setText(self._t("no_files_in_queue"))
 
         # Обновляем формат комбобокса
+        if hasattr(self, "output_format_label"):
+            self.output_format_label.setText(self._t("report_format"))
         current_format = self.output_format_combo.currentData()
+        self.output_format_combo.blockSignals(True)
         self.output_format_combo.clear()
         self.output_format_combo.addItem(self._t("format_html"), "html")
         self.output_format_combo.addItem(self._t("format_pdf"), "pdf")
@@ -2535,11 +2843,14 @@ class MainWindow(QMainWindow):
         idx = self.output_format_combo.findData(current_format)
         if idx >= 0:
             self.output_format_combo.setCurrentIndex(idx)
+        self.output_format_combo.blockSignals(False)
 
         # AI саммари
         self.enable_summary_checkbox.setText(self._t("enable_summary"))
         self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
         self.customize_prompts_btn.setText(self._t("customize_prompts"))
+        if hasattr(self, "manage_presets_btn"):
+            self.manage_presets_btn.setText(self._t("manage_presets"))
         if hasattr(self, "_thinking_title"):
             self._thinking_title.setText(self._t("ai_thinking"))
 
@@ -2556,9 +2867,12 @@ class MainWindow(QMainWindow):
             self.assistant_dialog_history.set_translate_func(self._t)
 
         # Журнал
-        self.journal_title.setText(self._t("journal"))
         self.clear_journal_btn.setText(self._t("clear_journal"))
         self.journal.set_translate_func(self._t)
+        if hasattr(self, "journal_btn"):
+            self.journal_btn.setText(self._t("journal"))
+        if hasattr(self, "_journal_window"):
+            self._journal_window.setWindowTitle(self._t("journal"))
 
         # Системный трей
         self._update_tray_menu_texts()
@@ -2739,7 +3053,7 @@ class MainWindow(QMainWindow):
             return
 
         # Если идёт транскрипция - отменяем её
-        if self._transcription_in_progress:
+        if self._dictation.transcribing:
             self._cancel_transcription()
             return
 
@@ -2769,7 +3083,7 @@ class MainWindow(QMainWindow):
                 self.waveform_signal.emit(levels)
 
             self.audio.start(device=device_id, level_callback=on_level)
-            self._recording_start_time = datetime.now()  # Запоминаем время начала
+            self._dictation.recording_start_time = datetime.now()  # Запоминаем время начала
             self.overlay.show_recording()
             self._update_tray_icon(recording=True)
         except Exception as exc:
@@ -2781,22 +3095,21 @@ class MainWindow(QMainWindow):
         if not self.audio.recording:
             return
 
-        self._auto_insert_pending = True
-        self._transcription_in_progress = True  # Начинаем транскрипцию
+        self._dictation.begin_transcription(auto_insert=True)  # Начинаем транскрипцию
         path = self.audio.stop()
 
         # Учитываем время записи для trial
-        if hasattr(self, '_recording_start_time') and self._recording_start_time:
-            duration = (datetime.now() - self._recording_start_time).total_seconds()
+        if self._dictation.recording_start_time:
+            duration = (datetime.now() - self._dictation.recording_start_time).total_seconds()
             self.license_manager.add_transcription_time(duration)
-            self._recording_start_time = None
+            self._dictation.recording_start_time = None
 
         self.overlay.show_processing()
 
         if not path:
             self._add_journal_entry("error", "error", text="no_audio", is_translatable=True)
             self.overlay.show_error(self._t("error"))
-            self._auto_insert_pending = False
+            self._dictation.cancel()  # ничего не запущено: сбрасываем и transcribing, и auto_insert
             return
 
         self._run_transcription(path)
@@ -2839,12 +3152,12 @@ class MainWindow(QMainWindow):
         add_breadcrumb(f"Transcription completed: {'error' if err else 'success'}")
 
         self._update_tray_icon(recording=False)
-        self._transcription_in_progress = False  # Транскрипция завершена
+        self._dictation.finish_transcription()  # Транскрипция завершена
 
         if err:
             self._add_journal_entry("error", "error", text=err, is_translatable=True)
             self.overlay.show_error(self._t("error"))
-            self._auto_insert_pending = False
+            self._dictation.auto_insert_pending = False
             return
 
         self.last_text = text
@@ -2860,8 +3173,8 @@ class MainWindow(QMainWindow):
             is_translatable=True
         )
 
-        if self._auto_insert_pending and text:
-            self._auto_insert_pending = False
+        if self._dictation.auto_insert_pending and text:
+            self._dictation.auto_insert_pending = False
             QTimer.singleShot(150, lambda: self._do_auto_insert(text))
         else:
             self.overlay.show_success()
@@ -2882,15 +3195,14 @@ class MainWindow(QMainWindow):
 
     def _cancel_transcription(self) -> None:
         """Отменить текущую транскрипцию."""
-        if not self._transcription_in_progress:
+        if not self._dictation.transcribing:
             return
 
         # Отменяем worker
         if self._transcribe_thread and self._transcribe_thread.isRunning():
             self._transcribe_thread.cancel()
 
-        self._transcription_in_progress = False
-        self._auto_insert_pending = False
+        self._dictation.cancel()
         self._update_tray_icon(recording=False)
 
         # Показываем сообщение об отмене
@@ -3198,7 +3510,6 @@ class MainWindow(QMainWindow):
     def _on_reasoning_changed(self, state: int) -> None:
         """Обработать изменение reasoning mode."""
         is_enabled = state == 2  # Qt.CheckState.Checked
-        self.effort_label.setEnabled(is_enabled)
         self.effort_combo.setEnabled(is_enabled)
         self.config.update(llm_reasoning_enabled=is_enabled)
 
@@ -3228,51 +3539,42 @@ class MainWindow(QMainWindow):
         self.model_combo.addItem(self._t("select_model"), "")
 
     def _update_provider_fields(self) -> None:
-        """Обновить видимость полей в зависимости от провайдера."""
+        """Обновить видимость полей в зависимости от провайдера (источник правды — реестр)."""
+        from .llm import get_provider_descriptor
         provider = self.provider_combo.currentData()
+        desc = get_provider_descriptor(provider)
 
-        # MindType Cloud не требует API ключа (использует лицензию)
         is_mindtype_cloud = provider == "mindtype_cloud"
-        # Ollama не требует API ключа, но требует base_url
-        is_ollama = provider == "ollama"
+        needs_key = desc.needs_api_key if desc else True
+        needs_base_url = desc.needs_base_url if desc else False
 
-        # Скрыть API key для MindType Cloud и Ollama
-        self.api_key_label.setVisible(not is_ollama and not is_mindtype_cloud)
-        self.api_key_edit.setVisible(not is_ollama and not is_mindtype_cloud)
-        self.base_url_label.setVisible(is_ollama)
-        self.base_url_edit.setVisible(is_ollama)
+        # API key / base URL — по реестру
+        self.api_key_label.setVisible(needs_key)
+        self.api_key_edit.setVisible(needs_key)
+        self.base_url_label.setVisible(needs_base_url)
+        self.base_url_edit.setVisible(needs_base_url)
 
-        # Скрыть выбор модели для MindType Cloud (автовыбор)
+        # MindType Cloud: авто-выбор модели, без reasoning, виджет кредитов
         self.model_select_label.setVisible(not is_mindtype_cloud)
         self.model_combo.setVisible(not is_mindtype_cloud)
         self.refresh_models_btn.setVisible(not is_mindtype_cloud)
-
-        # Скрыть reasoning для MindType Cloud (не поддерживается)
         self.reasoning_checkbox.setVisible(not is_mindtype_cloud)
-        self.effort_label.setVisible(not is_mindtype_cloud)
         self.effort_combo.setVisible(not is_mindtype_cloud)
 
-        # Показать/скрыть виджет кредитов
         if hasattr(self, '_credits_widget'):
             self._credits_widget.setVisible(is_mindtype_cloud)
-
-        # Инициализировать MindType Cloud провайдер
         if is_mindtype_cloud:
             self._init_mindtype_cloud()
             self._refresh_credits_balance()
 
-        # Обновляем placeholder для API ключа
-        placeholders = {
-            "openai": "sk-...",
-            "anthropic": "sk-ant-...",
-            "gemini": "AIza...",
-            "openrouter": "sk-or-...",
-        }
-        self.api_key_edit.setPlaceholderText(placeholders.get(provider, ""))
+        # Placeholder API-ключа — из реестра
+        self.api_key_edit.setPlaceholderText(desc.key_placeholder if desc else "")
 
     def _load_provider_settings(self, provider: str) -> None:
         """Загрузить настройки для провайдера."""
+        from .llm import get_provider_descriptor
         cfg = self.config.config
+        desc = get_provider_descriptor(provider)
 
         # MindType Cloud использует лицензионный ключ, не API ключ
         if provider == "mindtype_cloud":
@@ -3280,17 +3582,15 @@ class MainWindow(QMainWindow):
             return
 
         # API ключ
-        key_field = f"{provider}_api_key"
-        api_key = cfg.get(key_field, "")
-        self.api_key_edit.setText(api_key)
+        key_field = desc.api_key_field if desc else f"{provider}_api_key"
+        self.api_key_edit.setText(cfg.get(key_field, ""))
 
-        # Base URL (для Ollama)
-        if provider == "ollama":
-            base_url = cfg.get("ollama_base_url", "http://localhost:11434")
-            self.base_url_edit.setText(base_url)
+        # Base URL (для провайдеров с base_url, напр. Ollama)
+        if desc and desc.needs_base_url:
+            self.base_url_edit.setText(cfg.get("ollama_base_url", "http://localhost:11434"))
 
         # Модель
-        model_field = f"{provider}_model"
+        model_field = desc.model_field if desc else f"{provider}_model"
         saved_model = cfg.get(model_field, "")
         if saved_model:
             self.model_combo.clear()
@@ -3300,10 +3600,10 @@ class MainWindow(QMainWindow):
 
     def _on_api_key_changed(self, value: str) -> None:
         """Сохранить API ключ для текущего провайдера."""
-        provider = self.provider_combo.currentData()
-        if provider and provider not in ("ollama", "mindtype_cloud"):
-            key_field = f"{provider}_api_key"
-            self.config.update(**{key_field: value})
+        from .llm import get_provider_descriptor
+        desc = get_provider_descriptor(self.provider_combo.currentData())
+        if desc and desc.needs_api_key:
+            self.config.update(**{desc.api_key_field: value})
 
     def _on_base_url_changed(self, value: str) -> None:
         """Сохранить base URL для Ollama."""
@@ -3311,13 +3611,13 @@ class MainWindow(QMainWindow):
 
     def _on_model_changed(self, value: str) -> None:
         """Сохранить выбранную модель."""
-        provider = self.provider_combo.currentData()
-        if provider:
-            model_field = f"{provider}_model"
-            # Получаем ID модели из data, а не текст
-            model_id = self.model_combo.currentData()
-            if model_id:
-                self.config.update(**{model_field: model_id})
+        from .llm import get_provider_descriptor
+        desc = get_provider_descriptor(self.provider_combo.currentData())
+        if not desc:
+            return
+        model_id = self.model_combo.currentData()  # ID модели из data, не текст
+        if model_id:
+            self.config.update(**{desc.model_field: model_id})
 
     def _on_refresh_models(self) -> None:
         """Загрузить список моделей для текущего провайдера."""
@@ -3340,7 +3640,7 @@ class MainWindow(QMainWindow):
 
         # Показываем индикатор загрузки
         self.refresh_models_btn.setEnabled(False)
-        self.refresh_models_btn.setText(self._t("loading_models"))
+        self.refresh_models_btn.setText("…")
         QApplication.processEvents()
 
         try:
@@ -3361,12 +3661,12 @@ class MainWindow(QMainWindow):
             # Сохраняем модели
             self._llm_models = models
 
-            # Очищаем и заполняем комбобокс
+            # Очищаем и заполняем комбобокс (по алфавиту)
             self.model_combo.clear()
             self.model_combo.addItem(self._t("select_model"), "")
 
             model_names = []
-            for model in models:
+            for model in sorted(models, key=lambda m: (m.display_name or m.id or "").lower()):
                 # Формируем отображаемое имя
                 display = model.display_name
                 self.model_combo.addItem(display, model.id)
@@ -3412,13 +3712,127 @@ class MainWindow(QMainWindow):
             )
         finally:
             self.refresh_models_btn.setEnabled(True)
-            self.refresh_models_btn.setText(self._t("refresh_models"))
+            self.refresh_models_btn.setText("↻")
 
     def _on_model_selected(self, index: int) -> None:
         """Сохранить выбранную модель."""
         model_id = self.model_combo.currentData()
         if model_id:
             self.config.update(openrouter_model=model_id)
+
+    def _build_transcriber(self, backend: str) -> "Transcriber":
+        """Создать транскрайбер и применить источники загрузки моделей (CDN/зеркала)."""
+        transcriber = Transcriber(backend=backend)
+        try:
+            sources = self.config.config.get("model_download_sources", [])
+            if isinstance(sources, str):
+                sources = [s.strip() for s in sources.split(",") if s.strip()]
+            if isinstance(sources, list):
+                transcriber.set_download_sources(sources)
+        except Exception:
+            pass
+        return transcriber
+
+    def _on_backend_change(self, index: int) -> None:
+        """Смена бэкенда транскрипции: пересоздать транскрайбер и переподключить зависимых."""
+        backend = self.backend_box.itemData(index)
+        if not backend:
+            return
+        # Уже активен (в т.ч. начальная установка из _load_initial_state) — не пересоздаём,
+        # иначе на старте создался бы второй инстанс уже после захвата ассистентом (двойная
+        # загрузка модели). Только синхронизируем конфиг и видимость UI.
+        if backend == self._transcriber_backend:
+            self.config.update(transcriber_backend=backend)
+            self._update_transcribe_ui_visibility()
+            return
+        # Строим новый ДО коммита конфига — при сбое конструкции состояние не разъезжается.
+        try:
+            new_transcriber = self._build_transcriber(backend)
+        except Exception as e:
+            QMessageBox.critical(self, self._t("error"), str(e))
+            self.backend_box.blockSignals(True)
+            i = self.backend_box.findData(self._transcriber_backend)
+            if i >= 0:
+                self.backend_box.setCurrentIndex(i)
+            self.backend_box.blockSignals(False)
+            self._update_transcribe_ui_visibility()
+            return
+        self.transcriber = new_transcriber
+        self._transcriber_backend = backend
+        self.config.update(transcriber_backend=backend)
+        # Голосовой ассистент держит свою ссылку на транскрайбер — переподключаем,
+        # иначе он продолжит работать на старом бэкенде до перезапуска.
+        if self.voice_assistant is not None:
+            try:
+                self.voice_assistant.set_transcriber(self.transcriber)
+            except Exception:
+                pass
+        self._update_transcribe_ui_visibility()
+
+    def _update_transcribe_ui_visibility(self) -> None:
+        """Показать STT-пикер для OpenRouter и спрятать whisper-специфичные элементы."""
+        is_or = self.backend_box.currentData() == "openrouter"
+        self._transcribe_model_row.setVisible(is_or)
+        self._model_row.setVisible(not is_or)
+        self.distil_warning.setVisible(not is_or)
+        self.download_btn.setVisible(not is_or)
+        self.download_progress.setVisible(not is_or)
+        self.download_status_label.setVisible(not is_or)
+        self._model_path_row.setVisible(not is_or)
+        self._model_sources_row.setVisible(not is_or)
+
+    def _on_transcribe_model_changed(self, index: int) -> None:
+        """Сохранить выбранную STT-модель OpenRouter."""
+        model_id = self.transcribe_model_combo.currentData()
+        if model_id:
+            self.config.update(openrouter_transcribe_model=model_id)
+
+    def _on_refresh_transcribe_models(self) -> None:
+        """Загрузить список STT-моделей OpenRouter (output_modalities=transcription)."""
+        api_key = (self.config.config.get("openrouter_api_key") or "").strip()
+        if not api_key:
+            QMessageBox.warning(self, self._t("error"), self._t("api_key_required"))
+            return
+
+        self.transcribe_refresh_btn.setEnabled(False)
+        self.transcribe_refresh_btn.setText("…")
+        QApplication.processEvents()
+        try:
+            from .llm.openrouter import OpenRouterProvider
+            from .llm import LLMAuthError, LLMError, LLMConnectionError
+            from PyQt6.QtWidgets import QCompleter
+
+            provider = OpenRouterProvider(api_key=api_key)
+            models = provider.fetch_transcription_models()
+
+            self.transcribe_model_combo.clear()
+            self.transcribe_model_combo.addItem(self._t("select_model"), "")
+            model_names = []
+            for model in sorted(models, key=lambda m: (m.name or m.id or "").lower()):
+                self.transcribe_model_combo.addItem(model.name, model.id)
+                model_names.append(model.name)
+
+            completer = QCompleter(model_names, self)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self.transcribe_model_combo.setCompleter(completer)
+
+            saved = self.config.config.get("openrouter_transcribe_model", "")
+            if saved:
+                idx = self.transcribe_model_combo.findData(saved)
+                if idx >= 0:
+                    self.transcribe_model_combo.setCurrentIndex(idx)
+        except LLMAuthError:
+            QMessageBox.critical(self, self._t("error"), self._t("invalid_api_key"))
+        except LLMConnectionError as e:
+            QMessageBox.critical(self, self._t("error"), f"{self._t('connection_error')}: {e}")
+        except LLMError as e:
+            QMessageBox.critical(self, self._t("error"), f"{self._t('api_error')}: {e}")
+        except Exception as e:
+            QMessageBox.critical(self, self._t("error"), str(e))
+        finally:
+            self.transcribe_refresh_btn.setEnabled(True)
+            self.transcribe_refresh_btn.setText("↻")
 
     def _on_customize_prompts(self) -> None:
         """Открыть диалог настройки промптов."""
@@ -3505,10 +3919,11 @@ class MainWindow(QMainWindow):
         # Создаём очередь
         cfg = self.config.config
 
-        # Загружаем промпты из пресета и объединяем с кастомными
+        # Загружаем промпты из пресета (встроенного или пользовательского) и объединяем с кастомными
         from .summary_presets import get_preset_prompts
         preset_id = cfg.get("summary_preset", "pm")
-        preset_prompts = get_preset_prompts(preset_id)
+        user_presets = cfg.get("user_presets", {})
+        preset_prompts = get_preset_prompts(preset_id, user_presets)
         custom_prompts_saved = cfg.get("custom_prompts", {})
         # Кастомные промпты перезаписывают промпты из пресета
         custom_prompts = {**preset_prompts, **custom_prompts_saved} if custom_prompts_saved else preset_prompts
@@ -3546,36 +3961,40 @@ class MainWindow(QMainWindow):
 
         self._file_queue = FileTranscriptionQueue(
             transcriber=self.transcriber,
-            model_size=cfg.get("model_size", "large-v3"),
-            compute_type=cfg.get("compute_type", "int8"),
-            device=cfg.get("device", "auto"),
-            language=cfg.get("language", "ru"),
-            beam_size=int(cfg.get("beam_size", 5)),
-            vad_filter=bool(cfg.get("vad_filter", True)),
-            models_dir=self.models_dir,
-            enable_summary=self.enable_summary_checkbox.isChecked(),
-            on_thinking=lambda text: self.thinking_signal.emit(text),  # Всегда включен
-            enable_thinking=True,  # Всегда включен
-            custom_prompts=custom_prompts,
-            # Универсальные настройки провайдера
-            summary_provider=llm_provider,
-            summary_api_key=summary_api_key,
-            summary_model=summary_model,
-            summary_base_url=summary_base_url,
-            summary_reasoning=summary_reasoning,
-            summary_reasoning_effort=summary_reasoning_effort,
-            # Legacy OpenRouter (обратная совместимость)
-            openrouter_api_key=cfg.get("openrouter_api_key", ""),
-            openrouter_model=cfg.get("openrouter_model", ""),
-            openrouter_reasoning=bool(cfg.get("openrouter_reasoning", cfg.get("llm_reasoning_enabled", True))),
-            openrouter_reasoning_effort=cfg.get("openrouter_reasoning_effort", "medium"),
-            # Постобработка (диаризация, пунктуация и т.д.)
-            enable_postprocessing=cfg.get("enable_postprocessing", True),
-            postprocessing_diarization=cfg.get("postprocessing_diarization", True),
-            postprocessing_punctuation=cfg.get("postprocessing_punctuation", True),
-            postprocessing_fillers=cfg.get("postprocessing_fillers", True),
-            postprocessing_normalize=cfg.get("postprocessing_normalize", True),
-            postprocessing_correct=cfg.get("postprocessing_correct", True),
+            transcribe=TranscribeOptions(
+                model_size=cfg.get("model_size", "large-v3"),
+                compute_type=cfg.get("compute_type", "int8"),
+                device=cfg.get("device", "auto"),
+                language=cfg.get("language", "ru"),
+                beam_size=int(cfg.get("beam_size", 5)),
+                vad_filter=bool(cfg.get("vad_filter", True)),
+                models_dir=self.models_dir,
+            ),
+            summary=SummaryOptions(
+                enable=self.enable_summary_checkbox.isChecked(),
+                enable_thinking=True,  # Всегда включен
+                custom_prompts=custom_prompts,
+                provider=llm_provider,
+                api_key=summary_api_key,
+                model=summary_model,
+                base_url=summary_base_url,
+                reasoning=summary_reasoning,
+                reasoning_effort=summary_reasoning_effort,
+                # Legacy OpenRouter (обратная совместимость)
+                openrouter_api_key=cfg.get("openrouter_api_key", ""),
+                openrouter_model=cfg.get("openrouter_model", ""),
+                openrouter_reasoning=bool(cfg.get("openrouter_reasoning", cfg.get("llm_reasoning_enabled", True))),
+                openrouter_reasoning_effort=cfg.get("openrouter_reasoning_effort", "medium"),
+            ),
+            postprocess=PostProcessOptions(
+                enable=cfg.get("enable_postprocessing", True),
+                diarization=cfg.get("postprocessing_diarization", True),
+                punctuation=cfg.get("postprocessing_punctuation", True),
+                fillers=cfg.get("postprocessing_fillers", True),
+                normalize=cfg.get("postprocessing_normalize", True),
+                correct=cfg.get("postprocessing_correct", True),
+            ),
+            on_thinking=lambda text: self.thinking_signal.emit(text),
         )
 
         # Добавляем файлы
@@ -3731,6 +4150,13 @@ class MainWindow(QMainWindow):
 
         self._update_file_queue_ui()
 
+    def changeEvent(self, event) -> None:
+        """При сворачивании прячем и окно журнала (оно top-level и не следует за главным)."""
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
+            if hasattr(self, "_journal_window"):
+                self._journal_window.hide()
+        super().changeEvent(event)
+
     def closeEvent(self, event) -> None:
         """Закрытие приложения или сворачивание в трей."""
         # Останавливаем обработку файлов если запущена
@@ -3740,6 +4166,10 @@ class MainWindow(QMainWindow):
         # Если трей доступен и не нажат Exit - сворачиваем в трей
         if self.tray_icon and not self._really_quit:
             event.ignore()
+            # Журнал — top-level окно, self.hide() его не прячет (Qt пропускает
+            # дочерние окна) → прячем явно, иначе зависнет на экране сиротой.
+            if hasattr(self, "_journal_window"):
+                self._journal_window.hide()
             self.hide()
             return
 
@@ -3811,10 +4241,12 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setWindowIcon(create_app_icon(64))  # Иконка для всего приложения
 
-    # Загружаем шрифты Chicago/Geneva для system.css стиля
-    from PyQt6.QtGui import QFontDatabase
+    # Шрифты для System 7 стиля. Chicago (оригинальный шрифт Apple Macintosh,
+    # версия с КИРИЛЛИЦЕЙ) — основной для всего UI: аутентично + русский/латиница
+    # одним шрифтом. ChicagoFLF/FindersKeepers — латинский фолбэк/совместимость.
+    from PyQt6.QtGui import QFontDatabase, QFont
     fonts_dir = Path(__file__).parent / "ui" / "fonts"
-    for font_file in ["ChicagoFLF.ttf", "FindersKeepers.ttf"]:
+    for font_file in ["Chicago.ttf", "ChicagoFLF.ttf", "FindersKeepers.ttf"]:
         font_path = fonts_dir / font_file
         if font_path.exists():
             font_id = QFontDatabase.addApplicationFont(str(font_path))
@@ -3823,6 +4255,13 @@ def main() -> None:
                 logger.debug(f"Loaded font: {font_file} -> {families}")
             else:
                 logger.warning(f"Failed to load font: {font_file}")
+
+    # Единый шрифт приложения: чистый системный (Segoe UI), со сглаживанием.
+    # System-7 «системность» держится на хроме (бевели/чекбоксы/полосатый title bar),
+    # а не на ретро-шрифте (пиксельные/Chicago пользователю не зашли).
+    _ui_font = QFont("Segoe UI")
+    _ui_font.setPixelSize(13)
+    app.setFont(_ui_font)
 
     # Force light theme (System 7 style)
     app.setStyle("Fusion")

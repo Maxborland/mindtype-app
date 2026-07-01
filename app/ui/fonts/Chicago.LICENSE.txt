@@ -1,0 +1,11 @@
+Chicago — основной шрифт UI MindType (оригинальный системный шрифт Apple Macintosh,
+дизайнер Susan Kare, использовался в Mac OS 1984–1997).
+
+Файл: Chicago.ttf (Chicago v0.5.5)
+Источник (merge Latin/Greek/Cyrillic): https://github.com/nikdog/chicago-font
+
+ВНИМАНИЕ ПО ЛИЦЕНЗИИ: оригинальный Chicago — собственность Apple; распространяемые
+TTF-версии (ChicagoFLF Робина Кэсади и пр.) обычно «freeware for personal use».
+Лицензия именно этого merged-файла в репозитории явно не указана. Перед публичной
+дистрибуцией приложения нужно ПОДТВЕРДИТЬ права на распространение шрифта (или
+заменить на шрифт с явной OFL/CC0-лицензией).

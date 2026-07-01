@@ -238,6 +238,10 @@ def _prefer_cpp() -> bool:
 
 def create_transcriber(backend: str = "auto") -> TranscriberBackend:
     """Фабрика для создания транскрибера."""
+    if backend == "openrouter":
+        from .transcriber_openrouter import OpenRouterTranscriber
+        return OpenRouterTranscriber()
+
     if backend == "onnx":
         return WhisperOnnxTranscriber()
 

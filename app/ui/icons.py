@@ -12,17 +12,19 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen
 # ===== B&W STATUS ICONS (Unicode) =====
 # These are text-based status indicators for System 7 aesthetic
 
-STATUS_OK = "✓"           # Checkmark for success
-STATUS_ERROR = "✗"        # X for error
-STATUS_PENDING = "○"      # Empty circle for pending
-STATUS_PROGRESS = "◐"     # Half circle for in-progress
-STATUS_WARNING = "!"      # Exclamation for warning
+# ASCII-символы: пиксельный шрифт Pixellari не содержит ✓✗○◐▸ (рендерятся .notdef-box),
+# поэтому используем безопасную латиницу/пунктуацию (как в ранних версиях — «[OK]»).
+STATUS_OK = "OK"          # success
+STATUS_ERROR = "X"        # error
+STATUS_PENDING = "..."    # pending
+STATUS_PROGRESS = ">"     # in-progress
+STATUS_WARNING = "!"      # warning
 
 # Status with brackets (Classic Mac style)
-STATUS_OK_BRACKET = "[✓]"
-STATUS_ERROR_BRACKET = "[✗]"
+STATUS_OK_BRACKET = "[OK]"
+STATUS_ERROR_BRACKET = "[X]"
 STATUS_PENDING_BRACKET = "[...]"
-STATUS_PROGRESS_BRACKET = "[▸]"
+STATUS_PROGRESS_BRACKET = "[>]"
 STATUS_WARNING_BRACKET = "[!]"
 
 

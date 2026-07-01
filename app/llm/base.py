@@ -145,6 +145,11 @@ class LLMInvalidModelError(LLMError):
     pass
 
 
+class LLMInsufficientFundsError(LLMError):
+    """Недостаточно средств на балансе (например 402 у OpenRouter)."""
+    pass
+
+
 # Тип для callback'а при стриминге
 TokenCallback = Callable[[str], None]
 ThinkingCallback = Callable[[str], None]
@@ -268,15 +273,29 @@ class LLMProvider(ABC):
         """
         pass
 
-    @abstractmethod
     def validate_api_key(self) -> bool:
         """
         Проверить валидность API ключа.
 
+        Дефолт для key-based провайдеров: лёгкий запрос; 401 (LLMAuthError) → ключ
+        невалиден, прочие ошибки считаем временными → True. Провайдеры с иной
+        семантикой (Ollama, MindType Cloud) переопределяют этот метод целиком,
+        остальные — только `_validation_request`.
+
         Returns:
             True если ключ валиден
         """
-        pass
+        try:
+            self._validation_request()
+            return True
+        except LLMAuthError:
+            return False
+        except LLMError:
+            return True
+
+    def _validation_request(self) -> None:
+        """Лёгкий запрос для проверки ключа. Переопределить в key-based провайдере."""
+        raise NotImplementedError
 
     def supports_reasoning(self, model: str) -> bool:
         """
@@ -324,6 +343,10 @@ class LLMProvider(ABC):
             "Content-Type": "application/json",
         }
 
+    # HTTP-коды, на которых имеет смысл повторить запрос (transient):
+    # 429 (rate limit), 5xx и Cloudflare 52x (провайдер/инфра временно недоступны).
+    _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504, 520, 522, 524})
+
     def _make_request(
         self,
         url: str,
@@ -331,6 +354,8 @@ class LLMProvider(ABC):
         data: Optional[Dict] = None,
         stream: bool = False,
         extra_headers: Optional[Dict[str, str]] = None,
+        retries: int = 0,
+        retry_backoff: float = 1.5,
     ) -> Any:
         """
         Выполнить HTTP запрос к API.
@@ -341,6 +366,8 @@ class LLMProvider(ABC):
             data: Данные для отправки (будут сериализованы в JSON)
             stream: Если True, возвращает response объект для стриминга
             extra_headers: Дополнительные заголовки
+            retries: Сколько раз повторить при transient-ошибке (429/5xx/52x/обрыв)
+            retry_backoff: Базовая задержка между повторами (сек), растёт линейно
 
         Returns:
             JSON ответ или response объект (если stream=True)
@@ -353,18 +380,42 @@ class LLMProvider(ABC):
             headers.update(extra_headers)
 
         req_data = json.dumps(data).encode("utf-8") if data else None
-        request = urllib.request.Request(url, data=req_data, headers=headers, method=method)
 
-        try:
-            response = urlopen_with_ssl(request, timeout=self.timeout)
-            if stream:
-                return response
-            return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8") if e.fp else ""
-            self._handle_http_error(e.code, error_body)
-        except urllib.error.URLError as e:
-            raise LLMConnectionError(f"Ошибка подключения к {self.PROVIDER_NAME}: {e.reason}")
+        attempt = 0
+        while True:
+            request = urllib.request.Request(url, data=req_data, headers=headers, method=method)
+            try:
+                response = urlopen_with_ssl(request, timeout=self.timeout)
+                if stream:
+                    return response
+                return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if attempt < retries and e.code in self._RETRYABLE_STATUS:
+                    time.sleep(retry_backoff * (attempt + 1))
+                    attempt += 1
+                    continue
+                error_body = e.read().decode("utf-8") if e.fp else ""
+                self._handle_http_error(e.code, error_body)
+                # Страховка: _handle_http_error по контракту всегда бросает. Если
+                # переопределение вернёт без raise — гарантированно выходим из while.
+                raise LLMError(f"Ошибка {self.PROVIDER_NAME} API ({e.code}): {error_body}")
+            except urllib.error.URLError as e:
+                # Ретраим только переходные сбои (таймаут connect/send-фазы). DNS (gaierror),
+                # отказ соединения и ошибки SSL-сертификата постоянны — повтор бесполезен.
+                if attempt < retries and isinstance(e.reason, TimeoutError):
+                    time.sleep(retry_backoff * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise LLMConnectionError(f"Ошибка подключения к {self.PROVIDER_NAME}: {e.reason}")
+            except TimeoutError as e:
+                # Таймаут чтения ответа (read-phase) приходит ГОЛЫМ TimeoutError, не обёрнутым
+                # в URLError → отдельная ветка (иначе ретраи STT не срабатывали бы и сырой
+                # TimeoutError утекал бы вместо LLMConnectionError).
+                if attempt < retries:
+                    time.sleep(retry_backoff * (attempt + 1))
+                    attempt += 1
+                    continue
+                raise LLMConnectionError(f"Таймаут запроса к {self.PROVIDER_NAME}: {e}")
 
     def _handle_http_error(self, status_code: int, body: str) -> None:
         """
