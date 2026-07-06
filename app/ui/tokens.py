@@ -62,46 +62,49 @@ COLORS: Dict[str, Dict[str, str]] = {
 # TYPOGRAPHY SYSTEM
 # =============================================================================
 
-# Font stack - ChicagoFLF для ретро-эстетики, fallback на системные
-FONT_FAMILY = '"ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif'
+# Font stack - чистый системный шрифт (полная кириллица, чёткий на любом DPI).
+# System-7 вид держится на хроме (бевели/чекбоксы/табы), а не на ретро-шрифте.
+FONT_FAMILY = '"Segoe UI", "Inter", "Arial", sans-serif'
 FONT_FAMILY_MONO = '"Consolas", "Courier New", "Monaco", monospace'
 
-# Type scale (ratio 1.25 - Major Third)
+# Type scale под Segoe UI: компактная база 13px, заголовок 22px, мелкое 12px.
+# Иерархия — через размер + bold/цвет. База дублируется в main.py app.setFont(13) —
+# держать синхронно (одно для дефолтного текста виджетов, другое для QSS-лейблов).
 TYPOGRAPHY: Dict[str, Dict[str, Any]] = {
     "display": {
-        "size": 24,
+        "size": 22,
         "weight": "bold",
         "line_height": 1.2,
     },
     "title": {
-        "size": 18,
+        "size": 14,
         "weight": "bold",
         "line_height": 1.3,
     },
     "subtitle": {
-        "size": 14,
+        "size": 13,
         "weight": "bold",
         "line_height": 1.4,
     },
     "body": {
-        "size": 12,
+        "size": 13,
         "weight": "normal",
-        "line_height": 1.5,
+        "line_height": 1.4,
     },
     "body_bold": {
-        "size": 12,
+        "size": 13,
         "weight": "bold",
-        "line_height": 1.5,
+        "line_height": 1.4,
     },
     "caption": {
-        "size": 11,
+        "size": 12,
         "weight": "normal",
         "line_height": 1.4,
     },
     "small": {
-        "size": 10,
+        "size": 12,
         "weight": "normal",
-        "line_height": 1.4,
+        "line_height": 1.3,
     },
 }
 
@@ -129,7 +132,7 @@ SPACING: Dict[str, int] = {
 BORDERS: Dict[str, str] = {
     "none": "none",
     "thin": "1px",
-    "default": "1.5px",
+    "default": "1px",   # System-7 = чёткие целочисленные линии (дробные 1.5px мылят/рендерятся неровно)
     "thick": "2px",
     "accent": "3px",
 }
@@ -146,14 +149,15 @@ BORDER_STYLES: Dict[str, str] = {
 # =============================================================================
 
 RADII: Dict[str, str] = {
+    # System 7 = прямоугольные элементы (острые углы). Всё кроме круглого radio — 0.
     "none": "0",
-    "sm": "4px",
-    "md": "6px",              # Standard button radius
-    "button": "6px",          # System 7 button radius
-    "lg": "8px",
-    "button_default": "8px",  # Primary/default button radius
-    "xl": "12px",
-    "full": "9999px",
+    "sm": "0",
+    "md": "0",
+    "button": "0",
+    "lg": "0",
+    "button_default": "0",
+    "xl": "0",
+    "full": "9999px",  # для круглых элементов (radio dot)
 }
 
 
@@ -165,14 +169,14 @@ SYSTEM7: Dict[str, Any] = {
     "button": {
         "min_width": 59,
         "min_height": 20,
-        "radius": 6,
+        "radius": 0,
         "padding_x": 16,
         "padding_y": 4,
     },
     "button_default": {
         "outer_border": 2,
         "inner_border": 3,
-        "radius": 8,
+        "radius": 0,
     },
     "checkbox": {
         "size": 12,

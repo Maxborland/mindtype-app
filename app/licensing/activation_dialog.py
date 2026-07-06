@@ -26,11 +26,12 @@ SUPPORT_EMAIL = "help@mindtype.space"
 
 from .license_manager import LicenseManager, LicenseStatus, LicenseInfo, ValidationResult
 from .key_validator import KeyValidator
+from ..ui.components import apply_system7_titlebar
 
-# B&W status icons
-STATUS_OK = "✓"
+# B&W status icons (ASCII: пиксельный Pixellari не содержит ✓/✗)
+STATUS_OK = "OK"
 STATUS_WARNING = "!"
-STATUS_ERROR = "✗"
+STATUS_ERROR = "X"
 
 
 class ActivationWorker(QThread):
@@ -79,6 +80,7 @@ class LicenseActivationDialog(QDialog):
         self._deactivation_worker = None
         self._setup_ui()
         self._update_status()
+        apply_system7_titlebar(self, self.windowTitle())
 
     def set_translate_func(self, func):
         """Установить функцию перевода."""
@@ -93,7 +95,6 @@ class LicenseActivationDialog(QDialog):
             QDialog {
                 background-color: #ffffff;
                 color: #000000;
-                font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
             }
             QLabel {
                 color: #000000;
@@ -144,34 +145,7 @@ class LicenseActivationDialog(QDialog):
                 background-color: #dddddd;
                 color: #808080;
             }
-            /* Rounded buttons - system.css style */
-            QPushButton {
-                background-color: #ffffff;
-                border: 1.5px solid #000000;
-                border-radius: 6px;
-                padding: 6px 16px;
-                min-height: 20px;
-            }
-            QPushButton:hover {
-                background-color: #f0f0f0;
-            }
-            QPushButton:pressed {
-                background-color: #000000;
-                color: #ffffff;
-            }
-            QPushButton:disabled {
-                background-color: #dddddd;
-                color: #808080;
-                border-color: #808080;
-            }
-            QPushButton#primary {
-                font-weight: bold;
-                border: 3px solid #000000;
-                border-radius: 8px;
-            }
-            QPushButton#danger {
-                font-weight: bold;
-            }
+            /* Кнопки наследуют центральный 3D-стиль из глобального QSS */
             QFrame#separator {
                 background-color: #000000;
                 max-height: 1px;
@@ -257,19 +231,7 @@ class LicenseActivationDialog(QDialog):
 
         # Кнопка покупки лицензии (Primary button style)
         self._buy_btn = QPushButton(self._t("buy_license_button"))
-        self._buy_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #000000;
-                color: #ffffff;
-                font-weight: bold;
-                border: 3px solid #000000;
-                border-radius: 8px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #333333;
-            }
-        """)
+        self._buy_btn.setObjectName("primaryButton")
         self._buy_btn.clicked.connect(self._on_buy_license)
         layout.addWidget(self._buy_btn)
 
@@ -284,13 +246,13 @@ class LicenseActivationDialog(QDialog):
         buttons_layout.addStretch()
 
         self._deactivate_btn = QPushButton(self._t("deactivate"))
-        self._deactivate_btn.setObjectName("danger")
+        self._deactivate_btn.setObjectName("dangerButton")
         self._deactivate_btn.clicked.connect(self._on_deactivate)
         self._deactivate_btn.setVisible(False)
         buttons_layout.addWidget(self._deactivate_btn)
 
         self._activate_btn = QPushButton(self._t("activate"))
-        self._activate_btn.setObjectName("primary")
+        self._activate_btn.setObjectName("primaryButton")
         self._activate_btn.setEnabled(False)
         self._activate_btn.clicked.connect(self._on_activate)
         buttons_layout.addWidget(self._activate_btn)
@@ -301,7 +263,6 @@ class LicenseActivationDialog(QDialog):
         support_layout = QHBoxLayout()
         support_layout.addStretch()
         self._support_btn = QPushButton(self._t("contact_support"))
-        self._support_btn.setStyleSheet("font-size: 10px;")
         self._support_btn.clicked.connect(self._on_contact_support)
         support_layout.addWidget(self._support_btn)
         support_layout.addStretch()
@@ -556,6 +517,7 @@ class TrialExpiredDialog(QDialog):
         self._t = translate_func or (lambda x: x)
         self._activation_worker = None
         self._setup_ui()
+        apply_system7_titlebar(self, self.windowTitle())
 
     def set_translate_func(self, func):
         """Установить функцию перевода."""
@@ -579,7 +541,6 @@ class TrialExpiredDialog(QDialog):
             QDialog {
                 background-color: #ffffff;
                 color: #000000;
-                font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
             }
             QLabel {
                 color: #000000;
@@ -611,32 +572,7 @@ class TrialExpiredDialog(QDialog):
                 background-color: #000000;
                 color: #ffffff;
             }
-            /* Rounded buttons - system.css style */
-            QPushButton {
-                background-color: #ffffff;
-                border: 1.5px solid #000000;
-                border-radius: 6px;
-                padding: 6px 16px;
-                min-height: 20px;
-            }
-            QPushButton:hover {
-                background-color: #f0f0f0;
-            }
-            QPushButton:pressed {
-                background-color: #000000;
-                color: #ffffff;
-            }
-            QPushButton#primary {
-                background-color: #ffffff;
-                color: #000000;
-                font-weight: bold;
-                border: 3px solid #000000;
-                border-radius: 8px;
-            }
-            QPushButton#primary:pressed {
-                background-color: #000000;
-                color: #ffffff;
-            }
+            /* Кнопки наследуют центральный 3D-стиль из глобального QSS */
             QProgressBar {
                 background-color: #ffffff;
                 border: 1.5px solid #000000;
@@ -666,7 +602,7 @@ class TrialExpiredDialog(QDialog):
 
         # Кнопка покупки
         self._buy_btn = QPushButton(self._t("buy_license_button"))
-        self._buy_btn.setObjectName("primary")
+        self._buy_btn.setObjectName("primaryButton")
         self._buy_btn.clicked.connect(self._on_buy_license)
         layout.addWidget(self._buy_btn)
 
@@ -701,25 +637,11 @@ class TrialExpiredDialog(QDialog):
         # Кнопка активации
         self._activate_btn = QPushButton(self._t("activate"))
         self._activate_btn.setEnabled(False)
-        self._activate_btn.setStyleSheet("""
-            color: #000000;
-            background-color: #ffffff;
-            border: 1.5px solid #000000;
-            border-radius: 6px;
-            padding: 6px 16px;
-        """)
         self._activate_btn.clicked.connect(self._on_activate)
         layout.addWidget(self._activate_btn)
 
         # Кнопка поддержки
         self._support_btn = QPushButton(self._t("contact_support"))
-        self._support_btn.setStyleSheet("""
-            font-size: 10px;
-            color: #000000;
-            background-color: #ffffff;
-            border: 1.5px solid #000000;
-            border-radius: 6px;
-        """)
         self._support_btn.clicked.connect(self._on_contact_support)
         layout.addWidget(self._support_btn)
 
@@ -839,16 +761,20 @@ class LicenseStatusWidget(QFrame):
 
     def _setup_ui(self):
         """Настроить UI."""
+        # Рамку скоупим на сам виджет по objectName — иначе QFrame{border}
+        # применяется и к дочерним QLabel (QLabel — подкласс QFrame) → строки в «коробочках».
+        self.setObjectName("licenseStatusBox")
         self.setStyleSheet("""
-            QFrame {
+            QFrame#licenseStatusBox {
                 background-color: #ffffff;
-                border: 2px solid #000000;
+                border: 1px solid #000000;
             }
-            QFrame:hover {
+            QFrame#licenseStatusBox:hover {
                 background-color: #dddddd;
             }
             QLabel {
                 background: transparent;
+                border: none;
             }
         """)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -857,9 +783,10 @@ class LicenseStatusWidget(QFrame):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
 
-        # Иконка статуса
+        # Иконка статуса (ширина под "[OK]"/"[!]"/"[X]" жирным — иначе обрезается)
         self._icon_label = QLabel()
-        self._icon_label.setFixedWidth(24)
+        self._icon_label.setMinimumWidth(34)
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._icon_label)
 
         # Текст статуса
@@ -871,7 +798,7 @@ class LicenseStatusWidget(QFrame):
         text_layout.addWidget(self._status_label)
 
         self._details_label = QLabel()
-        self._details_label.setStyleSheet("font-size: 11px;")
+        self._details_label.setStyleSheet("font-size: 12px;")
         text_layout.addWidget(self._details_label)
 
         layout.addLayout(text_layout, stretch=1)

@@ -65,8 +65,7 @@ QWizardPage {
 QWidget {
     background-color: #ffffff;
     color: #000000;
-    font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
-    font-size: 12px;
+    font-size: 14px;
 }
 
 QLabel {
@@ -74,11 +73,13 @@ QLabel {
     color: #000000;
 }
 
-/* Rounded buttons - system.css style */
+/* System 7 «приподнятые» 3D-кнопки (как в основном окне) */
 QPushButton {
     background-color: #ffffff;
-    border: 1.5px solid #000000;
-    border-radius: 6px;
+    border: 1px solid #000000;
+    border-bottom-width: 2px;
+    border-right-width: 2px;
+    border-radius: 0;
     padding: 6px 16px;
     color: #000000;
     min-height: 20px;
@@ -91,6 +92,9 @@ QPushButton:hover {
 QPushButton:pressed {
     background-color: #000000;
     color: #ffffff;
+    border: 1px solid #000000;
+    border-top-width: 2px;
+    border-left-width: 2px;
 }
 
 QPushButton:disabled {
@@ -234,12 +238,14 @@ QFrame {
 }
 """
 
-# Primary button - thick border, rounded (system.css style)
+# Primary button — System 7 3D-бевель (тяжелее) + bold, как центральный primaryButton
 PRIMARY_BUTTON_STYLE = """
 QPushButton {
     background-color: #ffffff;
-    border: 3px solid #000000;
-    border-radius: 8px;
+    border: 1px solid #000000;
+    border-bottom-width: 3px;
+    border-right-width: 3px;
+    border-radius: 0;
     font-weight: bold;
     padding: 8px 20px;
 }
@@ -249,6 +255,9 @@ QPushButton:hover {
 QPushButton:pressed {
     background-color: #000000;
     color: #ffffff;
+    border: 1px solid #000000;
+    border-top-width: 3px;
+    border-left-width: 3px;
 }
 QPushButton:disabled {
     background-color: #dddddd;
@@ -1381,6 +1390,8 @@ class SetupWizard(QWizard):
 
         self._setup_ui()
         self._setup_pages()
+        # NB: QWizard со стилем не переживает frameless-обёртку (контент пропадает —
+        # ограничение Qt), поэтому мастер остаётся с нативной рамкой. First-run only.
 
     def _setup_ui(self):
         self.setWindowTitle(self._t("setup_window_title"))

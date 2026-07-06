@@ -16,6 +16,7 @@ from .base import (
     LLMProvider,
     LLMModel,
     LLMError,
+    LLMAuthError,
     LLMConnectionError,
     ReasoningConfig,
     TokenCallback,
@@ -259,13 +260,5 @@ class OpenAIProvider(LLMProvider):
             raise LLMConnectionError(f"Ошибка подключения к OpenAI: {e.reason}")
         return ""
 
-    def validate_api_key(self) -> bool:
-        """Проверить валидность API ключа."""
-        try:
-            self._make_request(MODELS_ENDPOINT)
-            return True
-        except LLMAuthError:
-            return False
-        except LLMError:
-            # Другие ошибки могут быть временными
-            return True
+    def _validation_request(self) -> None:
+        self._make_request(MODELS_ENDPOINT)

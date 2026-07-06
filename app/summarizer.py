@@ -479,9 +479,11 @@ class Summarizer:
         provider_name = self.config.provider.upper()
         if progress_callback: progress_callback(f"Проверка {provider_name} API...", 50, 100)
 
-        # Проверяем наличие API ключа (не требуется для Ollama и MindType Cloud без ключа)
-        no_key_providers = ("ollama", "mindtype_cloud")
-        if self.config.provider not in no_key_providers and not self.config.api_key:
+        # Проверяем наличие API ключа (источник правды — реестр провайдеров)
+        from .llm import get_provider_descriptor
+        desc = get_provider_descriptor(self.config.provider)
+        needs_key = desc.needs_api_key if desc else True
+        if needs_key and not self.config.api_key:
             raise RuntimeError(f"API ключ для {provider_name} не задан")
 
         # Создаём и проверяем провайдер
