@@ -3928,6 +3928,15 @@ class MainWindow(QMainWindow):
         # Кастомные промпты перезаписывают промпты из пресета
         custom_prompts = {**preset_prompts, **custom_prompts_saved} if custom_prompts_saved else preset_prompts
 
+        # Отображаемое имя пресета — попадает в отчёт рядом с саммари
+        from .summary_presets import PRESETS as BUILTIN_PRESETS
+        if preset_id in user_presets and isinstance(user_presets.get(preset_id), dict):
+            preset_display_name = user_presets[preset_id].get("name", preset_id)
+        else:
+            preset_display_name = self._t(
+                BUILTIN_PRESETS.get(preset_id, {}).get("name_key", preset_id)
+            )
+
         # Определяем провайдер суммаризации из настроек
         llm_provider = cfg.get("llm_provider", "openrouter")
         summary_api_key = ""
@@ -3974,6 +3983,7 @@ class MainWindow(QMainWindow):
                 enable=self.enable_summary_checkbox.isChecked(),
                 enable_thinking=True,  # Всегда включен
                 custom_prompts=custom_prompts,
+                preset_name=preset_display_name,
                 provider=llm_provider,
                 api_key=summary_api_key,
                 model=summary_model,

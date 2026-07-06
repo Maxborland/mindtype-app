@@ -129,6 +129,18 @@ class TextProcessingPipeline:
             else:
                 try:
                     diarization_result = self._diarizer.diarize(audio_path)
+
+                    # Сливаем «мелких» спикеров (ошибки кластеризации) сразу,
+                    # чтобы разметка в тексте и статистика совпадали.
+                    diarization_result = self._diarizer.merge_short_speakers(diarization_result)
+
+                    # Дружелюбные имена по умолчанию: «Спикер 1» вместо SPEAKER_00.
+                    from .diarization import default_speaker_names
+                    if not diarization_result.speaker_names:
+                        diarization_result.speaker_names = default_speaker_names(
+                            diarization_result.get_unique_speakers(), language
+                        )
+
                     stats["steps_applied"].append("diarization")
                     stats["num_speakers"] = diarization_result.num_speakers
 

@@ -92,6 +92,10 @@ class TranscriptionResult:
     # Статистика спикеров (опционально)
     speaker_stats: Optional[List[SpeakerStats]] = None
     num_speakers: int = 0
+    # Отображаемые имена спикеров: SPEAKER_00 -> «Спикер 1»
+    speaker_names: Dict[str, str] = field(default_factory=dict)
+    # Имя пресета промптов, которым делалось саммари (для отчёта)
+    summary_preset_name: Optional[str] = None
 
     @property
     def full_text(self) -> str:
@@ -186,6 +190,7 @@ class SummaryOptions:
     enable: bool = False
     enable_thinking: bool = True
     custom_prompts: Optional[Dict[str, str]] = None
+    preset_name: str = ""  # Отображаемое имя пресета (для отчёта)
     provider: str = "local"
     api_key: str = ""
     model: str = ""
