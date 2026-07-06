@@ -11,7 +11,7 @@ onnxruntime>=1.17.0; sys_platform != 'win32'
 optimum[onnxruntime]>=1.17.0
 
 # Transformers для Whisper ONNX
-transformers>=4.37.0
+transformers>=5.6.2
 librosa>=0.10.0
 soundfile>=0.12.0
 
