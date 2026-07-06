@@ -44,6 +44,6 @@ openwakeword>=0.6.0      # Wake word detection
 edge-tts>=6.1.0          # Microsoft TTS
 pydub>=0.25.0            # Декодирование MP3 для TTS (опционально, fallback на ffmpeg)
 num2words>=0.5.13        # Числа в слова
-dateparser>=1.2.0        # Парсинг дат
+dateparser>=1.4.0        # Парсинг дат
 transliterate>=1.10.2    # Транслитерация
 # tflite-runtime - опционально, openWakeWord может работать с ONNX
