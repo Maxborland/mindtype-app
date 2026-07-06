@@ -17,6 +17,7 @@ from .base import (
     LLMProvider,
     LLMModel,
     LLMError,
+    LLMAuthError,
     LLMConnectionError,
     ReasoningConfig,
     TokenCallback,
@@ -284,19 +285,11 @@ class AnthropicProvider(LLMProvider):
 
         return "".join(full_response)
 
-    def validate_api_key(self) -> bool:
-        """Проверить валидность API ключа."""
-        try:
-            # Делаем минимальный запрос для проверки
-            data = {
-                "model": "claude-3-5-haiku-latest",
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1,
-            }
-            self._make_request(MESSAGES_ENDPOINT, method="POST", data=data)
-            return True
-        except LLMAuthError:
-            return False
-        except LLMError:
-            # Другие ошибки могут быть временными
-            return True
+    def _validation_request(self) -> None:
+        # Минимальный запрос для проверки ключа
+        data = {
+            "model": "claude-3-5-haiku-latest",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+        }
+        self._make_request(MESSAGES_ENDPOINT, method="POST", data=data)

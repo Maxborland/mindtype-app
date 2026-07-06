@@ -18,12 +18,16 @@ from PyQt6.QtWidgets import (
     QCheckBox,
 )
 
+from .styles import STYLESHEET
+from .components import apply_system7_titlebar
+
 
 # system.css стиль (Apple System OS 1984-1991)
+# Только небольшие дополнения; кнопки/чекбоксы/шрифт берутся из центрального QSS
+# (3D-бевели System-7, Segoe) — без локальных скруглённых кнопок и ChicagoFLF.
 SYSTEM7_STYLE = """
 QDialog {
     background-color: #ffffff;
-    font-family: "ChicagoFLF", "Chicago", "Geneva", "Segoe UI", "Arial", sans-serif;
 }
 QLabel {
     color: #000000;
@@ -32,55 +36,6 @@ QLabel {
 QFrame#content {
     background-color: #ffffff;
     border: 1.5px solid #000000;
-}
-/* Rounded buttons - system.css style */
-QPushButton {
-    background-color: #ffffff;
-    color: #000000;
-    border: 1.5px solid #000000;
-    border-radius: 6px;
-    padding: 4px 16px;
-    min-height: 20px;
-    font-size: 12px;
-}
-QPushButton:hover {
-    background-color: #f0f0f0;
-}
-QPushButton:pressed {
-    background-color: #000000;
-    color: #ffffff;
-}
-/* Primary button - thick border */
-QPushButton#primary {
-    background-color: #ffffff;
-    color: #000000;
-    border: 3px solid #000000;
-    border-radius: 8px;
-    font-weight: bold;
-}
-QPushButton#primary:hover {
-    background-color: #f0f0f0;
-}
-QPushButton#primary:pressed {
-    background-color: #000000;
-    color: #ffffff;
-}
-QCheckBox {
-    color: #000000;
-    font-size: 11px;
-    spacing: 6px;
-}
-QCheckBox::indicator {
-    width: 12px;
-    height: 12px;
-    border: 1.5px solid #000000;
-    background-color: #ffffff;
-}
-QCheckBox::indicator:hover {
-    background-color: #f0f0f0;
-}
-QCheckBox::indicator:checked {
-    background-color: #000000;
 }
 """
 
@@ -106,11 +61,14 @@ class CrashReportDialog(QDialog):
         self.support_email = support_email
 
         self.setWindowTitle("MindType")
-        self.setFixedSize(480, 320)
+        self.setFixedSize(480, 348)  # +28 под полосатый title bar
         self.setModal(True)
-        self.setStyleSheet(SYSTEM7_STYLE)
+        # Беспарентный top-level диалог не наследует STYLESHEET главного окна —
+        # применяем центральный QSS (3D-кнопки/чекбоксы System-7) + локальные дополнения.
+        self.setStyleSheet(STYLESHEET + SYSTEM7_STYLE)
 
         self._build_ui()
+        apply_system7_titlebar(self, self.windowTitle())
 
     def _build_ui(self) -> None:
         """Построить UI в стиле System 7."""
@@ -223,7 +181,7 @@ class CrashReportDialog(QDialog):
         buttons_layout.addStretch()
 
         self.close_btn = QPushButton("Close")
-        self.close_btn.setObjectName("primary")
+        self.close_btn.setObjectName("primaryButton")
         self.close_btn.clicked.connect(self._send_and_close)
         buttons_layout.addWidget(self.close_btn)
 

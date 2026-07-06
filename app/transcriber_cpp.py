@@ -662,21 +662,16 @@ class WhisperCppTranscriber:
 
     def _convert_to_wav(self, audio_path: Path) -> Path:
         """Конвертировать аудио в WAV 16kHz mono (требуется для whisper.cpp)."""
-        import soundfile as sf
-        import librosa
         import tempfile
+        from .audio_io import to_wav_16k_mono
 
         try:
-            # Загружаем аудио (любой формат, который поддерживает librosa/soundfile)
-            data, sr = librosa.load(str(audio_path), sr=16000, mono=True)
-
-            # Создаем временный файл
+            # Создаём временный файл и пишем туда 16k mono 16-bit PCM (общий загрузчик)
             fd, temp_path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
             temp_path = Path(temp_path)
 
-            # Сохраняем как 16-bit PCM WAV
-            sf.write(str(temp_path), data, 16000, subtype='PCM_16')
+            to_wav_16k_mono(audio_path, temp_path)
 
             logger.info(f"Аудио конвертировано: {audio_path.name} -> {temp_path.name}")
             return temp_path

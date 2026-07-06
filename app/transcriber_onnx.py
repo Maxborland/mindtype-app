@@ -73,9 +73,9 @@ class WhisperOnnxTranscriber:
         progress_callback: Optional[Any] = None,
     ) -> Tuple[str, Optional[str], float]:
         """Синхронная транскрипция."""
-        import librosa
+        from .audio_io import load_16k_mono
 
-        audio, _ = librosa.load(str(audio_path), sr=16000)
+        audio, _ = load_16k_mono(audio_path)
         input_features = self.processor(audio, sampling_rate=16000, return_tensors="pt").input_features
 
         # Генерация текста

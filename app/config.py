@@ -138,7 +138,9 @@ def _default_config() -> Dict[str, Any]:
         "llm_provider": "openrouter",        # openai, anthropic, gemini, ollama, openrouter
         "llm_reasoning_enabled": True,       # Включить reasoning mode
         "llm_reasoning_effort": "medium",    # low / medium / high
-        "summary_preset": "pm",              # Пресет промптов: pm, student, generic
+        "summary_preset": "pm",              # Пресет промптов: pm, student, generic, call или user-<id>
+        "user_presets": {},                  # Пользовательские пресеты: {id: {name, prompts{4 ключа}}}
+        "report_format": "both",             # Формат отчёта: html, pdf, both
         # OpenAI
         "openai_api_key": "",
         "openai_model": "gpt-4o-mini",
@@ -154,6 +156,9 @@ def _default_config() -> Dict[str, Any]:
         # OpenRouter (private-only)
         "openrouter_api_key": "",
         "openrouter_model": "",
+        # OpenRouter транскрипция (STT-эндпоинт, альтернатива whisper.cpp)
+        "openrouter_transcribe_model": "",       # STT-модель (openai/whisper-1, ...)
+        "openrouter_transcribe_chunk_sec": 30,   # размер чанка аудио, сек
         # Legacy aliases for backward compatibility
         "openrouter_reasoning": True,
         "openrouter_reasoning_effort": "medium",
