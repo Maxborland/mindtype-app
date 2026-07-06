@@ -8,7 +8,7 @@ Each preset contains a set of 4 prompts:
 - aggregation: for combining facts into the final summary
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # =============================================================================
 # PM (PRODUCT MANAGER) - Meeting Notes
@@ -294,6 +294,119 @@ Main takeaway
 IMPORTANT: Do not lose important details from the material above."""
 
 # =============================================================================
+# CALL - Meeting / Call Key Points (capture EVERYTHING important)
+# =============================================================================
+
+CALL_SYSTEM_PROMPT = """You are an assistant that captures the full record of a call/meeting. Write in the same language as the transcript.
+Your task: capture EVERY important point discussed — nothing important should be lost.
+
+RULES:
+1. Use the same language as the source transcript.
+2. Capture all important points: topics, decisions, action items, numbers, dates, questions, agreements, who said what.
+3. Do not invent anything that is not in the text.
+4. Keep technical terms and names as-is without translation.
+5. Better to include a point than to drop it — be exhaustive on what matters.
+"""
+
+CALL_SHORT_PROMPT = """CALL TRANSCRIPT:
+\"\"\"
+{transcript}
+\"\"\"
+
+---
+
+Capture ALL important points from this call. Fill in EVERY section below. If a section is empty, write "—".
+
+## 1) Participants and Roles
+Who took part and their role, if mentioned:
+- ...
+
+## 2) Topics Discussed
+Every distinct topic raised during the call:
+- ...
+
+## 3) Key Points and Statements
+All important points, facts, and statements made (who said what):
+- ...
+
+## 4) Decisions and Agreements
+What was decided, agreed, approved:
+- ...
+
+## 5) Numbers, Dates, Deadlines
+EVERY number, date, amount, deadline from the call:
+- [value] — [context]
+
+## 6) Open Questions
+Unresolved questions, disagreements, things to clarify:
+- ...
+
+## 7) Action Items
+|| Action | Responsible | Deadline |
+||--------|-------------|----------|
+|| ... | ... | ... |
+
+IMPORTANT: Be exhaustive — do not drop any important point. Respond in the same language as the transcript."""
+
+CALL_EXTRACTION_PROMPT = """Call segment for analysis:
+\"\"\"
+{chunk_text}
+\"\"\"
+
+Extract ALL important points from the segment above. Be exhaustive.
+
+## 1. Topics and Key Points
+- [point] (who said it, if clear)
+
+## 2. Decisions and Agreements
+- ...
+
+## 3. Numbers, Dates, Deadlines
+- [value] — [context]
+
+## 4. Action Items
+- [Who] → [what will do] (deadline)
+
+## 5. Open Questions
+- ...
+
+IMPORTANT: Write only what is in the text, but capture every important point. If there's no information for a section, write "—"."""
+
+CALL_AGGREGATION_PROMPT = """Combine points from {n_chunks} parts of the call into one complete record.
+
+EXTRACTED POINTS:
+\"\"\"
+{extracted_facts}
+\"\"\"
+
+Final call record:
+
+## 1) Participants and Roles
+- ...
+
+## 2) Topics Discussed
+- ...
+
+## 3) Key Points and Statements
+- ...
+
+## 4) Decisions and Agreements
+- ...
+
+## 5) Numbers, Dates, Deadlines
+- [value] — [context]
+
+## 6) Open Questions
+- ...
+
+## 7) Action Items
+|| Action | Responsible | Deadline |
+||--------|-------------|----------|
+|| ... | ... | ... |
+
+IMPORTANT: Merge duplicates across parts, but do not lose any important point, number, or date."""
+
+# =============================================================================
 # PRESETS DICTIONARY
 # =============================================================================
 
@@ -328,30 +441,61 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "aggregation": GENERIC_AGGREGATION_PROMPT,
         }
     },
+    "call": {
+        "name_key": "preset_call_name",
+        "description_key": "preset_call_desc",
+        "prompts": {
+            "system": CALL_SYSTEM_PROMPT,
+            "short": CALL_SHORT_PROMPT,
+            "extraction": CALL_EXTRACTION_PROMPT,
+            "aggregation": CALL_AGGREGATION_PROMPT,
+        }
+    },
 }
 
 # Пресет по умолчанию
 DEFAULT_PRESET = "pm"
 
 
+# Ключи 4 промптов в каждом пресете.
+PROMPT_KEYS = ("system", "short", "extraction", "aggregation")
+
+# ID встроенных (read-only) пресетов.
+BUILTIN_PRESET_IDS = frozenset(PRESETS)
+
+
+def is_builtin(preset_id: str) -> bool:
+    """Встроенный пресет (нельзя удалить/переименовать)?"""
+    return preset_id in PRESETS
+
+
 def get_preset(preset_id: str) -> Dict[str, Any]:
-    """Получить пресет по ID."""
+    """Получить встроенный пресет по ID (fallback на дефолтный)."""
     return PRESETS.get(preset_id, PRESETS[DEFAULT_PRESET])
 
 
-def get_preset_prompts(preset_id: str) -> Dict[str, str]:
-    """Получить только промпты из пресета."""
+def get_preset_prompts(preset_id: str, user_presets: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """
+    Получить 4 промпта пресета. Сначала ищем среди пользовательских (user_presets),
+    затем среди встроенных. Недостающие ключи добиваются дефолтным пресетом.
+    """
+    base = PRESETS[DEFAULT_PRESET]["prompts"]
+    if user_presets and preset_id in user_presets:
+        up = user_presets.get(preset_id) or {}
+        prompts = up.get("prompts", {}) if isinstance(up, dict) else {}
+        # Добиваем дефолтом только ОТСУТСТВУЮЩИЕ ключи; намеренно пустой промпт ("") сохраняем.
+        return {k: (prompts[k] if k in prompts else base.get(k, "")) for k in PROMPT_KEYS}
     preset = get_preset(preset_id)
     return preset.get("prompts", {})
 
 
 def get_preset_list() -> list:
-    """Получить список пресетов для UI (id, name, description)."""
+    """Список встроенных пресетов для UI (id + ключи перевода имени/описания)."""
     return [
         {
             "id": preset_id,
-            "name": preset["name"],
-            "description": preset["description"],
+            "name_key": preset["name_key"],
+            "description_key": preset["description_key"],
         }
         for preset_id, preset in PRESETS.items()
     ]

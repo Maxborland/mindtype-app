@@ -119,7 +119,7 @@ class CreditsBalanceWidget(QWidget):
                 font-size: 14px;
                 font-weight: bold;
                 border: 1.5px solid #000000;
-                border-radius: 4px;
+                border-radius: 0;
                 background-color: #ffffff;
                 padding: 0;
             }
@@ -143,7 +143,7 @@ class CreditsBalanceWidget(QWidget):
                 font-size: 11px;
                 font-weight: bold;
                 border: 1.5px solid #000000;
-                border-radius: 4px;
+                border-radius: 0;
                 background-color: #ffffff;
                 padding: 0;
             }
@@ -241,6 +241,8 @@ class CreditsHistoryDialog(QDialog):
         self._t = translate_func or (lambda x: x)
         self._history = history
         self._build_ui()
+        from .components import apply_system7_titlebar
+        apply_system7_titlebar(self, self.windowTitle())
 
     def _build_ui(self):
         """Построить UI диалога."""
@@ -332,31 +334,11 @@ class CreditsHistoryDialog(QDialog):
         btn_layout.addStretch()
 
         buy_btn = QPushButton(self._t("buy_credits"))
-        buy_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 12px;
-                font-weight: bold;
-                border: 2px solid #000000;
-                padding: 6px 16px;
-                background-color: #ffffff;
-            }
-            QPushButton:hover { background-color: #f0f0f0; }
-            QPushButton:pressed { background-color: #000000; color: #ffffff; }
-        """)
+        buy_btn.setObjectName("primaryButton")  # центральный 3D-стиль
         buy_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BUY_CREDITS_URL)))
         btn_layout.addWidget(buy_btn)
 
-        close_btn = QPushButton("OK")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 12px;
-                border: 1.5px solid #000000;
-                padding: 6px 16px;
-                background-color: #ffffff;
-            }
-            QPushButton:hover { background-color: #f0f0f0; }
-            QPushButton:pressed { background-color: #000000; color: #ffffff; }
-        """)
+        close_btn = QPushButton("OK")  # центральный 3D-стиль (дефолтная кнопка)
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
 

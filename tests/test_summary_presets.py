@@ -6,6 +6,9 @@ import pytest
 from app.summary_presets import (
     PRESETS,
     DEFAULT_PRESET,
+    PROMPT_KEYS,
+    BUILTIN_PRESET_IDS,
+    is_builtin,
     get_preset,
     get_preset_prompts,
     get_preset_list,
@@ -23,22 +26,23 @@ class TestPresetsStructure:
         assert "pm" in PRESETS
         assert "student" in PRESETS
         assert "generic" in PRESETS
-        assert len(PRESETS) == 3
+        assert "call" in PRESETS
+        assert len(PRESETS) == 4
 
     def test_default_preset_exists(self):
         """Дефолтный пресет должен существовать."""
         assert DEFAULT_PRESET in PRESETS
 
     def test_preset_structure(self):
-        """Каждый пресет должен содержать name, description, prompts."""
+        """Каждый пресет должен содержать name_key, description_key, prompts."""
         for preset_id, preset in PRESETS.items():
-            assert "name" in preset, f"Пресет {preset_id} не содержит name"
-            assert "description" in preset, f"Пресет {preset_id} не содержит description"
+            assert "name_key" in preset, f"Пресет {preset_id} не содержит name_key"
+            assert "description_key" in preset, f"Пресет {preset_id} не содержит description_key"
             assert "prompts" in preset, f"Пресет {preset_id} не содержит prompts"
-            
-            # Проверяем что name и description - непустые строки
-            assert isinstance(preset["name"], str) and len(preset["name"]) > 0
-            assert isinstance(preset["description"], str) and len(preset["description"]) > 0
+
+            # name_key/description_key — непустые строки (ключи перевода)
+            assert isinstance(preset["name_key"], str) and len(preset["name_key"]) > 0
+            assert isinstance(preset["description_key"], str) and len(preset["description_key"]) > 0
 
     def test_prompts_structure(self):
         """Каждый пресет должен содержать все 4 промпта."""
@@ -55,11 +59,11 @@ class TestPresetsStructure:
 class TestPromptsContent:
     """Тесты содержимого промптов."""
 
-    def test_prompts_contain_russian_instructions(self):
-        """Все системные промпты должны содержать инструкцию про русский язык."""
-        assert "русском" in PM_SYSTEM_PROMPT.lower() or "русский" in PM_SYSTEM_PROMPT.lower()
-        assert "русском" in STUDENT_SYSTEM_PROMPT.lower() or "русский" in STUDENT_SYSTEM_PROMPT.lower()
-        assert "русском" in GENERIC_SYSTEM_PROMPT.lower() or "русский" in GENERIC_SYSTEM_PROMPT.lower()
+    def test_prompts_contain_language_instruction(self):
+        """Все системные промпты должны инструктировать отвечать на языке транскрипта."""
+        assert "same language as the transcript" in PM_SYSTEM_PROMPT.lower()
+        assert "same language as the transcript" in STUDENT_SYSTEM_PROMPT.lower()
+        assert "same language as the transcript" in GENERIC_SYSTEM_PROMPT.lower()
 
     def test_short_prompts_have_transcript_placeholder(self):
         """Short промпты должны содержать placeholder {transcript}."""
@@ -82,35 +86,30 @@ class TestPromptsContent:
 
     def test_pm_preset_has_pm_specific_content(self):
         """PM пресет должен содержать PM-специфичные разделы."""
-        pm_short = PRESETS["pm"]["prompts"]["short"]
-        assert "заказчик" in pm_short.lower() or "исполнител" in pm_short.lower()
-        assert "риски" in pm_short.lower() or "вопрос" in pm_short.lower()
+        pm_short = PRESETS["pm"]["prompts"]["short"].lower()
+        assert "client" in pm_short or "contractor" in pm_short
+        assert "risk" in pm_short or "question" in pm_short
 
     def test_student_preset_has_student_specific_content(self):
         """Student пресет должен содержать учебные разделы."""
-        student_short = PRESETS["student"]["prompts"]["short"]
-        assert "лекци" in student_short.lower()
-        assert "экзамен" in student_short.lower() or "определени" in student_short.lower()
+        student_short = PRESETS["student"]["prompts"]["short"].lower()
+        assert "lecture" in student_short
+        assert "exam" in student_short or "definition" in student_short
 
     def test_generic_preset_has_generic_content(self):
         """Generic пресет должен быть универсальным."""
-        generic_short = PRESETS["generic"]["prompts"]["short"]
-        assert "видео" in generic_short.lower() or "саммари" in generic_short.lower()
+        generic_short = PRESETS["generic"]["prompts"]["short"].lower()
+        assert "video" in generic_short or "summary" in generic_short
 
 
 class TestGetPreset:
     """Тесты функции get_preset."""
 
     def test_get_existing_preset(self):
-        """Получение существующего пресета."""
-        preset = get_preset("pm")
-        assert preset["name"] == "PM-ассистент"
-        
-        preset = get_preset("student")
-        assert preset["name"] == "Студент"
-        
-        preset = get_preset("generic")
-        assert preset["name"] == "Общее видео"
+        """Получение существующего пресета (имя — через ключ перевода)."""
+        assert get_preset("pm")["name_key"] == "preset_pm_name"
+        assert get_preset("student")["name_key"] == "preset_student_name"
+        assert get_preset("generic")["name_key"] == "preset_generic_name"
 
     def test_get_nonexistent_preset_returns_default(self):
         """Несуществующий пресет должен вернуть дефолтный."""
@@ -160,15 +159,15 @@ class TestGetPresetList:
         """Функция должна возвращать список."""
         result = get_preset_list()
         assert isinstance(result, list)
-        assert len(result) == 3
+        assert len(result) == 4
 
     def test_list_item_structure(self):
-        """Каждый элемент списка должен содержать id, name, description."""
+        """Каждый элемент списка должен содержать id, name_key, description_key."""
         result = get_preset_list()
         for item in result:
             assert "id" in item
-            assert "name" in item
-            assert "description" in item
+            assert "name_key" in item
+            assert "description_key" in item
             # Не должно быть prompts
             assert "prompts" not in item
 
@@ -215,13 +214,46 @@ class TestPresetIntegration:
         """Тест объединения пресета с кастомными промптами."""
         preset_prompts = get_preset_prompts("pm")
         custom_prompts = {"system": "Кастомный системный промпт"}
-        
+
         # Симулируем объединение как в коде
         merged = {**preset_prompts, **custom_prompts}
-        
+
         # Кастомный должен перезаписать
         assert merged["system"] == "Кастомный системный промпт"
         # Остальные из пресета
         assert merged["short"] == preset_prompts["short"]
         assert merged["extraction"] == preset_prompts["extraction"]
         assert merged["aggregation"] == preset_prompts["aggregation"]
+
+
+class TestUserPresets:
+    """Тесты пользовательских пресетов (CRUD-хранилище)."""
+
+    def test_is_builtin(self):
+        assert is_builtin("pm")
+        assert is_builtin("student")
+        assert not is_builtin("user-1")
+        assert set(BUILTIN_PRESET_IDS) == {"pm", "student", "generic", "call"}
+
+    def test_user_preset_prompts_returned(self):
+        """get_preset_prompts отдаёт промпты пользовательского пресета."""
+        user_presets = {
+            "user-1": {"name": "Мой", "prompts": {k: f"X-{k}" for k in PROMPT_KEYS}}
+        }
+        prompts = get_preset_prompts("user-1", user_presets)
+        assert prompts["system"] == "X-system"
+        assert prompts["aggregation"] == "X-aggregation"
+
+    def test_user_preset_missing_keys_filled_from_default(self):
+        """Недостающие ключи user-пресета добиваются дефолтным пресетом."""
+        user_presets = {"user-2": {"name": "Частичный", "prompts": {"system": "только система"}}}
+        prompts = get_preset_prompts("user-2", user_presets)
+        assert prompts["system"] == "только система"
+        # остальные ключи присутствуют и непустые (из дефолтного pm)
+        for k in PROMPT_KEYS:
+            assert prompts.get(k)
+
+    def test_unknown_id_falls_back_to_builtin_default(self):
+        """ID не среди user и не среди builtin → дефолтный встроенный."""
+        prompts = get_preset_prompts("nope", {"user-1": {"prompts": {}}})
+        assert prompts == get_preset_prompts(DEFAULT_PRESET)

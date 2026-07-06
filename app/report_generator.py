@@ -13,504 +13,202 @@ from typing import Optional
 from .file_transcriber import TranscriptionResult, TranscriptionSegment
 
 
-# HTML шаблон в стиле Classic Mac OS System 7
+# HTML шаблон — чистый System 7 (Segoe, плоский чёрный заголовок, острые рамки).
+# Вёрстка на ТАБЛИЦАХ (без flexbox/градиентов) — один шаблон корректно
+# рендерится и в браузере, и через QTextDocument в PDF.
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="{lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title}</title>
-    <!-- MathJax for LaTeX support -->
+    <!-- MathJax for LaTeX support (только браузер; в PDF игнорируется) -->
     <script>
         MathJax = {{
             tex: {{
                 inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
                 displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
             }},
-            svg: {{
-                fontCache: 'global'
-            }}
+            svg: {{ fontCache: 'global' }}
         }};
     </script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
     <style>
-        /* Classic Mac OS System 7 Style */
-        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
-
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-
         body {{
-            font-family: "Chicago", "Geneva", "VT323", "Courier New", monospace;
-            font-size: 14px;
+            font-family: "Segoe UI", "Inter", Arial, sans-serif;
+            font-size: 13px;
             line-height: 1.5;
-            background-color: #c0c0c0;
+            background-color: #ededed;
             color: #000000;
-            padding: 20px;
+            padding: 24px;
         }}
-
-        /* Главное окно */
         .window {{
             background-color: #ffffff;
             border: 2px solid #000000;
-            max-width: 900px;
+            max-width: 880px;
             margin: 0 auto;
-            box-shadow: 4px 4px 0 #808080;
         }}
-
-        /* Заголовок окна */
-        .window-header {{
-            background: linear-gradient(to right, #000000 0%, #808080 50%, #000000 100%);
-            padding: 4px 8px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }}
-
-        .window-title {{
+        .titlebar {{
+            background-color: #000000;
             color: #ffffff;
             font-weight: bold;
             font-size: 13px;
-            text-shadow: 1px 1px 0 #000000;
+            padding: 6px 10px;
         }}
+        .content {{ padding: 18px; }}
 
-        .window-buttons {{
-            display: flex;
-            gap: 4px;
-        }}
-
-        .window-btn {{
-            width: 12px;
-            height: 12px;
-            border: 1px solid #000000;
-            background: #ffffff;
-        }}
-
-        /* Контент */
-        .content {{
-            padding: 16px;
-        }}
-
-        /* Информационная панель */
-        .info-panel {{
-            background-color: #ffffff;
-            border: 1.5px solid #000000;
-            padding: 12px;
-            margin-bottom: 16px;
-        }}
-
-        .info-row {{
-            display: flex;
-            margin-bottom: 6px;
-        }}
-
-        .info-label {{
-            font-weight: bold;
-            min-width: 140px;
-            color: #000000;
-        }}
-
-        .info-value {{
-            color: #000000;
-        }}
-
-        /* Заголовок секции */
-        .section-title {{
-            font-weight: bold;
+        h2.section {{
             font-size: 14px;
-            padding: 8px 0;
-            margin-top: 16px;
+            font-weight: bold;
+            margin: 22px 0 10px 0;
+            padding-bottom: 4px;
             border-bottom: 2px solid #000000;
-            margin-bottom: 12px;
+        }}
+        .badge {{
+            background-color: #000000;
+            color: #ffffff;
+            font-size: 10px;
+            font-weight: bold;
+            padding: 1px 6px;
+            margin-left: 6px;
         }}
 
-        /* Полный текст */
-        .full-text {{
-            background-color: #ffffff;
-            border: 1.5px solid #000000;
-            padding: 16px;
-            margin-bottom: 16px;
-            line-height: 1.8;
+        table.info {{ border-collapse: collapse; margin-bottom: 4px; }}
+        table.info td {{ padding: 3px 6px; vertical-align: top; }}
+        table.info td.k {{ font-weight: bold; width: 150px; }}
+
+        table.stats {{
+            width: 100%;
+            border: 1px solid #000000;
+            border-collapse: collapse;
+            margin: 12px 0 4px 0;
+        }}
+        table.stats td {{
+            text-align: center;
+            padding: 10px 6px;
+            border-right: 1px solid #d0d0d0;
+        }}
+        .stat-value {{ font-size: 18px; font-weight: bold; }}
+        .stat-label {{ font-size: 11px; color: #666666; }}
+
+        .fulltext {{
+            border: 1px solid #000000;
+            padding: 14px;
+            line-height: 1.7;
             text-align: justify;
         }}
 
-        /* Сегменты транскрипции */
-        .segments {{
-            background-color: #ffffff;
-            border: 1.5px solid #000000;
-        }}
-
-        .segment {{
-            display: flex;
-            border-bottom: 1px solid #c0c0c0;
-            transition: background-color 0.1s;
-        }}
-
-        .segment:last-child {{
-            border-bottom: none;
-        }}
-
-        .segment:hover {{
-            background-color: #e8e8e8;
-        }}
-
-        .segment-time {{
-            min-width: 100px;
-            padding: 8px 12px;
+        table.segs {{ width: 100%; border: 1px solid #000000; border-collapse: collapse; }}
+        table.segs td.t {{
+            width: 130px;
             font-weight: bold;
-            background-color: #f0f0f0;
-            border-right: 1px solid #c0c0c0;
-            font-family: "Courier New", monospace;
+            background-color: #f2f2f2;
+            border-right: 1px solid #d0d0d0;
+            border-bottom: 1px solid #ececec;
+            padding: 6px 10px;
             font-size: 12px;
+            white-space: nowrap;
+            vertical-align: top;
         }}
+        table.segs td.x {{ padding: 6px 10px; border-bottom: 1px solid #ececec; }}
 
-        .segment-text {{
-            padding: 8px 12px;
-            flex: 1;
-        }}
-
-        /* Футер */
-        .footer {{
-            text-align: center;
-            padding: 16px;
-            border-top: 1px solid #c0c0c0;
-            font-size: 11px;
-            color: #808080;
-        }}
-
-        .footer a {{
-            color: #000000;
-            text-decoration: none;
-        }}
-
-        .footer a:hover {{
-            text-decoration: underline;
-        }}
-
-        /* Логотип MindType */
-        .logo {{
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            margin-bottom: 8px;
-        }}
-
-        .logo-icon {{
-            width: 24px;
-            height: 24px;
-            border: 2px solid #000000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-        }}
-
-        .logo-text {{
-            font-weight: bold;
-            font-size: 16px;
-        }}
-
-        /* Статистика */
-        .stats {{
-            display: flex;
-            justify-content: space-around;
-            padding: 12px;
-            background-color: #f0f0f0;
-            border: 1px solid #000000;
-            margin-bottom: 16px;
-        }}
-
-        .stat-item {{
-            text-align: center;
-        }}
-
-        .stat-value {{
-            font-size: 20px;
-            font-weight: bold;
-        }}
-
-        .stat-label {{
-            font-size: 11px;
-            color: #808080;
-        }}
-
-        /* Саммари */
         .summary {{
-            background-color: #fffff0;
             border: 2px solid #000000;
-            padding: 16px;
-            margin-bottom: 16px;
+            background-color: #fcfcf5;
+            padding: 14px;
         }}
+        .summary h3 {{ font-size: 13px; font-weight: bold; margin: 10px 0 5px 0; }}
+        .summary ul {{ margin: 4px 0 8px 20px; }}
+        .summary li {{ margin-bottom: 4px; }}
+        .summary table {{ width: 100%; border-collapse: collapse; margin: 6px 0; }}
+        .summary th, .summary td {{ border: 1px solid #000000; padding: 5px 8px; text-align: left; }}
+        .summary th {{ background-color: #e8e8e8; font-weight: bold; }}
+        .summary strong {{ font-weight: bold; }}
 
-        .summary h2 {{
-            font-size: 14px;
-            font-weight: bold;
-            margin-bottom: 12px;
-            padding-bottom: 6px;
-            border-bottom: 1px dashed #808080;
-        }}
+        table.speakers {{ width: 100%; border: 1px solid #000000; border-collapse: collapse; }}
+        table.speakers td {{ border-bottom: 1px solid #ececec; padding: 6px 10px; }}
+        table.speakers td.name {{ font-weight: bold; }}
 
-        .summary h3 {{
-            font-size: 13px;
-            font-weight: bold;
-            margin-top: 12px;
-            margin-bottom: 6px;
-        }}
-
-        .summary ul {{
-            margin-left: 20px;
-            margin-bottom: 8px;
-        }}
-
-        .summary li {{
-            margin-bottom: 4px;
-        }}
-
-        .summary table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 8px;
-        }}
-
-        .summary th, .summary td {{
-            border: 1px solid #000000;
-            padding: 6px 8px;
-            text-align: left;
-        }}
-
-        .summary th {{
-            background-color: #e0e0e0;
-            font-weight: bold;
-        }}
-
-        .summary strong {{
-            font-weight: bold;
-        }}
-
-        .summary-badge {{
-            display: inline-block;
-            background-color: #000000;
-            color: #ffffff;
-            padding: 2px 8px;
-            font-size: 11px;
-            margin-left: 8px;
-        }}
-
-        /* Участники встречи */
-        .speakers-panel {{
-            background-color: #f8f8ff;
-            border: 2px solid #000000;
-            padding: 16px;
-            margin-bottom: 16px;
-        }}
-
-        .speaker-cards {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-top: 12px;
-        }}
-
-        .speaker-card {{
-            background-color: #ffffff;
-            border: 1px solid #c0c0c0;
-            padding: 12px;
-            min-width: 180px;
-            flex: 1;
-        }}
-
-        .speaker-id {{
-            font-weight: bold;
-            font-size: 14px;
-            margin-bottom: 8px;
-        }}
-
-        .speaker-stats {{
-            display: flex;
-            gap: 16px;
-            font-size: 12px;
-            color: #666666;
-        }}
-
-        .speaker-stat {{
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }}
-
-        /* Цвета спикеров */
-        .speaker-0 {{ border-left: 4px solid #FF6B6B; }}
-        .speaker-1 {{ border-left: 4px solid #4ECDC4; }}
-        .speaker-2 {{ border-left: 4px solid #45B7D1; }}
-        .speaker-3 {{ border-left: 4px solid #96CEB4; }}
-        .speaker-4 {{ border-left: 4px solid #FFEAA7; }}
-        .speaker-5 {{ border-left: 4px solid #DDA0DD; }}
-        .speaker-6 {{ border-left: 4px solid #98D8C8; }}
-        .speaker-7 {{ border-left: 4px solid #F7DC6F; }}
-
-        .speaker-tag {{
-            font-weight: bold;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 11px;
-            margin-right: 8px;
-        }}
-
-        .speaker-tag-0 {{ background-color: #FF6B6B; color: white; }}
-        .speaker-tag-1 {{ background-color: #4ECDC4; color: white; }}
-        .speaker-tag-2 {{ background-color: #45B7D1; color: white; }}
-        .speaker-tag-3 {{ background-color: #96CEB4; color: white; }}
+        .speaker-tag {{ font-weight: bold; padding: 1px 6px; font-size: 11px; margin-right: 8px; }}
+        .speaker-tag-0 {{ background-color: #FF6B6B; color: #fff; }}
+        .speaker-tag-1 {{ background-color: #4ECDC4; color: #fff; }}
+        .speaker-tag-2 {{ background-color: #45B7D1; color: #fff; }}
+        .speaker-tag-3 {{ background-color: #96CEB4; color: #fff; }}
         .speaker-tag-4 {{ background-color: #FFEAA7; color: #333; }}
-        .speaker-tag-5 {{ background-color: #DDA0DD; color: white; }}
+        .speaker-tag-5 {{ background-color: #DDA0DD; color: #fff; }}
         .speaker-tag-6 {{ background-color: #98D8C8; color: #333; }}
         .speaker-tag-7 {{ background-color: #F7DC6F; color: #333; }}
 
-        /* Сегменты со спикерами */
-        .segment.speaker-0 {{ border-left: 4px solid #FF6B6B; }}
-        .segment.speaker-1 {{ border-left: 4px solid #4ECDC4; }}
-        .segment.speaker-2 {{ border-left: 4px solid #45B7D1; }}
-        .segment.speaker-3 {{ border-left: 4px solid #96CEB4; }}
-        .segment.speaker-4 {{ border-left: 4px solid #FFEAA7; }}
-        .segment.speaker-5 {{ border-left: 4px solid #DDA0DD; }}
-        .segment.speaker-6 {{ border-left: 4px solid #98D8C8; }}
-        .segment.speaker-7 {{ border-left: 4px solid #F7DC6F; }}
+        .footer {{
+            text-align: center;
+            padding: 14px;
+            border-top: 1px solid #d0d0d0;
+            font-size: 11px;
+            color: #666666;
+        }}
 
-        /* Для печати */
         @media print {{
-            body {{
-                background-color: #ffffff;
-                padding: 0;
-            }}
-
-            .window {{
-                box-shadow: none;
-                border: none;
-            }}
-
-            .window-header {{
-                background: #000000;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-            }}
-
-            .segment:hover {{
-                background-color: transparent;
-            }}
+            body {{ background-color: #ffffff; padding: 0; }}
+            .window {{ border: none; max-width: none; }}
         }}
     </style>
 </head>
 <body>
     <div class="window">
-        <div class="window-header">
-            <span class="window-title">{window_title}</span>
-            <div class="window-buttons">
-                <div class="window-btn"></div>
-                <div class="window-btn"></div>
-            </div>
-        </div>
+        <div class="titlebar">{window_title}</div>
 
         <div class="content">
             <!-- Информация о файле -->
-            <div class="info-panel">
-                <div class="info-row">
-                    <span class="info-label">{label_file}:</span>
-                    <span class="info-value">{file_name}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">{label_duration}:</span>
-                    <span class="info-value">{duration}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">{label_language}:</span>
-                    <span class="info-value">{language} ({probability}%)</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">{label_model}:</span>
-                    <span class="info-value">{model}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">{label_date}:</span>
-                    <span class="info-value">{date}</span>
-                </div>
-            </div>
+            <table class="info" cellspacing="0">
+                <tr><td class="k">{label_file}:</td><td>{file_name}</td></tr>
+                <tr><td class="k">{label_duration}:</td><td>{duration}</td></tr>
+                <tr><td class="k">{label_language}:</td><td>{language} ({probability}%)</td></tr>
+                <tr><td class="k">{label_model}:</td><td>{model}</td></tr>
+                <tr><td class="k">{label_date}:</td><td>{date}</td></tr>
+            </table>
 
             <!-- Статистика -->
-            <div class="stats">
-                <div class="stat-item">
-                    <div class="stat-value">{segment_count}</div>
-                    <div class="stat-label">{label_segments}</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-value">{word_count}</div>
-                    <div class="stat-label">{label_words}</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-value">{char_count}</div>
-                    <div class="stat-label">{label_characters}</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-value">{speaker_count}</div>
-                    <div class="stat-label">{label_speakers}</div>
-                </div>
-            </div>
+            <table class="stats" cellspacing="0">
+                <tr>
+                    <td><div class="stat-value">{segment_count}</div><div class="stat-label">{label_segments}</div></td>
+                    <td><div class="stat-value">{word_count}</div><div class="stat-label">{label_words}</div></td>
+                    <td><div class="stat-value">{char_count}</div><div class="stat-label">{label_characters}</div></td>
+                    <td><div class="stat-value">{speaker_count}</div><div class="stat-label">{label_speakers}</div></td>
+                </tr>
+            </table>
 
             {speakers_section}
 
             {summary_section}
 
             <!-- Полный текст -->
-            <div class="section-title">{section_full_text}</div>
-            <div class="full-text">
-                {full_text}
-            </div>
+            <h2 class="section">{section_full_text}</h2>
+            <div class="fulltext">{full_text}</div>
 
             <!-- Сегменты с таймкодами -->
-            <div class="section-title">{section_segments}</div>
-            <div class="segments">
+            <h2 class="section">{section_segments}</h2>
+            <table class="segs" cellspacing="0">
                 {segments_html}
-            </div>
+            </table>
         </div>
 
-        <div class="footer">
-            <div class="logo">
-                <div class="logo-icon">M</div>
-                <span class="logo-text">MindType</span>
-            </div>
-            <div>{footer_text}</div>
-        </div>
+        <div class="footer"><b>MindType</b> &mdash; {footer_text}</div>
     </div>
 </body>
 </html>
 '''
 
-SEGMENT_TEMPLATE = '''<div class="segment {speaker_class}">
-    <div class="segment-time">{time}</div>
-    <div class="segment-text">{speaker_tag}{text}</div>
-</div>
+SEGMENT_TEMPLATE = '''<tr><td class="t">{time}</td><td class="x">{speaker_tag}{text}</td></tr>
 '''
 
 SPEAKERS_SECTION_TEMPLATE = '''
-<div class="speakers-panel">
-    <div class="section-title">{title}</div>
-    <div class="speaker-cards">
-        {speaker_cards}
-    </div>
-</div>
+<h2 class="section">{title}</h2>
+<table class="speakers" cellspacing="0">
+    {speaker_cards}
+</table>
 '''
 
-SPEAKER_CARD_TEMPLATE = '''
-<div class="speaker-card speaker-{index}">
-    <div class="speaker-id">{speaker_name}</div>
-    <div class="speaker-stats">
-        <span class="speaker-stat">⏱ {duration}</span>
-        <span class="speaker-stat">💬 {segments} {segments_label}</span>
-        <span class="speaker-stat">📝 {words} {words_label}</span>
-    </div>
-</div>
+SPEAKER_CARD_TEMPLATE = '''<tr><td class="name">{speaker_name}</td><td>{duration}</td><td>{segments} {segments_label}</td><td>{words} {words_label}</td></tr>
 '''
 
 
@@ -953,39 +651,66 @@ class ReportGenerator:
         Returns:
             True если успешно, False если PDF не поддерживается
         """
-        # Сначала генерируем HTML
-        html_path = output_path.with_suffix(".html")
-        self.generate_html(result, html_path)
+        # HTML держим в памяти (не пишем в output_path.with_suffix('.html') —
+        # это совпало бы с реальным HTML в режиме 'both' и удалило бы его).
+        html_content = self.generate_html(result)
 
-        # Пробуем wkhtmltopdf
+        # Пробуем wkhtmltopdf (нужен файл на входе — пишем во временный)
         wkhtmltopdf = shutil.which("wkhtmltopdf")
         if wkhtmltopdf:
+            tmp_html = output_path.with_suffix(".pdf.tmp.html")
             try:
+                tmp_html.write_text(html_content, encoding="utf-8")
                 subprocess.run(
-                    [wkhtmltopdf, "--quiet", str(html_path), str(output_path)],
+                    [wkhtmltopdf, "--quiet", str(tmp_html), str(output_path)],
                     check=True,
                     timeout=120
                 )
-                # Удаляем временный HTML если PDF создан успешно
                 if output_path.exists():
-                    html_path.unlink(missing_ok=True)
                     return True
             except (subprocess.SubprocessError, FileNotFoundError):
                 pass
+            finally:
+                tmp_html.unlink(missing_ok=True)
 
         # Пробуем weasyprint
         try:
             from weasyprint import HTML
-            HTML(string=html_path.read_text(encoding="utf-8")).write_pdf(str(output_path))
-            html_path.unlink(missing_ok=True)
+            HTML(string=html_content).write_pdf(str(output_path))
             return True
         except ImportError:
             pass
         except Exception:
             pass
 
-        # PDF недоступен, оставляем HTML
+        # Встроенный движок Qt (без внешних зависимостей) — основной путь.
+        if self._render_pdf_qt(html_content, output_path):
+            return True
+
+        # PDF недоступен
         return False
+
+    def _render_pdf_qt(self, html_content: str, output_path: Path) -> bool:
+        """Отрендерить HTML в PDF встроенным QTextDocument (Qt rich text)."""
+        try:
+            from PyQt6.QtCore import QMarginsF
+            from PyQt6.QtGui import QTextDocument, QPdfWriter, QPageSize, QPageLayout
+            from PyQt6.QtWidgets import QApplication
+
+            # QTextDocument требует экземпляр QApplication (метрики шрифтов).
+            if QApplication.instance() is None:
+                return False
+
+            writer = QPdfWriter(str(output_path))
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+
+            doc = QTextDocument()
+            doc.setHtml(html_content)
+            doc.print(writer)
+            return output_path.exists() and output_path.stat().st_size > 0
+        except Exception:
+            return False
 
     def generate(
         self,

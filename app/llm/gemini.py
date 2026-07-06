@@ -345,13 +345,5 @@ class GeminiProvider(LLMProvider):
 
         return "".join(full_response)
 
-    def validate_api_key(self) -> bool:
-        """Проверить валидность API ключа."""
-        try:
-            url = f"{GEMINI_BASE_URL}/models"
-            self._make_request(url)
-            return True
-        except LLMAuthError:
-            return False
-        except LLMError:
-            return True
+    def _validation_request(self) -> None:
+        self._make_request(f"{GEMINI_BASE_URL}/models")

@@ -17,7 +17,9 @@ from .base import (
     LLMProvider,
     LLMModel,
     LLMError,
+    LLMAuthError,
     LLMConnectionError,
+    LLMInsufficientFundsError,
     ReasoningConfig,
     TokenCallback,
     ThinkingCallback,
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MODELS_ENDPOINT = f"{OPENROUTER_BASE_URL}/models"
 CHAT_ENDPOINT = f"{OPENROUTER_BASE_URL}/chat/completions"
+TRANSCRIPTIONS_ENDPOINT = f"{OPENROUTER_BASE_URL}/audio/transcriptions"
 
 # Модели с поддержкой reasoning
 REASONING_MODEL_PATTERNS = [
@@ -68,7 +71,7 @@ class OpenRouterProvider(LLMProvider):
                 message = error_data.get("error", {}).get("message", body)
             except json.JSONDecodeError:
                 message = body
-            raise LLMError(f"Недостаточно средств на балансе OpenRouter: {message}")
+            raise LLMInsufficientFundsError(f"Недостаточно средств на балансе OpenRouter: {message}")
         # Для остальных кодов используем базовую обработку
         super()._handle_http_error(status_code, body)
 
@@ -204,15 +207,75 @@ class OpenRouterProvider(LLMProvider):
             raise LLMConnectionError(f"Ошибка подключения к OpenRouter: {e.reason}")
         return ""
 
-    def validate_api_key(self) -> bool:
-        """Проверить валидность API ключа."""
-        try:
-            self._make_request(MODELS_ENDPOINT)
-            return True
-        except LLMAuthError:
-            return False
-        except LLMError:
-            return True
+    def _validation_request(self) -> None:
+        self._make_request(MODELS_ENDPOINT)
+
+    def transcribe_audio(
+        self,
+        audio_b64: str,
+        audio_format: str,
+        model: str,
+        language: Optional[str] = None,
+        temperature: float = 0.0,
+    ) -> str:
+        """
+        Транскрибировать аудио через STT-эндпоинт OpenRouter.
+
+        Args:
+            audio_b64: Аудио в base64 (сырые байты, без data-uri)
+            audio_format: Формат аудио (wav, mp3, flac, ...)
+            model: ID STT-модели (например openai/whisper-1)
+            language: ISO-639-1 код языка; "auto"/None — автоопределение
+            temperature: 0.0 для детерминированной расшифровки
+
+        Returns:
+            Распознанный текст
+        """
+        data: Dict[str, Any] = {
+            "model": model,
+            "input_audio": {"data": audio_b64, "format": audio_format},
+            "temperature": temperature,
+        }
+        if language and language != "auto":
+            data["language"] = language
+
+        # Чанки длинного файла шлются десятками — один transient 520/502 у провайдера
+        # не должен ронять всю транскрипцию, поэтому повторяем с backoff.
+        response = self._make_request(
+            TRANSCRIPTIONS_ENDPOINT, method="POST", data=data, retries=3
+        )
+        return (response.get("text") or "").strip()
+
+    def fetch_transcription_models(self) -> List[LLMModel]:
+        """
+        Загрузить список STT-моделей (output_modalities=transcription).
+
+        Отдельный парсер (не _fetch_models_from_api), т.к. STT-модели могут
+        не иметь стандартного prompt/completion pricing и были бы отброшены.
+
+        Ошибки (LLMAuthError/LLMConnectionError/LLMError) НЕ глотаем — пробрасываем,
+        чтобы UI-обработчик показал понятный диалог (иначе пустой список = молчание).
+        """
+        response = self._make_request(MODELS_ENDPOINT + "?output_modalities=transcription")
+
+        models = []
+        for item in response.get("data", []):
+            model_id = item.get("id", "")
+            if not model_id:
+                continue
+            models.append(
+                LLMModel(
+                    id=model_id,
+                    name=item.get("name", model_id),
+                    provider="openrouter",
+                    context_length=item.get("context_length", 0),
+                    description=item.get("description", ""),
+                )
+            )
+
+        models.sort(key=lambda m: m.name.lower())
+        logger.info(f"Загружено {len(models)} STT-моделей из OpenRouter")
+        return models
 
     def get_recommended_models(self) -> List[LLMModel]:
         """Получить рекомендуемые модели для саммаризации."""

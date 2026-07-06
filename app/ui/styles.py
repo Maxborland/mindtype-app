@@ -146,8 +146,11 @@ QLabel#warning {{
 
 QPushButton {{
     background-color: {COLORS['surface']['primary']};
-    border: {BORDERS['default']} solid {COLORS['border']['default']};
-    border-radius: {RADII['button']};
+    /* System 7 «приподнятая» кнопка: 1px рамка + утолщённые низ/право = тень. */
+    border: 1px solid {COLORS['border']['default']};
+    border-bottom-width: 2px;
+    border-right-width: 2px;
+    border-radius: 0;
     padding: {SYSTEM7['button']['padding_y']}px {SYSTEM7['button']['padding_x']}px;
     color: {COLORS['text']['primary']};
     min-width: {SYSTEM7['button']['min_width']}px;
@@ -162,6 +165,10 @@ QPushButton:hover {{
 QPushButton:pressed {{
     background-color: {COLORS['interactive']['pressed']};
     color: {COLORS['interactive']['pressed_text']};
+    /* «Вдавленная»: тень переезжает наверх/влево. */
+    border: 1px solid {COLORS['border']['default']};
+    border-top-width: 2px;
+    border-left-width: 2px;
 }}
 
 QPushButton:checked {{
@@ -169,9 +176,11 @@ QPushButton:checked {{
     color: {COLORS['interactive']['pressed_text']};
 }}
 
-/* Focus state - subtle border thickening instead of outline */
+/* Focus: сохраняем 3D-бевель (чуть тяжелее), а не равномерную рамку */
 QPushButton:focus {{
-    border-width: 2px;
+    border: 2px solid {COLORS['border']['default']};
+    border-bottom-width: 3px;
+    border-right-width: 3px;
 }}
 
 QPushButton:disabled {{
@@ -180,12 +189,13 @@ QPushButton:disabled {{
     border-color: {COLORS['border']['muted']};
 }}
 
-/* Primary/Default button - System 7 double border effect */
+/* Primary/Default button — тот же 3D-бевель, но тяжелее (3px тень) + bold */
 QPushButton#primaryButton, QPushButton[default="true"] {{
     background-color: {COLORS['surface']['primary']};
-    border: {SYSTEM7['button_default']['inner_border']}px solid {COLORS['border']['default']};
-    border-radius: {RADII['button_default']};
-    margin: {SYSTEM7['button_default']['outer_border']}px;
+    border: 1px solid {COLORS['border']['default']};
+    border-bottom-width: 3px;
+    border-right-width: 3px;
+    border-radius: 0;
     font-weight: bold;
 }}
 
@@ -196,10 +206,15 @@ QPushButton#primaryButton:hover {{
 QPushButton#primaryButton:pressed {{
     background-color: {COLORS['interactive']['pressed']};
     color: {COLORS['interactive']['pressed_text']};
+    border: 1px solid {COLORS['border']['default']};
+    border-top-width: 3px;
+    border-left-width: 3px;
 }}
 
 QPushButton#primaryButton:focus {{
-    border-width: 4px;
+    border: 2px solid {COLORS['border']['default']};
+    border-bottom-width: 3px;
+    border-right-width: 3px;
 }}
 
 QPushButton#primaryButton:disabled {{
@@ -208,33 +223,40 @@ QPushButton#primaryButton:disabled {{
     border-color: {COLORS['border']['muted']};
 }}
 
-/* Secondary button - subtle variant */
+/* Secondary button — тот же 3D-бевель, фон чуть серее */
 QPushButton#secondaryButton {{
     background-color: {COLORS['surface']['secondary']};
-    border: {BORDERS['thin']} solid {COLORS['border']['subtle']};
+    border: 1px solid {COLORS['border']['default']};
+    border-bottom-width: 2px;
+    border-right-width: 2px;
 }}
 
 QPushButton#secondaryButton:hover {{
     background-color: {COLORS['interactive']['hover']};
-    border-color: {COLORS['border']['default']};
 }}
 
-/* Danger button */
+/* Danger button — 3D-бевель + bold */
 QPushButton#dangerButton {{
     color: {COLORS['text']['primary']};
     font-weight: bold;
-    border-width: {BORDERS['thick']};
+    border: 1px solid {COLORS['border']['default']};
+    border-bottom-width: 2px;
+    border-right-width: 2px;
 }}
 
 QPushButton#dangerButton:pressed {{
     background-color: {COLORS['interactive']['pressed']};
     color: {COLORS['interactive']['pressed_text']};
+    border: 1px solid {COLORS['border']['default']};
+    border-top-width: 2px;
+    border-left-width: 2px;
 }}
 
 /* Small button */
 QPushButton#smallButton {{
     padding: 3px 10px;
     font-size: {TYPOGRAPHY['caption']['size']}px;
+    min-width: 0;
     min-height: 18px;
     border-radius: {RADII['sm']};
 }}
@@ -332,10 +354,19 @@ QComboBox:focus {{
 }}
 
 QComboBox::drop-down {{
-    border: none;
-    border-left: {BORDERS['default']} solid {COLORS['border']['default']};
+    /* Отдельная «приподнятая» 3D-кнопка-стрелка (как в System 7) */
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
     width: 20px;
+    margin: 1px;
+    border: 1px solid {COLORS['border']['default']};
+    border-bottom-width: 2px;
+    border-right-width: 2px;
     background-color: {COLORS['surface']['primary']};
+}}
+
+QComboBox::drop-down:hover {{
+    background-color: {COLORS['interactive']['hover']};
 }}
 
 QComboBox::down-arrow {{
@@ -504,19 +535,22 @@ QRadioButton:disabled {{
 /* === SLIDER === */
 
 QSlider::groove:horizontal {{
-    background-color: {COLORS['surface']['primary']};
-    border: {BORDERS['default']} solid {COLORS['border']['default']};
-    height: 8px;
-    border-radius: {RADII['sm']};
+    background-color: {COLORS['surface']['secondary']};
+    border: 1px solid {COLORS['border']['default']};
+    height: 6px;
+    border-radius: 0;
 }}
 
 QSlider::handle:horizontal {{
+    /* Квадратный 3D-ползунок (как кнопки) вместо круглого */
     background-color: {COLORS['surface']['primary']};
-    border: {BORDERS['default']} solid {COLORS['border']['default']};
-    width: 14px;
-    height: 14px;
-    margin: -4px 0;
-    border-radius: 7px;
+    border: 1px solid {COLORS['border']['default']};
+    border-bottom-width: 2px;
+    border-right-width: 2px;
+    width: 12px;
+    height: 18px;
+    margin: -7px 0;
+    border-radius: 0;
 }}
 
 QSlider::handle:horizontal:hover {{
@@ -532,9 +566,10 @@ QSlider::handle:horizontal:focus {{
 }}
 
 QSlider::sub-page:horizontal {{
-    background-color: {COLORS['border']['default']};
-    border: {BORDERS['default']} solid {COLORS['border']['default']};
-    border-radius: {RADII['sm']};
+    /* Заполненная часть — светло-серая (раньше была сплошная чёрная), не залив */
+    background-color: {COLORS['surface']['tertiary']};
+    border: 1px solid {COLORS['border']['default']};
+    border-radius: 0;
 }}
 
 /* === PROGRESS BAR === */
@@ -766,6 +801,39 @@ QFrame#system7Window {{
 QFrame#system7WindowContent {{
     background-color: {COLORS['surface']['primary']};
     border: none;
+}}
+
+/* === FRAMELESS APP WINDOW (главное окно) === */
+
+QWidget#appWindowFrame {{
+    background-color: {COLORS['surface']['primary']};
+    border: {BORDERS['thick']} solid {COLORS['border']['default']};
+}}
+
+QFrame#appTitleBar {{
+    background-color: {COLORS['surface']['primary']};
+    background-image: url({get_icon_path("stripes.png")});
+    background-repeat: repeat-x;
+    border: none;
+    border-bottom: {BORDERS['default']} solid {COLORS['border']['default']};
+}}
+
+QPushButton#winMin, QPushButton#winMax, QPushButton#winClose {{
+    background-color: {COLORS['surface']['primary']};
+    border: {BORDERS['default']} solid {COLORS['border']['default']};
+    border-radius: 0;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 0;
+}}
+
+QPushButton#winMin:hover, QPushButton#winMax:hover, QPushButton#winClose:hover {{
+    background-color: {COLORS['interactive']['hover']};
+}}
+
+QPushButton#winMin:pressed, QPushButton#winMax:pressed, QPushButton#winClose:pressed {{
+    background-color: {COLORS['text']['primary']};
+    color: {COLORS['text']['inverse']};
 }}
 
 /* System 7 Modal frame - double border effect */
@@ -1305,7 +1373,7 @@ QComboBox#wideCombo {{
     border: {BORDERS['thick']} solid {COLORS['border']['default']};
     padding: {SPACING['xs']}px {SPACING['sm']}px;
     background-color: {COLORS['surface']['primary']};
-    min-width: 250px;
+    min-width: 120px;
 }}
 
 QComboBox#wideCombo::drop-down {{
@@ -1338,16 +1406,19 @@ QFrame#thinkingFrame {{
 }}
 
 QFrame#thinkingHeader {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #000000, stop:0.5 #808080, stop:1 #000000);
+    background-color: {COLORS['surface']['primary']};
+    background-image: url({get_icon_path("stripes.png")});
+    background-repeat: repeat-x;
     border: none;
+    border-bottom: {BORDERS['default']} solid {COLORS['border']['default']};
 }}
 
 QLabel#thinkingTitle {{
-    color: {COLORS['text']['inverse']};
+    color: {COLORS['text']['primary']};
     font-weight: bold;
     font-size: {TYPOGRAPHY['caption']['size']}px;
-    background: transparent;
+    background: {COLORS['surface']['primary']};
+    padding: 0 {SPACING['sm']}px;
 }}
 
 QPushButton#windowClose {{

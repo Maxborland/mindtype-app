@@ -419,10 +419,11 @@ class StatusLabel(QLabel):
     """
 
     STATUS_ICONS = {
-        "success": "[✓]",
-        "error": "[✗]",
+        # ASCII: пиксельный Pixellari не имеет ✓✗▸ (рендерятся .notdef-box).
+        "success": "[OK]",
+        "error": "[X]",
         "pending": "[...]",
-        "progress": "[▸]",
+        "progress": "[>]",
         "warning": "[!]",
     }
 
@@ -694,3 +695,97 @@ class System7ModalFrame(QFrame):
             SPACING["md"] + inner_margin
         )
         self.content_layout.setSpacing(SPACING["sm"])
+
+
+# =============================================================================
+# FRAMELESS WINDOW CHROME (полосатый System-7 title bar для диалогов)
+# =============================================================================
+
+class _DialogTitleBar(QFrame):
+    """Полосатый System-7 заголовок для frameless-диалогов: title + закрыть + drag."""
+
+    def __init__(self, window: QWidget, title: str):
+        super().__init__()
+        self._win = window
+        self._press = False
+        self.setObjectName("appTitleBar")
+        self.setFixedHeight(24)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(4)
+        lbl = QLabel(title)
+        lbl.setObjectName("system7TitleLabel")
+        lay.addStretch()
+        lay.addWidget(lbl)
+        lay.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("winClose")
+        close_btn.setFixedSize(18, 16)
+        close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        close_btn.clicked.connect(window.close)
+        lay.addWidget(close_btn)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = True
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press and (event.buttons() & Qt.MouseButton.LeftButton):
+            self._press = False
+            handle = self._win.windowHandle()
+            if handle is not None:
+                handle.startSystemMove()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._press = False
+        super().mouseReleaseEvent(event)
+
+
+def titlebar_qss() -> str:
+    """Минимальный QSS для полосатого title bar — для окон со своим setStyleSheet
+    (например QWizard, где полный центральный STYLESHEET ломает ModernStyle-рендер)."""
+    from .styles import get_icon_path
+    stripes = get_icon_path("stripes.png")
+    return f"""
+    QWidget#appWindowFrame {{ background-color: #ffffff; border: 2px solid #000000; }}
+    QFrame#appTitleBar {{
+        background-color: #ffffff;
+        background-image: url({stripes});
+        background-repeat: repeat-x;
+        border: none; border-bottom: 1px solid #000000;
+    }}
+    QLabel#system7TitleLabel {{ background-color: #ffffff; padding: 0 8px; font-weight: bold; }}
+    QPushButton#winClose {{
+        background-color: #ffffff; border: 1px solid #000000; border-radius: 0;
+        font-weight: bold; font-size: 11px; padding: 0;
+    }}
+    QPushButton#winClose:hover {{ background-color: #dddddd; }}
+    QPushButton#winClose:pressed {{ background-color: #000000; color: #ffffff; }}
+    """
+
+
+def apply_system7_titlebar(window: QWidget, title: str) -> None:
+    """Сделать окно/диалог frameless с полосатым System-7 заголовком.
+
+    QMainWindow → заголовок через setMenuWidget; прочие — оборачиваем
+    существующий layout в content-виджет и добавляем bar сверху.
+    """
+    from PyQt6.QtWidgets import QMainWindow
+    window.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+    bar = _DialogTitleBar(window, title)
+    if isinstance(window, QMainWindow):
+        window.setMenuWidget(bar)
+        return
+    old = window.layout()
+    content = QWidget()
+    if old is not None:
+        content.setLayout(old)
+    outer = QVBoxLayout()
+    outer.setContentsMargins(2, 2, 2, 2)
+    outer.setSpacing(0)
+    outer.addWidget(bar)
+    outer.addWidget(content, 1)
+    window.setLayout(outer)
+    window.setObjectName("appWindowFrame")
