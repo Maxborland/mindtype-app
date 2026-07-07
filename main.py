@@ -85,8 +85,8 @@ def _ensure_cudnn_on_windows() -> None:
         except Exception:
             continue
 
-
-_ensure_cudnn_on_windows()
+if os.environ.get("MINDTYPE_PRELOAD_CUDNN") == "1":
+    _ensure_cudnn_on_windows()
 
 os.environ["NUMBA_DISABLE_JIT"] = "0"
 os.environ["NUMBA_CUDA_DRIVER"] = ""

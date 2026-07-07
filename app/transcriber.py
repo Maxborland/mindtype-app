@@ -1,16 +1,14 @@
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Protocol, List, Dict, Any, Union
 import sys
-import os
 import logging
 
-from .transcriber_cpp import WhisperCppTranscriber
-from .transcriber_onnx import WhisperOnnxTranscriber
 from .text_processor import remove_repetitions, HallucinationDetector
 
 logger = logging.getLogger("transcriber")
 
-# Оставляем импорты для обратной совместимости или если нужен legacy режим
+# Оставляем импорты для обратной совместимости или если нужен legacy режим.
+# faster-whisper is optional and must not prevent cloud-first startup.
 try:
     import ctranslate2
     from faster_whisper import WhisperModel
@@ -236,6 +234,7 @@ def _prefer_cpp() -> bool:
         return binary.exists()
     return False
 
+
 def create_transcriber(backend: str = "auto") -> TranscriberBackend:
     """Фабрика для создания транскрибера."""
     if backend == "openrouter":
@@ -243,16 +242,20 @@ def create_transcriber(backend: str = "auto") -> TranscriberBackend:
         return OpenRouterTranscriber()
 
     if backend == "onnx":
+        from .transcriber_onnx import WhisperOnnxTranscriber
         return WhisperOnnxTranscriber()
 
     if backend == "whisper_cpp" or backend == "whisper.cpp" or (backend == "auto" and _prefer_cpp()):
+        from .transcriber_cpp import WhisperCppTranscriber
         return WhisperCppTranscriber()
 
     if backend == "faster_whisper" or (backend == "auto" and HAS_FASTER_WHISPER):
         return FasterWhisperTranscriber()
 
     # Если ничего не подошло, пробуем CPP как последний шанс
+    from .transcriber_cpp import WhisperCppTranscriber
     return WhisperCppTranscriber()
+
 
 # Для обратной совместимости с существующим кодом, который делает Transcriber()
 class Transcriber:
