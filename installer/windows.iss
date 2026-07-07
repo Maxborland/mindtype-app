@@ -169,8 +169,6 @@ procedure InitializeWizard();
 begin
   WizardForm.Color := clWhite;
   WizardForm.MainPanel.Color := clWhite;
-  WizardForm.InnerNotebook.Color := clWhite;
-  WizardForm.OuterNotebook.Color := clWhite;
   WizardForm.PageNameLabel.Font.Style := [fsBold];
   WizardForm.WelcomeLabel1.Font.Style := [fsBold];
   WizardForm.FinishedHeadingLabel.Font.Style := [fsBold];
