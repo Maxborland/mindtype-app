@@ -1,8 +1,5 @@
 import logging
-import sys
 from typing import List, Optional
-
-import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +14,28 @@ PROVIDER_PRIORITY = [
     "CPUExecutionProvider",       # Fallback
 ]
 
+_ORT_IMPORT_ERROR: Optional[Exception] = None
+
+
+def _get_onnxruntime():
+    """Import ONNX Runtime only when local acceleration is actually inspected."""
+    global _ORT_IMPORT_ERROR
+    try:
+        import onnxruntime as ort
+    except Exception as exc:
+        _ORT_IMPORT_ERROR = exc
+        logger.warning("ONNX Runtime is unavailable; local acceleration disabled: %s", exc)
+        return None
+    _ORT_IMPORT_ERROR = None
+    return ort
+
+
 def detect_available_providers() -> List[str]:
     """Возвращает список доступных провайдеров ONNX Runtime."""
+    ort = _get_onnxruntime()
+    if ort is None:
+        return []
+
     available = ort.get_available_providers()
 
     # Фильтруем и сортируем согласно нашему приоритету
@@ -30,6 +47,7 @@ def detect_available_providers() -> List[str]:
             supported.append(p)
 
     return supported
+
 
 def get_best_provider(mode: str = "auto") -> str:
     """
@@ -72,6 +90,7 @@ def get_best_provider(mode: str = "auto") -> str:
 
     return "CPUExecutionProvider"
 
+
 def has_npu() -> bool:
     """Проверяет наличие NPU через доступные провайдеры."""
     available = detect_available_providers()
@@ -81,6 +100,7 @@ def has_npu() -> bool:
         "CoreMLExecutionProvider"
     ]
     return any(p in available for p in npu_providers)
+
 
 def get_provider_options(provider: str) -> dict:
     """Возвращает настройки для конкретного провайдера."""
@@ -96,6 +116,3 @@ def get_provider_options(provider: str) -> dict:
             "device_id": 0
         }
     return options
-
-
-
