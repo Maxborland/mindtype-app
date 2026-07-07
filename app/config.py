@@ -164,7 +164,11 @@ def _default_config() -> Dict[str, Any]:
         "openrouter_reasoning_effort": "medium",
         # Постобработка транскрипций
         "enable_postprocessing": True,      # Включить постобработку
-        "postprocessing_diarization": True,  # Диаризация спикеров (MFCC + sklearn, лёгкая)
+        "postprocessing_diarization": True,  # Диаризация спикеров
+        # Бэкенд диаризации: auto (OpenRouter при наличии ключа, иначе локальная),
+        # local (MFCC + sklearn, офлайн), openrouter (chat-LLM, fallback на локальную)
+        "postprocessing_diarization_backend": "auto",
+        "openrouter_diarization_model": "",  # Модель LLM-диаризации; пусто = модель саммари
         "postprocessing_punctuation": True,  # Восстановление пунктуации
         "postprocessing_fillers": True,      # Удаление слов-паразитов
         "postprocessing_normalize": True,    # Нормализация чисел/дат

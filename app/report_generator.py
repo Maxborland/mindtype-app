@@ -98,19 +98,59 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             text-align: justify;
         }}
 
+        p.nav {{
+            margin: 14px 0 4px 0;
+            padding: 6px 10px;
+            border: 1px solid #000000;
+            background-color: #f2f2f2;
+            font-size: 12px;
+        }}
+        p.nav a {{ color: #000000; font-weight: bold; text-decoration: none; }}
+
         table.segs {{ width: 100%; border: 1px solid #000000; border-collapse: collapse; }}
         table.segs td.t {{
-            width: 130px;
+            width: 110px;
             font-weight: bold;
-            background-color: #f2f2f2;
+            background-color: #f7f7f7;
             border-right: 1px solid #d0d0d0;
             border-bottom: 1px solid #ececec;
             padding: 6px 10px;
             font-size: 12px;
             white-space: nowrap;
             vertical-align: top;
+            color: #444444;
         }}
         table.segs td.x {{ padding: 6px 10px; border-bottom: 1px solid #ececec; }}
+        table.segs td.turnhead {{
+            background-color: #ededed;
+            border-top: 1px solid #000000;
+            border-bottom: 1px solid #d0d0d0;
+            padding: 6px 10px;
+        }}
+        .turn-range {{ font-size: 11px; color: #555555; font-weight: bold; }}
+
+        .summary-intro {{ margin: 6px 0 10px 0; }}
+        table.sumcard {{
+            width: 100%;
+            border: 1px solid #000000;
+            border-collapse: collapse;
+            margin: 0 0 10px 0;
+        }}
+        td.sumcard-h {{
+            background-color: #000000;
+            color: #ffffff;
+            font-weight: bold;
+            font-size: 12px;
+            padding: 5px 10px;
+        }}
+        td.sumcard-b {{ padding: 10px 12px; background-color: #fcfcf5; }}
+        td.sumcard-b h4 {{ font-size: 12px; font-weight: bold; margin: 8px 0 4px 0; }}
+        td.sumcard-b ul, td.sumcard-b ol {{ margin: 4px 0 8px 20px; }}
+        td.sumcard-b li {{ margin-bottom: 4px; }}
+        td.sumcard-b p {{ margin: 4px 0; }}
+        td.sumcard-b table {{ width: 100%; border-collapse: collapse; margin: 6px 0; }}
+        td.sumcard-b th, td.sumcard-b td {{ border: 1px solid #000000; padding: 5px 8px; text-align: left; }}
+        td.sumcard-b th {{ background-color: #e8e8e8; font-weight: bold; }}
 
         .summary {{
             border: 2px solid #000000;
@@ -118,7 +158,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             padding: 14px;
         }}
         .summary h3 {{ font-size: 13px; font-weight: bold; margin: 10px 0 5px 0; }}
-        .summary ul {{ margin: 4px 0 8px 20px; }}
+        .summary h4 {{ font-size: 12px; font-weight: bold; margin: 8px 0 4px 0; }}
+        .summary ul, .summary ol {{ margin: 4px 0 8px 20px; }}
         .summary li {{ margin-bottom: 4px; }}
         .summary table {{ width: 100%; border-collapse: collapse; margin: 6px 0; }}
         .summary th, .summary td {{ border: 1px solid #000000; padding: 5px 8px; text-align: left; }}
@@ -126,8 +167,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .summary strong {{ font-weight: bold; }}
 
         table.speakers {{ width: 100%; border: 1px solid #000000; border-collapse: collapse; }}
-        table.speakers td {{ border-bottom: 1px solid #ececec; padding: 6px 10px; }}
-        table.speakers td.name {{ font-weight: bold; }}
+        table.speakers td {{ border-bottom: 1px solid #ececec; padding: 6px 10px; vertical-align: middle; }}
+        table.speakers td.name {{ font-weight: bold; white-space: nowrap; }}
+        table.speakers td.barcell {{ width: 34%; }}
+        table.speakers td.pct {{ width: 60px; font-weight: bold; text-align: right; white-space: nowrap; }}
+        table.speakers td.num {{ white-space: nowrap; color: #444444; }}
+        table.bar {{ width: 100%; border-collapse: collapse; }}
+        table.bar td {{ padding: 0; border: none; font-size: 4px; line-height: 4px; }}
+        td.barrest {{ background-color: #e4e4e4; }}
 
         .speaker-tag {{ font-weight: bold; padding: 1px 6px; font-size: 11px; margin-right: 8px; }}
         .speaker-tag-0 {{ background-color: #FF6B6B; color: #fff; }}
@@ -138,6 +185,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .speaker-tag-5 {{ background-color: #DDA0DD; color: #fff; }}
         .speaker-tag-6 {{ background-color: #98D8C8; color: #333; }}
         .speaker-tag-7 {{ background-color: #F7DC6F; color: #333; }}
+
+        td.barfill-0 {{ background-color: #FF6B6B; }}
+        td.barfill-1 {{ background-color: #4ECDC4; }}
+        td.barfill-2 {{ background-color: #45B7D1; }}
+        td.barfill-3 {{ background-color: #96CEB4; }}
+        td.barfill-4 {{ background-color: #FFEAA7; }}
+        td.barfill-5 {{ background-color: #DDA0DD; }}
+        td.barfill-6 {{ background-color: #98D8C8; }}
+        td.barfill-7 {{ background-color: #F7DC6F; }}
 
         .footer {{
             text-align: center;
@@ -177,19 +233,21 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 </tr>
             </table>
 
-            {speakers_section}
+            {nav_section}
 
             {summary_section}
 
-            <!-- Полный текст -->
-            <h2 class="section">{section_full_text}</h2>
-            <div class="fulltext">{full_text}</div>
+            {speakers_section}
 
-            <!-- Сегменты с таймкодами -->
-            <h2 class="section">{section_segments}</h2>
+            <!-- Транскрипт по репликам с таймкодами -->
+            <h2 class="section" id="transcript">{section_segments}</h2>
             <table class="segs" cellspacing="0">
                 {segments_html}
             </table>
+
+            <!-- Полный текст -->
+            <h2 class="section" id="fulltext">{section_full_text}</h2>
+            <div class="fulltext">{full_text}</div>
         </div>
 
         <div class="footer"><b>MindType</b> &mdash; {footer_text}</div>
@@ -198,17 +256,33 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 </html>
 '''
 
-SEGMENT_TEMPLATE = '''<tr><td class="t">{time}</td><td class="x">{speaker_tag}{text}</td></tr>
+SEGMENT_TEMPLATE = '''<tr><td class="t">{time}</td><td class="x">{text}</td></tr>
+'''
+
+TURN_HEADER_TEMPLATE = '''<tr><td class="t turnhead">{time}</td><td class="x turnhead">{speaker_tag}<span class="turn-range">{time_range}</span></td></tr>
 '''
 
 SPEAKERS_SECTION_TEMPLATE = '''
-<h2 class="section">{title}</h2>
+<h2 class="section" id="speakers">{title}</h2>
 <table class="speakers" cellspacing="0">
     {speaker_cards}
 </table>
 '''
 
-SPEAKER_CARD_TEMPLATE = '''<tr><td class="name">{speaker_name}</td><td>{duration}</td><td>{segments} {segments_label}</td><td>{words} {words_label}</td></tr>
+SPEAKER_CARD_TEMPLATE = '''<tr>
+<td class="name"><span class="speaker-tag speaker-tag-{index}">{speaker_name}</span></td>
+<td class="barcell"><table class="bar" cellspacing="0"><tr><td class="barfill-{index}" width="{pct_width}%">&nbsp;</td><td class="barrest" width="{pct_rest}%">&nbsp;</td></tr></table></td>
+<td class="pct">{pct}%</td>
+<td class="num">{duration}</td>
+<td class="num">{segments} {segments_label}</td>
+<td class="num">{words} {words_label}</td>
+</tr>
+'''
+
+SUMMARY_CARD_TEMPLATE = '''<table class="sumcard" cellspacing="0">
+<tr><td class="sumcard-h">{title}</td></tr>
+<tr><td class="sumcard-b">{body}</td></tr>
+</table>
 '''
 
 
@@ -234,7 +308,7 @@ class ReportGenerator:
                 "label_characters": "символов",
                 "label_speakers": "участников",
                 "section_full_text": "Полный текст",
-                "section_segments": "Сегменты с таймкодами",
+                "section_segments": "Транскрипт",
                 "section_summary": "Саммари",
                 "section_speakers": "Участники встречи",
                 "summary_badge": "AI",
@@ -252,7 +326,7 @@ class ReportGenerator:
                 "label_characters": "characters",
                 "label_speakers": "speakers",
                 "section_full_text": "Full Text",
-                "section_segments": "Segments with Timestamps",
+                "section_segments": "Transcript",
                 "section_summary": "Summary",
                 "section_speakers": "Meeting Participants",
                 "summary_badge": "AI",
@@ -385,10 +459,10 @@ class ReportGenerator:
         Конвертировать Markdown-подобный саммари в HTML.
 
         Обрабатывает:
-        - ## Заголовки → <h3>
-        - - Списки → <ul><li>
+        - ## / ### заголовки → <h3> / <h4>
+        - - и * списки → <ul>; 1. и 1) списки → <ol>
         - **жирный** → <strong>
-        - | таблицы |
+        - | таблицы | и || таблицы | (формат из встроенных пресетов)
         - $LaTeX$ формулы (сохраняются как есть для MathJax)
         """
         import re
@@ -396,10 +470,8 @@ class ReportGenerator:
 
         def _escape_preserving_latex(text: str) -> str:
             """Экранировать HTML, сохраняя LaTeX формулы."""
-            # Сохраняем LaTeX формулы
             latex_placeholders = {}
 
-            # Inline формулы $...$
             def save_latex(match):
                 placeholder = f"__LATEX_{uuid.uuid4().hex[:8]}__"
                 latex_placeholders[placeholder] = match.group(0)
@@ -409,110 +481,169 @@ class ReportGenerator:
             text = re.sub(r'\$\$[^$]+\$\$', save_latex, text)
             text = re.sub(r'\$[^$]+\$', save_latex, text)
 
-            # Экранируем HTML
             text = html.escape(text)
 
-            # Восстанавливаем LaTeX
             for placeholder, latex in latex_placeholders.items():
                 text = text.replace(placeholder, latex)
 
             return text
 
+        def _inline(text: str) -> str:
+            """Инлайн-разметка: **жирный** + экранирование с сохранением LaTeX."""
+            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+            text = _escape_preserving_latex(text)
+            return text.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
+
         lines = summary.split('\n')
         html_parts = []
-        in_list = False
+        in_ul = False
+        in_ol = False
         in_table = False
         table_header_done = False
 
-        for line in lines:
-            line = line.strip()
-            if not line:
-                if in_list:
-                    html_parts.append('</ul>')
-                    in_list = False
-                if in_table:
-                    html_parts.append('</table>')
-                    in_table = False
-                    table_header_done = False
-                continue
-
-            # Заголовок ##
-            if line.startswith('## '):
-                if in_list:
-                    html_parts.append('</ul>')
-                    in_list = False
-                if in_table:
-                    html_parts.append('</table>')
-                    in_table = False
-                    table_header_done = False
-                header_text = _escape_preserving_latex(line[3:].strip())
-                html_parts.append(f'<h3>{header_text}</h3>')
-                continue
-
-            # Таблица
-            if line.startswith('|'):
-                if in_list:
-                    html_parts.append('</ul>')
-                    in_list = False
-
-                # Пропускаем разделитель |---|---|
-                if re.match(r'^\|[\s\-|]+\|$', line):
-                    continue
-
-                cells = [c.strip() for c in line.split('|')[1:-1]]  # Убираем пустые по краям
-
-                if not in_table:
-                    html_parts.append('<table>')
-                    in_table = True
-
-                if not table_header_done:
-                    html_parts.append('<tr>' + ''.join(f'<th>{_escape_preserving_latex(c)}</th>' for c in cells) + '</tr>')
-                    table_header_done = True
-                else:
-                    html_parts.append('<tr>' + ''.join(f'<td>{_escape_preserving_latex(c)}</td>' for c in cells) + '</tr>')
-                continue
-
-            # Список - или *
-            if line.startswith('- ') or line.startswith('* '):
-                if in_table:
-                    html_parts.append('</table>')
-                    in_table = False
-                    table_header_done = False
-
-                if not in_list:
-                    html_parts.append('<ul>')
-                    in_list = True
-
-                item_text = line[2:].strip()
-                # Обработка **жирного** перед экранированием
-                item_text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', item_text)
-                # Экранируем, сохраняя LaTeX и strong теги
-                item_text = _escape_preserving_latex(item_text)
-                item_text = item_text.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
-                html_parts.append(f'<li>{item_text}</li>')
-                continue
-
-            # Обычный текст
-            if in_list:
+        def close_lists():
+            nonlocal in_ul, in_ol
+            if in_ul:
                 html_parts.append('</ul>')
-                in_list = False
+                in_ul = False
+            if in_ol:
+                html_parts.append('</ol>')
+                in_ol = False
+
+        def close_table():
+            nonlocal in_table, table_header_done
             if in_table:
                 html_parts.append('</table>')
                 in_table = False
                 table_header_done = False
 
-            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line)
-            text = _escape_preserving_latex(text)
-            text = text.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
-            html_parts.append(f'<p>{text}</p>')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                close_lists()
+                close_table()
+                continue
 
-        # Закрываем незакрытые теги
-        if in_list:
-            html_parts.append('</ul>')
-        if in_table:
-            html_parts.append('</table>')
+            # Заголовки ### и ##
+            if line.startswith('### '):
+                close_lists()
+                close_table()
+                html_parts.append(f'<h4>{_inline(line[4:].strip())}</h4>')
+                continue
+            if line.startswith('## '):
+                close_lists()
+                close_table()
+                html_parts.append(f'<h3>{_inline(line[3:].strip())}</h3>')
+                continue
+
+            # Таблица: | ячейки | или || ячейки | (double-pipe из пресетов)
+            if line.startswith('|'):
+                close_lists()
+
+                # Пропускаем разделитель |---|---| и ||---|---|
+                if re.match(r'^\|{1,2}[\s\-|:]+$', line):
+                    continue
+
+                cells = [c.strip() for c in line.strip('|').split('|')]
+
+                if not in_table:
+                    html_parts.append('<table>')
+                    in_table = True
+
+                tag = 'td' if table_header_done else 'th'
+                html_parts.append(
+                    '<tr>' + ''.join(f'<{tag}>{_inline(c)}</{tag}>' for c in cells) + '</tr>'
+                )
+                table_header_done = True
+                continue
+
+            # Маркированный список - или *
+            if line.startswith('- ') or line.startswith('* '):
+                close_table()
+                if in_ol:
+                    html_parts.append('</ol>')
+                    in_ol = False
+                if not in_ul:
+                    html_parts.append('<ul>')
+                    in_ul = True
+                html_parts.append(f'<li>{_inline(line[2:].strip())}</li>')
+                continue
+
+            # Нумерованный список 1. или 1)
+            ol_match = re.match(r'^\d+[.)]\s+(.*)$', line)
+            if ol_match:
+                close_table()
+                if in_ul:
+                    html_parts.append('</ul>')
+                    in_ul = False
+                if not in_ol:
+                    html_parts.append('<ol>')
+                    in_ol = True
+                html_parts.append(f'<li>{_inline(ol_match.group(1))}</li>')
+                continue
+
+            # Обычный текст
+            close_lists()
+            close_table()
+            html_parts.append(f'<p>{_inline(line)}</p>')
+
+        close_lists()
+        close_table()
 
         return '\n'.join(html_parts)
+
+    def _split_summary_sections(self, summary: str) -> tuple:
+        """
+        Разбить саммари на преамбулу и секции по строкам '## '.
+
+        Returns:
+            (интро-текст, [(заголовок, тело), ...])
+        """
+        intro_lines = []
+        sections = []
+        for line in summary.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('## '):
+                sections.append([stripped[3:].strip(), []])
+            elif sections:
+                sections[-1][1].append(line)
+            else:
+                intro_lines.append(line)
+        return (
+            '\n'.join(intro_lines).strip(),
+            [(title, '\n'.join(body).strip()) for title, body in sections],
+        )
+
+    def _generate_summary_section(self, result: TranscriptionResult) -> str:
+        """Секция саммари: карточки по '## ' секциям промпта пресета."""
+        if not result.has_summary:
+            return ""
+
+        import re
+
+        badges = f'<span class="badge">{self._labels["summary_badge"]}</span>'
+        if result.summary_preset_name:
+            badges += f'<span class="badge">{html.escape(result.summary_preset_name)}</span>'
+
+        parts = [
+            f'<h2 class="section" id="summary">{self._labels["section_summary"]}{badges}</h2>'
+        ]
+
+        intro, sections = self._split_summary_sections(result.summary)
+        if sections:
+            if intro:
+                parts.append(
+                    f'<div class="summary-intro">{self._format_summary_as_html(intro)}</div>'
+                )
+            for title, body in sections:
+                plain_title = html.escape(re.sub(r'\*\*(.+?)\*\*', r'\1', title))
+                body_html = self._format_summary_as_html(body) or '<p>&mdash;</p>'
+                parts.append(SUMMARY_CARD_TEMPLATE.format(title=plain_title, body=body_html))
+        else:
+            # Саммари без ## секций — единый блок
+            parts.append(f'<div class="summary">{self._format_summary_as_html(result.summary)}</div>')
+
+        return '\n'.join(parts)
 
     def _get_speaker_index(self, speaker_id: str) -> int:
         """Получить индекс спикера из ID (SPEAKER_00 -> 0)."""
@@ -522,17 +653,34 @@ class ReportGenerator:
             return int(match.group(1)) % 8  # Макс 8 цветов
         return 0
 
+    def _speaker_display_name(self, result: TranscriptionResult, speaker_id: str) -> str:
+        """Отображаемое имя спикера: карта имён → статистика → сырой ID."""
+        if result.speaker_names and speaker_id in result.speaker_names:
+            return result.speaker_names[speaker_id]
+        if result.speaker_stats:
+            for stat in result.speaker_stats:
+                if stat.speaker_id == speaker_id and stat.speaker_name:
+                    return stat.speaker_name
+        return speaker_id
+
     def _generate_speakers_section(self, result: TranscriptionResult) -> str:
-        """Сгенерировать секцию участников встречи."""
+        """Секция участников: цветная метка, доля времени, реплики, слова."""
         if not result.has_speakers or not result.speaker_stats:
             return ""
+
+        total_duration = sum(s.total_duration for s in result.speaker_stats) or 1.0
 
         speaker_cards = ""
         for stat in result.speaker_stats:
             index = self._get_speaker_index(stat.speaker_id)
+            pct = round(100.0 * stat.total_duration / total_duration)
+            pct_width = min(100, max(2, pct))
             speaker_cards += SPEAKER_CARD_TEMPLATE.format(
                 index=index,
-                speaker_name=html.escape(stat.speaker_name),
+                speaker_name=html.escape(self._speaker_display_name(result, stat.speaker_id)),
+                pct=pct,
+                pct_width=pct_width,
+                pct_rest=100 - pct_width,
                 duration=stat.duration_formatted,
                 segments=stat.segment_count,
                 segments_label=self._labels.get("label_segments", "сегментов"),
@@ -545,6 +693,69 @@ class ReportGenerator:
             speaker_cards=speaker_cards,
         )
 
+    def _generate_nav_section(self, result: TranscriptionResult) -> str:
+        """Строка навигации по якорям секций отчёта."""
+        links = []
+        if result.has_summary:
+            links.append(("#summary", self._labels["section_summary"]))
+        if result.has_speakers and result.speaker_stats:
+            links.append(("#speakers", self._labels.get("section_speakers", "Участники")))
+        links.append(("#transcript", self._labels["section_segments"]))
+        links.append(("#fulltext", self._labels["section_full_text"]))
+        items = ' &nbsp;&bull;&nbsp; '.join(f'<a href="{href}">{title}</a>' for href, title in links)
+        return f'<p class="nav">{items}</p>'
+
+    def _generate_segments_html(self, result: TranscriptionResult) -> str:
+        """
+        Транскрипт с таймкодами.
+
+        Если есть спикеры — подряд идущие сегменты одного спикера группируются
+        в «реплики»: заголовок с цветной меткой спикера и диапазоном времени,
+        под ним строки [время | текст].
+        """
+        has_speakers = any(seg.speaker for seg in result.segments)
+
+        if not has_speakers:
+            return "".join(
+                SEGMENT_TEMPLATE.format(
+                    time=seg.start_formatted,
+                    text=html.escape(seg.text),
+                )
+                for seg in result.segments
+            )
+
+        # Группируем подряд идущие сегменты одного спикера
+        turns: list = []
+        for seg in result.segments:
+            if turns and turns[-1][0] == seg.speaker:
+                turns[-1][1].append(seg)
+            else:
+                turns.append([seg.speaker, [seg]])
+
+        parts = []
+        for speaker, segs in turns:
+            if speaker:
+                index = self._get_speaker_index(speaker)
+                name = self._speaker_display_name(result, speaker)
+                speaker_tag = (
+                    f'<span class="speaker-tag speaker-tag-{index}">{html.escape(name)}</span>'
+                )
+            else:
+                speaker_tag = '<span class="speaker-tag">&mdash;</span>'
+
+            parts.append(TURN_HEADER_TEMPLATE.format(
+                time=segs[0].start_formatted,
+                speaker_tag=speaker_tag,
+                time_range=f"{segs[0].start_formatted}&ndash;{segs[-1].end_formatted}",
+            ))
+            for seg in segs:
+                parts.append(SEGMENT_TEMPLATE.format(
+                    time=seg.start_formatted,
+                    text=html.escape(seg.text),
+                ))
+
+        return "".join(parts)
+
     def generate_html(self, result: TranscriptionResult, output_path: Optional[Path] = None) -> str:
         """
         Сгенерировать HTML отчёт.
@@ -556,43 +767,21 @@ class ReportGenerator:
         Returns:
             HTML строка
         """
-        # Генерируем сегменты с поддержкой спикеров
-        segments_html = ""
-        for seg in result.segments:
-            speaker_class = ""
-            speaker_tag = ""
-
-            if seg.speaker:
-                index = self._get_speaker_index(seg.speaker)
-                speaker_class = f"speaker-{index}"
-                speaker_tag = f'<span class="speaker-tag speaker-tag-{index}">{html.escape(seg.speaker)}</span>'
-
-            segments_html += SEGMENT_TEMPLATE.format(
-                time=f"{seg.start_formatted} - {seg.end_formatted}",
-                text=html.escape(seg.text),
-                speaker_class=speaker_class,
-                speaker_tag=speaker_tag,
-            )
+        # Транскрипт: реплики спикеров с таймкодами
+        segments_html = self._generate_segments_html(result)
 
         # Подсчёт статистики
         full_text = result.full_text
         word_count = len(full_text.split())
         char_count = len(full_text)
 
-        # Генерируем секцию участников (если есть)
-        speakers_section = self._generate_speakers_section(result)
+        # Полный текст: обработанный (с разметкой спикеров), если есть
+        display_text = result.processed_text or full_text
 
-        # Генерируем секцию саммари (если есть)
-        summary_section = ""
-        if result.has_summary:
-            summary_html = self._format_summary_as_html(result.summary)
-            summary_section = f'''
-            <!-- Саммари -->
-            <div class="section-title">{self._labels["section_summary"]}<span class="summary-badge">{self._labels["summary_badge"]}</span></div>
-            <div class="summary">
-                {summary_html}
-            </div>
-            '''
+        # Секции: навигация, саммари, участники
+        nav_section = self._generate_nav_section(result)
+        speakers_section = self._generate_speakers_section(result)
+        summary_section = self._generate_summary_section(result)
 
         # Формируем HTML
         html_content = HTML_TEMPLATE.format(
@@ -629,9 +818,10 @@ class ReportGenerator:
             speaker_count=result.num_speakers if result.num_speakers > 0 else "—",
 
             # Контент
+            nav_section=nav_section,
             speakers_section=speakers_section,
             summary_section=summary_section,
-            full_text=html.escape(full_text),
+            full_text=html.escape(display_text),
             segments_html=segments_html,
         )
 

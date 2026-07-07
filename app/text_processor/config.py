@@ -18,6 +18,15 @@ class ProcessingConfig:
     enable_normalize: bool = True
     enable_correct: bool = True
 
+    # Бэкенд диаризации:
+    #   "local"      — MFCC + sklearn (офлайн, лёгкая)
+    #   "openrouter" — chat-LLM через OpenRouter (нужен API ключ; точнее на диалогах)
+    # При ошибке OpenRouter пайплайн откатывается на локальную.
+    diarization_backend: str = "local"
+    # OpenRouter для LLM-диаризации
+    diarization_api_key: str = ""
+    diarization_model: str = ""
+
     # Диаризация (MFCC + sklearn - лёгкая версия)
     diarization_min_speakers: int = 1
     diarization_max_speakers: int = 8  # Ограничение количества спикеров

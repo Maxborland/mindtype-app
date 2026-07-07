@@ -2226,6 +2226,31 @@ class MainWindow(QMainWindow):
         format_row.addStretch()
         layout.addLayout(format_row)
 
+        # Способ диаризации (определение спикеров)
+        diar_row = QHBoxLayout()
+        diar_row.setContentsMargins(0, 0, 0, 0)
+        diar_row.setSpacing(SPACING["sm"])
+        self.diarization_backend_label = QLabel(self._t("diarization_backend"))
+        diar_row.addWidget(self.diarization_backend_label)
+        self.diarization_backend_combo = QComboBox()
+        self.diarization_backend_combo.addItem(self._t("diarization_backend_auto"), "auto")
+        self.diarization_backend_combo.addItem(self._t("diarization_backend_openrouter"), "openrouter")
+        self.diarization_backend_combo.addItem(self._t("diarization_backend_local"), "local")
+        saved_diar = cfg.get("postprocessing_diarization_backend", "auto")
+        _diar_idx = self.diarization_backend_combo.findData(saved_diar)
+        self.diarization_backend_combo.setCurrentIndex(
+            _diar_idx if _diar_idx >= 0 else self.diarization_backend_combo.findData("auto")
+        )
+        self.diarization_backend_combo.setToolTip(self._t("diarization_backend_tooltip"))
+        self.diarization_backend_combo.currentIndexChanged.connect(
+            lambda: self.config.update(
+                postprocessing_diarization_backend=self.diarization_backend_combo.currentData()
+            )
+        )
+        diar_row.addWidget(self.diarization_backend_combo)
+        diar_row.addStretch()
+        layout.addLayout(diar_row)
+
         self.output_folder_edit = QLineEdit()
         self.output_folder_edit.setReadOnly(True)
         self.output_folder_edit.setText(str(self._output_dir))
@@ -2844,6 +2869,21 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.output_format_combo.setCurrentIndex(idx)
         self.output_format_combo.blockSignals(False)
+
+        # Способ диаризации
+        if hasattr(self, "diarization_backend_label"):
+            self.diarization_backend_label.setText(self._t("diarization_backend"))
+            current_diar = self.diarization_backend_combo.currentData()
+            self.diarization_backend_combo.blockSignals(True)
+            self.diarization_backend_combo.clear()
+            self.diarization_backend_combo.addItem(self._t("diarization_backend_auto"), "auto")
+            self.diarization_backend_combo.addItem(self._t("diarization_backend_openrouter"), "openrouter")
+            self.diarization_backend_combo.addItem(self._t("diarization_backend_local"), "local")
+            diar_idx = self.diarization_backend_combo.findData(current_diar)
+            if diar_idx >= 0:
+                self.diarization_backend_combo.setCurrentIndex(diar_idx)
+            self.diarization_backend_combo.setToolTip(self._t("diarization_backend_tooltip"))
+            self.diarization_backend_combo.blockSignals(False)
 
         # AI саммари
         self.enable_summary_checkbox.setText(self._t("enable_summary"))
@@ -3928,6 +3968,15 @@ class MainWindow(QMainWindow):
         # Кастомные промпты перезаписывают промпты из пресета
         custom_prompts = {**preset_prompts, **custom_prompts_saved} if custom_prompts_saved else preset_prompts
 
+        # Отображаемое имя пресета — попадает в отчёт рядом с саммари
+        from .summary_presets import PRESETS as BUILTIN_PRESETS
+        if preset_id in user_presets and isinstance(user_presets.get(preset_id), dict):
+            preset_display_name = user_presets[preset_id].get("name", preset_id)
+        else:
+            preset_display_name = self._t(
+                BUILTIN_PRESETS.get(preset_id, {}).get("name_key", preset_id)
+            )
+
         # Определяем провайдер суммаризации из настроек
         llm_provider = cfg.get("llm_provider", "openrouter")
         summary_api_key = ""
@@ -3974,6 +4023,7 @@ class MainWindow(QMainWindow):
                 enable=self.enable_summary_checkbox.isChecked(),
                 enable_thinking=True,  # Всегда включен
                 custom_prompts=custom_prompts,
+                preset_name=preset_display_name,
                 provider=llm_provider,
                 api_key=summary_api_key,
                 model=summary_model,
@@ -3993,6 +4043,14 @@ class MainWindow(QMainWindow):
                 fillers=cfg.get("postprocessing_fillers", True),
                 normalize=cfg.get("postprocessing_normalize", True),
                 correct=cfg.get("postprocessing_correct", True),
+                diarization_backend=cfg.get("postprocessing_diarization_backend", "auto"),
+                diarization_api_key=cfg.get("openrouter_api_key", ""),
+                # Модель LLM-диаризации: своя, иначе модель саммари, иначе дешёвый дефолт
+                diarization_model=(
+                    cfg.get("openrouter_diarization_model", "")
+                    or cfg.get("openrouter_model", "")
+                    or "openai/gpt-4o-mini"
+                ),
             ),
             on_thinking=lambda text: self.thinking_signal.emit(text),
         )

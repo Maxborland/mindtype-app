@@ -115,34 +115,38 @@ class TextProcessingPipeline:
         # Определяем язык
         language = self.config.language
 
-        # Шаг 1: Диаризация (если есть аудио)
-        if self.config.enable_diarization and audio_path and audio_path.exists():
+        # Шаг 1: Диаризация
+        if self.config.enable_diarization:
             if progress_callback:
                 progress_callback("Диаризация спикеров...", 0, 100)
 
-            # Проверяем доступность диаризации
-            if not self._diarizer.is_available:
-                error_msg = self._diarizer.load_error or "Диаризация недоступна"
-                stats["diarization_error"] = error_msg
-                stats["diarization_skipped"] = True
-                logger.warning(f"Диаризация пропущена: {error_msg}")
-            else:
-                try:
-                    diarization_result = self._diarizer.diarize(audio_path)
-                    stats["steps_applied"].append("diarization")
-                    stats["num_speakers"] = diarization_result.num_speakers
+            diarization_result = self._run_diarization(
+                audio_path, transcription_segments, stats, progress_callback
+            )
 
-                    # Форматируем текст с разметкой спикеров
-                    if diarization_result.num_speakers > 1:
-                        result_text = self._diarizer.format_with_speakers(
-                            result_text,
-                            diarization_result,
-                            transcription_segments,
-                        )
-                        logger.info(f"Диаризация: найдено {diarization_result.num_speakers} спикеров")
-                except Exception as e:
-                    stats["diarization_error"] = str(e)
-                    logger.error(f"Ошибка диаризации: {e}")
+            if diarization_result is not None:
+                # Дружелюбные имена по умолчанию: «Спикер 1» вместо SPEAKER_00.
+                # LLM-диаризация может вернуть настоящие имена — дополняем
+                # только отсутствующие.
+                from .diarization import default_speaker_names
+                defaults = default_speaker_names(
+                    diarization_result.get_unique_speakers(), language
+                )
+                diarization_result.speaker_names = {
+                    **defaults, **diarization_result.speaker_names
+                }
+
+                stats["steps_applied"].append("diarization")
+                stats["num_speakers"] = diarization_result.num_speakers
+
+                # Форматируем текст с разметкой спикеров
+                if diarization_result.num_speakers > 1:
+                    result_text = self._diarizer.format_with_speakers(
+                        result_text,
+                        diarization_result,
+                        transcription_segments,
+                    )
+                    logger.info(f"Диаризация: найдено {diarization_result.num_speakers} спикеров")
 
         # Шаг 2: Восстановление пунктуации
         if self.config.enable_punctuation:
@@ -207,6 +211,72 @@ class TextProcessingPipeline:
             diarization=diarization_result,
             processing_stats=stats,
         )
+
+    def _run_diarization(
+        self,
+        audio_path: Optional[Path],
+        transcription_segments: Optional[List[dict]],
+        stats: Dict,
+        progress_callback: Optional[ProcessingProgressCallback] = None,
+    ) -> Optional[DiarizationResult]:
+        """
+        Выполнить диаризацию выбранным бэкендом.
+
+        "openrouter" — разметка спикеров chat-моделью по тексту транскрипта
+        (нужны transcription_segments и API ключ); при любой ошибке —
+        fallback на локальную MFCC-диаризацию.
+        "local" — MFCC + sklearn по аудио.
+        """
+        # --- OpenRouter (LLM) ---
+        if self.config.diarization_backend == "openrouter" and transcription_segments:
+            from .llm_diarization import LLMDiarizer
+
+            llm_diarizer = LLMDiarizer(
+                api_key=self.config.diarization_api_key,
+                model=self.config.diarization_model,
+            )
+            if llm_diarizer.is_available:
+                try:
+                    result = llm_diarizer.diarize_segments(
+                        transcription_segments,
+                        language=self.config.language,
+                        progress_callback=progress_callback,
+                    )
+                    stats["diarization_backend"] = "openrouter"
+                    return result
+                except Exception as e:
+                    stats["diarization_llm_error"] = str(e)
+                    logger.error(
+                        f"LLM-диаризация не удалась ({e}), fallback на локальную"
+                    )
+            else:
+                logger.warning(
+                    "LLM-диаризация недоступна (нет ключа/модели), fallback на локальную"
+                )
+
+        # --- Локальная (MFCC + sklearn) ---
+        if not (audio_path and audio_path.exists()):
+            stats["diarization_skipped"] = True
+            return None
+
+        if not self._diarizer.is_available:
+            error_msg = self._diarizer.load_error or "Диаризация недоступна"
+            stats["diarization_error"] = error_msg
+            stats["diarization_skipped"] = True
+            logger.warning(f"Диаризация пропущена: {error_msg}")
+            return None
+
+        try:
+            result = self._diarizer.diarize(audio_path)
+            # Сливаем «мелких» спикеров (ошибки кластеризации) сразу,
+            # чтобы разметка в тексте и статистика совпадали.
+            result = self._diarizer.merge_short_speakers(result)
+            stats["diarization_backend"] = "local"
+            return result
+        except Exception as e:
+            stats["diarization_error"] = str(e)
+            logger.error(f"Ошибка диаризации: {e}")
+            return None
 
     def process_simple(self, text: str, language: Optional[str] = None) -> str:
         """

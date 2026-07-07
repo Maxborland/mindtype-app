@@ -124,6 +124,61 @@ class DiarizationResult:
 DiarizationProgressCallback = Callable[[str, int, int], None]
 
 
+# Локализованное слово «Спикер» для дружелюбных имён по умолчанию.
+_SPEAKER_WORD = {
+    "ru": "Спикер",
+    "uk": "Спікер",
+    "de": "Sprecher",
+    "fr": "Intervenant",
+    "es": "Hablante",
+    "it": "Interlocutore",
+    "pt": "Falante",
+}
+
+
+def default_speaker_names(speaker_ids: List[str], language: str = "ru") -> Dict[str, str]:
+    """
+    Построить дружелюбные имена по умолчанию: SPEAKER_00 -> «Спикер 1».
+
+    Нумерация идёт по порядку сортировки ID, начиная с 1.
+    """
+    word = _SPEAKER_WORD.get((language or "").lower()[:2], "Speaker")
+    return {
+        speaker_id: f"{word} {index + 1}"
+        for index, speaker_id in enumerate(sorted(set(speaker_ids)))
+    }
+
+
+def assign_speaker_by_overlap(
+    start: float,
+    end: float,
+    speaker_segments: List["SpeakerSegment"],
+) -> Optional[str]:
+    """
+    Выбрать спикера для интервала [start, end] по СУММАРНОМУ перекрытию.
+
+    Устойчивее, чем выбор одного диар-сегмента с максимальным перекрытием:
+    если интервал накрывает несколько коротких сегментов одного спикера,
+    их вклад складывается.
+    """
+    overlaps: Dict[str, float] = {}
+    for seg in speaker_segments:
+        overlap = min(end, seg.end) - max(start, seg.start)
+        if overlap > 0:
+            overlaps[seg.speaker] = overlaps.get(seg.speaker, 0.0) + overlap
+
+    if overlaps:
+        return max(overlaps.items(), key=lambda kv: kv[1])[0]
+
+    if speaker_segments:
+        closest = min(
+            speaker_segments,
+            key=lambda s: min(abs(s.start - start), abs(s.end - end)),
+        )
+        return closest.speaker
+    return None
+
+
 class SpeakerDiarizer:
     """
     Лёгкий диаризатор на основе MFCC features.
@@ -209,11 +264,39 @@ class SpeakerDiarizer:
             segment_samples = int(segment_duration * sr)
             hop_samples = int(hop_duration * sr)
 
-            # Извлекаем MFCC для каждого сегмента
+            # Энергетический VAD на уровне фреймов (50 мс): окно попадает в
+            # кластеризацию только если достаточная доля его фреймов громкая.
+            # Это отсекает и тишину, и «переходные» окна на границе
+            # речь/тишина, чьи смешанные признаки образуют ложных спикеров.
+            frame_samples = max(1, int(0.05 * sr))
+            n_frames = len(wav) // frame_samples
+            frame_rms = np.sqrt(np.mean(
+                wav[:n_frames * frame_samples].reshape(n_frames, frame_samples) ** 2,
+                axis=1,
+            )) if n_frames > 0 else np.array([])
+
+            silence_threshold = 1e-4
+            if frame_rms.size:
+                # 10% от «громкой» части записи, но не ниже абсолютного пола.
+                silence_threshold = max(1e-4, 0.1 * float(np.percentile(frame_rms, 95)))
+            voiced_frames = frame_rms > silence_threshold
+
+            def window_voiced_fraction(sample_start: int, sample_end: int) -> float:
+                f0 = sample_start // frame_samples
+                f1 = max(f0 + 1, sample_end // frame_samples)
+                window = voiced_frames[f0:f1]
+                return float(np.mean(window)) if window.size else 0.0
+
+            window_bounds = list(range(0, len(wav) - segment_samples + 1, hop_samples))
+
+            # Извлекаем MFCC для каждого озвученного сегмента
             segments_data = []
             features = []
 
-            for i in range(0, len(wav) - segment_samples + 1, hop_samples):
+            for i in window_bounds:
+                if window_voiced_fraction(i, i + segment_samples) < 0.6:
+                    continue  # Тишина или граница речь/тишина — пропускаем
+
                 segment_wav = wav[i:i + segment_samples]
                 start_time = i / sr
                 end_time = (i + segment_samples) / sr
@@ -221,12 +304,16 @@ class SpeakerDiarizer:
                 # Извлекаем MFCC (20 коэффициентов)
                 mfcc = librosa.feature.mfcc(y=segment_wav, sr=sr, n_mfcc=20)
 
-                # Усредняем по времени -> получаем вектор из 20 чисел
-                mfcc_mean = np.mean(mfcc, axis=1)
-                mfcc_std = np.std(mfcc, axis=1)
-
-                # Объединяем mean и std для лучшего представления голоса
-                feature_vector = np.concatenate([mfcc_mean, mfcc_std])
+                # Статистики по времени: mean + std самих MFCC и дельт.
+                # Дельты добавляют информацию о динамике голоса (темп, артикуляция)
+                # и заметно улучшают разделение похожих голосов.
+                mfcc_delta = librosa.feature.delta(mfcc)
+                feature_vector = np.concatenate([
+                    np.mean(mfcc, axis=1),
+                    np.std(mfcc, axis=1),
+                    np.mean(mfcc_delta, axis=1),
+                    np.std(mfcc_delta, axis=1),
+                ])
 
                 features.append(feature_vector)
                 segments_data.append({"start": start_time, "end": end_time})
@@ -234,6 +321,11 @@ class SpeakerDiarizer:
                 if progress_callback and i % (hop_samples * 10) == 0:
                     progress = 20 + int(40 * i / len(wav))
                     progress_callback(f"Обработка... {progress}%", progress, 100)
+
+            logger.info(
+                f"VAD: {len(features)} озвученных окон из {len(window_bounds)} "
+                f"(порог RMS {silence_threshold:.5f})"
+            )
 
             if not features:
                 logger.warning("Не удалось извлечь признаки")
@@ -304,6 +396,10 @@ class SpeakerDiarizer:
 
                 logger.info(f"Оптимальное количество кластеров: {best_n} (silhouette={best_score:.3f})")
 
+            # Сглаживаем метки: одиночные «выбросы» между окнами одного спикера
+            # почти всегда ошибка кластеризации, а не реальная смена говорящего.
+            labels = self._smooth_labels(labels)
+
             num_speakers = len(set(labels))
             logger.info(f"Найдено спикеров: {num_speakers}")
 
@@ -338,6 +434,28 @@ class SpeakerDiarizer:
                 segments=[SpeakerSegment(speaker="SPEAKER_00", start=0.0, end=0.0)],
                 num_speakers=1,
             )
+
+    @staticmethod
+    def _smooth_labels(labels: np.ndarray, kernel: int = 3) -> np.ndarray:
+        """
+        Медианное (по моде) сглаживание последовательности меток спикеров.
+
+        Окно из kernel соседних меток; если у центральной метки оба соседа
+        совпадают между собой, но отличаются от неё — заменяем на соседей.
+        """
+        labels = np.asarray(labels)
+        if len(labels) < kernel or len(set(labels.tolist())) < 2:
+            return labels
+
+        half = kernel // 2
+        smoothed = labels.copy()
+        for i in range(half, len(labels) - half):
+            window = labels[i - half:i + half + 1]
+            values, counts = np.unique(window, return_counts=True)
+            mode = values[np.argmax(counts)]
+            if counts.max() > half:
+                smoothed[i] = mode
+        return smoothed
 
     def _merge_adjacent_segments(
         self,
@@ -442,24 +560,9 @@ class SpeakerDiarizer:
             if not trans_text:
                 continue
 
-            best_speaker = None
-            best_overlap = 0
-
-            for diar_seg in diarization_result.segments:
-                overlap_start = max(trans_start, diar_seg.start)
-                overlap_end = min(trans_end, diar_seg.end)
-                overlap = max(0, overlap_end - overlap_start)
-
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = diar_seg.speaker
-
-            if best_speaker is None and diarization_result.segments:
-                closest = min(
-                    diarization_result.segments,
-                    key=lambda s: min(abs(s.start - trans_start), abs(s.end - trans_end))
-                )
-                best_speaker = closest.speaker
+            best_speaker = assign_speaker_by_overlap(
+                trans_start, trans_end, diarization_result.segments
+            )
 
             new_segments.append(SpeakerSegment(
                 speaker=best_speaker or "SPEAKER_00",

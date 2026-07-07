@@ -95,6 +95,7 @@ class FileTranscriptionQueue:
         self.enable_summary = summary.enable
         self.enable_thinking = summary.enable_thinking
         self.custom_prompts = summary.custom_prompts
+        self.summary_preset_name = summary.preset_name
         self.summary_provider = summary.provider
         self.summary_api_key = summary.api_key
         self.summary_model = summary.model
@@ -110,6 +111,13 @@ class FileTranscriptionQueue:
         # Настройки постобработки
         self.enable_postprocessing = postprocess.enable
         self.postprocessing_diarization = postprocess.diarization
+        # Разрешаем "auto": OpenRouter при наличии ключа, иначе локальная
+        backend = postprocess.diarization_backend
+        if backend == "auto":
+            backend = "openrouter" if postprocess.diarization_api_key.strip() else "local"
+        self.postprocessing_diarization_backend = backend
+        self.postprocessing_diarization_api_key = postprocess.diarization_api_key
+        self.postprocessing_diarization_model = postprocess.diarization_model
         self.postprocessing_punctuation = postprocess.punctuation
         self.postprocessing_fillers = postprocess.fillers
         self.postprocessing_normalize = postprocess.normalize
@@ -365,8 +373,12 @@ class FileTranscriptionQueue:
                     if processed_result.has_speakers and processed_result.diarization:
                         diar_result = processed_result.diarization
 
-                        # 1. Сливаем слишком мелких спикеров (ошибки кластеризации)
-                        diar_result = self._text_processor.diarizer.merge_short_speakers(diar_result)
+                        # 1. Сливаем слишком мелких спикеров (ошибки кластеризации).
+                        # Только для локальной диаризации: LLM-разметка достоверна
+                        # и для спикеров с одной репликой.
+                        backend = (processed_result.processing_stats or {}).get("diarization_backend")
+                        if backend != "openrouter":
+                            diar_result = self._text_processor.diarizer.merge_short_speakers(diar_result)
 
                         # 2. Выравниваем с текстом транскрипции (чтобы посчитать слова)
                         # Преобразуем segments транскрипции в формат словаря, который ждет align
@@ -378,6 +390,7 @@ class FileTranscriptionQueue:
 
                         # 3. Теперь обновляем num_speakers и считаем статистику (уже есть текст и правильные спикеры)
                         task.result.num_speakers = diar_result.num_speakers
+                        task.result.speaker_names = dict(diar_result.speaker_names)
 
                         speaker_statistics = diar_result.get_speaker_statistics()
                         if speaker_statistics:
@@ -423,6 +436,7 @@ class FileTranscriptionQueue:
                         raise ValueError("Суммаризация вернула пустой или слишком короткий результат")
                     task.result.summary = summary
                     task.result.summary_metrics = metrics.to_dict() if metrics else None
+                    task.result.summary_preset_name = self.summary_preset_name or None
                 except Exception as e:
                     logger.error(f"Ошибка суммаризации для {task.file_path.name}: {e}")
                     # Теперь мы считаем это ошибкой задачи, если саммаризация была включена и не удалась
@@ -524,21 +538,14 @@ class FileTranscriptionQueue:
         if not task.result or not task.result.segments or not speaker_segments:
             return
 
-        # Для каждого сегмента транскрипции находим соответствующего спикера
+        from .text_processor.diarization import assign_speaker_by_overlap
+
+        # Для каждого сегмента транскрипции находим спикера по суммарному
+        # перекрытию (устойчиво к дроблению диар-сегментов).
         for trans_seg in task.result.segments:
-            best_speaker = None
-            best_overlap = 0
-
-            for diar_seg in speaker_segments:
-                # Вычисляем перекрытие по времени
-                overlap_start = max(trans_seg.start, diar_seg.start)
-                overlap_end = min(trans_seg.end, diar_seg.end)
-                overlap = max(0, overlap_end - overlap_start)
-
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = diar_seg.speaker
-
+            best_speaker = assign_speaker_by_overlap(
+                trans_seg.start, trans_seg.end, speaker_segments
+            )
             if best_speaker:
                 trans_seg.speaker = best_speaker
 
@@ -558,6 +565,9 @@ class FileTranscriptionQueue:
                 enable_fillers=self.postprocessing_fillers,
                 enable_normalize=self.postprocessing_normalize,
                 enable_correct=self.postprocessing_correct,
+                diarization_backend=self.postprocessing_diarization_backend,
+                diarization_api_key=self.postprocessing_diarization_api_key,
+                diarization_model=self.postprocessing_diarization_model,
                 language=self.language,
             )
             self._text_processor = TextProcessingPipeline(config)
@@ -565,6 +575,9 @@ class FileTranscriptionQueue:
         else:
             # Обновляем настройки если изменились
             self._text_processor.config.enable_diarization = self.postprocessing_diarization
+            self._text_processor.config.diarization_backend = self.postprocessing_diarization_backend
+            self._text_processor.config.diarization_api_key = self.postprocessing_diarization_api_key
+            self._text_processor.config.diarization_model = self.postprocessing_diarization_model
             self._text_processor.config.enable_punctuation = self.postprocessing_punctuation
             self._text_processor.config.enable_fillers = self.postprocessing_fillers
             self._text_processor.config.enable_normalize = self.postprocessing_normalize
