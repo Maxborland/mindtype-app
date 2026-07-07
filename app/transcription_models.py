@@ -213,3 +213,8 @@ class PostProcessOptions:
     fillers: bool = True
     normalize: bool = True
     correct: bool = True
+    # Бэкенд диаризации: "auto" (OpenRouter при наличии ключа, иначе локальная),
+    # "local" (MFCC + sklearn) или "openrouter" (chat-LLM, fallback на локальную)
+    diarization_backend: str = "auto"
+    diarization_api_key: str = ""   # OpenRouter API ключ для LLM-диаризации
+    diarization_model: str = ""     # Модель LLM-диаризации

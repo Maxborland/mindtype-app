@@ -111,6 +111,13 @@ class FileTranscriptionQueue:
         # Настройки постобработки
         self.enable_postprocessing = postprocess.enable
         self.postprocessing_diarization = postprocess.diarization
+        # Разрешаем "auto": OpenRouter при наличии ключа, иначе локальная
+        backend = postprocess.diarization_backend
+        if backend == "auto":
+            backend = "openrouter" if postprocess.diarization_api_key.strip() else "local"
+        self.postprocessing_diarization_backend = backend
+        self.postprocessing_diarization_api_key = postprocess.diarization_api_key
+        self.postprocessing_diarization_model = postprocess.diarization_model
         self.postprocessing_punctuation = postprocess.punctuation
         self.postprocessing_fillers = postprocess.fillers
         self.postprocessing_normalize = postprocess.normalize
@@ -366,8 +373,12 @@ class FileTranscriptionQueue:
                     if processed_result.has_speakers and processed_result.diarization:
                         diar_result = processed_result.diarization
 
-                        # 1. Сливаем слишком мелких спикеров (ошибки кластеризации)
-                        diar_result = self._text_processor.diarizer.merge_short_speakers(diar_result)
+                        # 1. Сливаем слишком мелких спикеров (ошибки кластеризации).
+                        # Только для локальной диаризации: LLM-разметка достоверна
+                        # и для спикеров с одной репликой.
+                        backend = (processed_result.processing_stats or {}).get("diarization_backend")
+                        if backend != "openrouter":
+                            diar_result = self._text_processor.diarizer.merge_short_speakers(diar_result)
 
                         # 2. Выравниваем с текстом транскрипции (чтобы посчитать слова)
                         # Преобразуем segments транскрипции в формат словаря, который ждет align
@@ -554,6 +565,9 @@ class FileTranscriptionQueue:
                 enable_fillers=self.postprocessing_fillers,
                 enable_normalize=self.postprocessing_normalize,
                 enable_correct=self.postprocessing_correct,
+                diarization_backend=self.postprocessing_diarization_backend,
+                diarization_api_key=self.postprocessing_diarization_api_key,
+                diarization_model=self.postprocessing_diarization_model,
                 language=self.language,
             )
             self._text_processor = TextProcessingPipeline(config)
@@ -561,6 +575,9 @@ class FileTranscriptionQueue:
         else:
             # Обновляем настройки если изменились
             self._text_processor.config.enable_diarization = self.postprocessing_diarization
+            self._text_processor.config.diarization_backend = self.postprocessing_diarization_backend
+            self._text_processor.config.diarization_api_key = self.postprocessing_diarization_api_key
+            self._text_processor.config.diarization_model = self.postprocessing_diarization_model
             self._text_processor.config.enable_punctuation = self.postprocessing_punctuation
             self._text_processor.config.enable_fillers = self.postprocessing_fillers
             self._text_processor.config.enable_normalize = self.postprocessing_normalize

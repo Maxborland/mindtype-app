@@ -4003,6 +4003,14 @@ class MainWindow(QMainWindow):
                 fillers=cfg.get("postprocessing_fillers", True),
                 normalize=cfg.get("postprocessing_normalize", True),
                 correct=cfg.get("postprocessing_correct", True),
+                diarization_backend=cfg.get("postprocessing_diarization_backend", "auto"),
+                diarization_api_key=cfg.get("openrouter_api_key", ""),
+                # Модель LLM-диаризации: своя, иначе модель саммари, иначе дешёвый дефолт
+                diarization_model=(
+                    cfg.get("openrouter_diarization_model", "")
+                    or cfg.get("openrouter_model", "")
+                    or "openai/gpt-4o-mini"
+                ),
             ),
             on_thinking=lambda text: self.thinking_signal.emit(text),
         )
