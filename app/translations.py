@@ -415,6 +415,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "format_pdf": "PDF",
         "format_both": "HTML + PDF",
         "report_format": "Формат отчёта",
+        "diarization_backend": "Диаризация",
+        "diarization_backend_auto": "Авто (OpenRouter, если задан ключ)",
+        "diarization_backend_openrouter": "OpenRouter (LLM)",
+        "diarization_backend_local": "Локальная (офлайн)",
+        "diarization_backend_tooltip": "Как определять спикеров в записи.\nАвто — через OpenRouter, если задан API ключ, иначе локально.\nOpenRouter (LLM) — модель размечает спикеров по структуре диалога, умеет узнавать имена; при ошибке — откат на локальную.\nЛокальная — офлайн по голосу (MFCC), без затрат.",
 
         # Голосовой ассистент
         "assistant": "Ассистент",
@@ -821,6 +826,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "format_pdf": "PDF",
         "format_both": "HTML + PDF",
         "report_format": "Report format",
+        "diarization_backend": "Diarization",
+        "diarization_backend_auto": "Auto (OpenRouter if key is set)",
+        "diarization_backend_openrouter": "OpenRouter (LLM)",
+        "diarization_backend_local": "Local (offline)",
+        "diarization_backend_tooltip": "How to detect speakers in the recording.\nAuto — via OpenRouter when an API key is set, otherwise locally.\nOpenRouter (LLM) — the model labels speakers by dialogue structure and can recognize names; falls back to local on errors.\nLocal — offline by voice (MFCC), no cost.",
 
         # Setup Wizard
         "setup_welcome_title": "Welcome to MindType",

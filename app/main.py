@@ -2226,6 +2226,31 @@ class MainWindow(QMainWindow):
         format_row.addStretch()
         layout.addLayout(format_row)
 
+        # Способ диаризации (определение спикеров)
+        diar_row = QHBoxLayout()
+        diar_row.setContentsMargins(0, 0, 0, 0)
+        diar_row.setSpacing(SPACING["sm"])
+        self.diarization_backend_label = QLabel(self._t("diarization_backend"))
+        diar_row.addWidget(self.diarization_backend_label)
+        self.diarization_backend_combo = QComboBox()
+        self.diarization_backend_combo.addItem(self._t("diarization_backend_auto"), "auto")
+        self.diarization_backend_combo.addItem(self._t("diarization_backend_openrouter"), "openrouter")
+        self.diarization_backend_combo.addItem(self._t("diarization_backend_local"), "local")
+        saved_diar = cfg.get("postprocessing_diarization_backend", "auto")
+        _diar_idx = self.diarization_backend_combo.findData(saved_diar)
+        self.diarization_backend_combo.setCurrentIndex(
+            _diar_idx if _diar_idx >= 0 else self.diarization_backend_combo.findData("auto")
+        )
+        self.diarization_backend_combo.setToolTip(self._t("diarization_backend_tooltip"))
+        self.diarization_backend_combo.currentIndexChanged.connect(
+            lambda: self.config.update(
+                postprocessing_diarization_backend=self.diarization_backend_combo.currentData()
+            )
+        )
+        diar_row.addWidget(self.diarization_backend_combo)
+        diar_row.addStretch()
+        layout.addLayout(diar_row)
+
         self.output_folder_edit = QLineEdit()
         self.output_folder_edit.setReadOnly(True)
         self.output_folder_edit.setText(str(self._output_dir))
@@ -2844,6 +2869,21 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.output_format_combo.setCurrentIndex(idx)
         self.output_format_combo.blockSignals(False)
+
+        # Способ диаризации
+        if hasattr(self, "diarization_backend_label"):
+            self.diarization_backend_label.setText(self._t("diarization_backend"))
+            current_diar = self.diarization_backend_combo.currentData()
+            self.diarization_backend_combo.blockSignals(True)
+            self.diarization_backend_combo.clear()
+            self.diarization_backend_combo.addItem(self._t("diarization_backend_auto"), "auto")
+            self.diarization_backend_combo.addItem(self._t("diarization_backend_openrouter"), "openrouter")
+            self.diarization_backend_combo.addItem(self._t("diarization_backend_local"), "local")
+            diar_idx = self.diarization_backend_combo.findData(current_diar)
+            if diar_idx >= 0:
+                self.diarization_backend_combo.setCurrentIndex(diar_idx)
+            self.diarization_backend_combo.setToolTip(self._t("diarization_backend_tooltip"))
+            self.diarization_backend_combo.blockSignals(False)
 
         # AI саммари
         self.enable_summary_checkbox.setText(self._t("enable_summary"))
