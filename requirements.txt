@@ -20,7 +20,7 @@ soundfile>=0.12.0
 # ctranslate2==4.4.0
 
 # Кросс-платформенные хоткеи и ввод
-pynput>=1.7.6
+pynput>=1.8.2
 
 # Windows-специфичные
 keyboard>=0.13.5; sys_platform == 'win32'
