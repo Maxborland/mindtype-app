@@ -79,6 +79,11 @@ a = Analysis(
         "openwakeword",
         "edge_tts",
         "pydub",
+        "librosa",
+        "sklearn",
+        "scipy",
+        "numba",
+        "llvmlite",
     ],
     noarchive=False,
 )

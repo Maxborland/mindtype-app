@@ -90,6 +90,7 @@ from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, Credi
 from .overlay import OverlayWidget
 from .exporters import CanonicalExporter
 from .accessibility import configure_accessibility
+from .optional_features import local_diarization_available
 from .transcriber import (
     Transcriber,
     available_transcriber_backends,
@@ -2351,6 +2352,7 @@ class MainWindow(QMainWindow):
         self.diarization_backend_combo.setCurrentIndex(
             _diar_idx if _diar_idx >= 0 else self.diarization_backend_combo.findData("auto")
         )
+        self._configure_local_diarization_option()
         self.diarization_backend_combo.setToolTip(self._t("diarization_backend_tooltip"))
         self.diarization_backend_combo.currentIndexChanged.connect(
             lambda: self.config.update(
@@ -3098,6 +3100,7 @@ class MainWindow(QMainWindow):
             diar_idx = self.diarization_backend_combo.findData(current_diar)
             if diar_idx >= 0:
                 self.diarization_backend_combo.setCurrentIndex(diar_idx)
+            self._configure_local_diarization_option()
             self.diarization_backend_combo.setToolTip(self._t("diarization_backend_tooltip"))
             self.diarization_backend_combo.blockSignals(False)
 
@@ -3145,6 +3148,24 @@ class MainWindow(QMainWindow):
         self.support_label.setText(self._t("contact_support"))
         self._apply_overlay_accessible_texts()
         configure_accessibility(self)
+
+    def _configure_local_diarization_option(self) -> None:
+        index = self.diarization_backend_combo.findData("local")
+        if index < 0:
+            return
+        if local_diarization_available():
+            return
+        self.diarization_backend_combo.setItemText(
+            index,
+            f"{self._t('diarization_backend_local')} "
+            f"({self._t('optional_pack_required')})",
+        )
+        item = self.diarization_backend_combo.model().item(index)
+        if item is not None:
+            item.setEnabled(False)
+        if self.diarization_backend_combo.currentData() == "local":
+            self.diarization_backend_combo.setCurrentIndex(0)
+            self.config.update(postprocessing_diarization_backend="auto")
 
     def _setup_focus_manager(self) -> None:
         """Настроить менеджер фокуса с handle нашего окна."""

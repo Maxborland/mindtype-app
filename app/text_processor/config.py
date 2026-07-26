@@ -19,9 +19,9 @@ class ProcessingConfig:
     enable_correct: bool = True
 
     # Бэкенд диаризации:
-    #   "local"      — MFCC + sklearn (офлайн, лёгкая)
+    #   "local"      — MFCC + sklearn (отдельный optional pack)
     #   "openrouter" — chat-LLM через OpenRouter (нужен API ключ; точнее на диалогах)
-    # При ошибке OpenRouter пайплайн откатывается на локальную.
+    #   "disabled"   — диаризация недоступна в установленном runtime.
     diarization_backend: str = "local"
     # OpenRouter для LLM-диаризации
     diarization_api_key: str = ""
@@ -60,5 +60,4 @@ class ProcessingConfig:
     def __post_init__(self):
         if self.models_cache_dir is None:
             self.models_cache_dir = Path.home() / ".cache" / "mindtype" / "text_processor"
-
 

@@ -227,6 +227,11 @@ class TextProcessingPipeline:
         fallback на локальную MFCC-диаризацию.
         "local" — MFCC + sklearn по аудио.
         """
+        if self.config.diarization_backend == "disabled":
+            stats["diarization_skipped"] = True
+            stats["diarization_error"] = "LOCAL_DIARIZATION_PACK_REQUIRED"
+            return None
+
         # --- OpenRouter (LLM) ---
         if self.config.diarization_backend == "openrouter" and transcription_segments:
             from .llm_diarization import LLMDiarizer
@@ -388,4 +393,3 @@ class TextProcessingPipeline:
     def corrector(self) -> ASRCorrector:
         """Доступ к корректору."""
         return self._corrector
-

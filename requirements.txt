@@ -7,7 +7,6 @@ numpy>=2.4.4
 huggingface-hub>=0.34.0,<1.0
 pyperclip>=1.8.2
 
-librosa>=0.10.0
 soundfile>=0.12.0
 
 # Опционально: legacy faster-whisper
@@ -26,7 +25,6 @@ pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'
 
 # Системные и прочее
 python-dotenv>=1.0.0
-scikit-learn>=1.0.0
 psutil>=7.2.2
 keyring>=24.0.0
 cryptography>=44.0.0,<50.0.0

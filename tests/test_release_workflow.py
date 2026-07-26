@@ -86,6 +86,9 @@ def test_dependency_inputs_are_split_by_installable_capability():
     base = (requirements / "base.in").read_text(encoding="utf-8")
     development = (requirements / "dev.in").read_text(encoding="utf-8")
     onnx = (requirements / "local-onnx.in").read_text(encoding="utf-8")
+    diarization = (
+        requirements / "local-diarization.in"
+    ).read_text(encoding="utf-8")
     assistant = (requirements / "assistant.in").read_text(encoding="utf-8")
 
     assert "PyQt6" in base
@@ -95,14 +98,29 @@ def test_dependency_inputs_are_split_by_installable_capability():
     assert "pyinstaller" in development.lower()
     assert "transformers" in onnx
     assert "onnxruntime" in onnx
+    assert "librosa" in diarization
+    assert "scikit-learn" in diarization
     assert "openwakeword" in assistant
-    for optional in ["torch", "transformers", "optimum", "onnxruntime"]:
+    for optional in [
+        "torch",
+        "transformers",
+        "optimum",
+        "onnxruntime",
+        "librosa",
+        "scikit-learn",
+    ]:
         assert optional not in base.lower()
 
 
 def test_dependency_locks_are_exact_hashed_and_keep_optional_ml_out_of_base():
     requirements = ROOT / "requirements"
-    lock_names = ["base.lock", "dev.lock", "local-onnx.lock", "assistant.lock"]
+    lock_names = [
+        "base.lock",
+        "dev.lock",
+        "local-onnx.lock",
+        "local-diarization.lock",
+        "assistant.lock",
+    ]
 
     for lock_name in lock_names:
         lock = (requirements / lock_name).read_text(encoding="utf-8")
@@ -111,7 +129,16 @@ def test_dependency_locks_are_exact_hashed_and_keep_optional_ml_out_of_base():
         assert "--hash=sha256:" in lock
 
     base = (requirements / "base.lock").read_text(encoding="utf-8").lower()
-    for optional in ["torch==", "transformers==", "optimum==", "onnxruntime=="]:
+    for optional in [
+        "torch==",
+        "transformers==",
+        "optimum==",
+        "onnxruntime==",
+        "librosa==",
+        "scikit-learn==",
+        "scipy==",
+        "numba==",
+    ]:
         assert optional not in base
 
 
@@ -140,7 +167,18 @@ def test_release_verifies_and_publishes_native_artifact_manifests():
 def test_base_pyinstaller_excludes_optional_ml_runtimes():
     spec = (ROOT / "mindtype.spec").read_text(encoding="utf-8")
 
-    for module in ["torch", "transformers", "optimum", "onnxruntime", "openwakeword"]:
+    for module in [
+        "torch",
+        "transformers",
+        "optimum",
+        "onnxruntime",
+        "openwakeword",
+        "librosa",
+        "sklearn",
+        "scipy",
+        "numba",
+        "llvmlite",
+    ]:
         assert f'"{module}"' in spec
 
     assert 'GetModule("UIAutomationCore.dll")' in spec

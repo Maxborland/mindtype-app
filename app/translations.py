@@ -179,6 +179,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "wave_gain": "Усиление волны",
         "opacity": "Прозрачность",
         "reduced_motion": "Уменьшить анимацию",
+        "optional_pack_required": "нужен дополнительный компонент",
 
         # Позиции overlay
         "bottom_center": "Снизу по центру",
@@ -604,6 +605,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "wave_gain": "Wave Gain",
         "opacity": "Opacity",
         "reduced_motion": "Reduce motion",
+        "optional_pack_required": "optional component required",
 
         # Overlay positions
         "bottom_center": "Bottom Center",

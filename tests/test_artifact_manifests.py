@@ -96,3 +96,17 @@ def test_pyinstaller_bundles_only_the_declared_whisper_runtime_files():
         "ggml.dll",
     ]:
         assert name in spec
+
+
+def test_base_installer_excludes_optional_local_diarization_stack():
+    spec = (ROOT / "mindtype.spec").read_text(encoding="utf-8")
+    base = (ROOT / "requirements" / "base.in").read_text(encoding="utf-8")
+    optional = (
+        ROOT / "requirements" / "local-diarization.in"
+    ).read_text(encoding="utf-8")
+
+    for package in ["librosa", "scikit-learn"]:
+        assert package not in base
+        assert package in optional
+    for module in ["librosa", "sklearn", "scipy", "numba", "llvmlite"]:
+        assert f'"{module}"' in spec

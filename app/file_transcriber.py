@@ -14,6 +14,7 @@ from .text_processor.repetition_filter import (
     filter_hallucinated_segments,
     check_transcription_quality,
 )
+from .optional_features import local_diarization_available
 
 # Настройка логирования в файл
 def _setup_logger():
@@ -114,7 +115,14 @@ class FileTranscriptionQueue:
         # Разрешаем "auto": OpenRouter при наличии ключа, иначе локальная
         backend = postprocess.diarization_backend
         if backend == "auto":
-            backend = "openrouter" if postprocess.diarization_api_key.strip() else "local"
+            if postprocess.diarization_api_key.strip():
+                backend = "openrouter"
+            elif local_diarization_available():
+                backend = "local"
+            else:
+                backend = "disabled"
+        elif backend == "local" and not local_diarization_available():
+            backend = "disabled"
         self.postprocessing_diarization_backend = backend
         self.postprocessing_diarization_api_key = postprocess.diarization_api_key
         self.postprocessing_diarization_model = postprocess.diarization_model
