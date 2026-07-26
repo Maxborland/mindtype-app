@@ -140,3 +140,6 @@ def test_base_pyinstaller_excludes_optional_ml_runtimes():
 
     for module in ["torch", "transformers", "optimum", "onnxruntime", "openwakeword"]:
         assert f'"{module}"' in spec
+
+    assert 'GetModule("UIAutomationCore.dll")' in spec
+    assert '"comtypes.gen.UIAutomationClient"' in spec

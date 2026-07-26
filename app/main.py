@@ -76,7 +76,7 @@ from .file_transcriber import (
 )
 from .media_io import get_file_duration
 from .hotkeys import HotkeyListener, HotkeyRecorder
-from .inserter import insert_text, focus_manager
+from .inserter import insert_text_result, focus_manager
 from .licensing import LicenseManager, LicenseStatus
 from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusWidget, TrialExpiredDialog
 from .ui.setup_wizard import SetupWizard
@@ -1762,6 +1762,14 @@ class MainWindow(QMainWindow):
         self._vad_row = perf_section.form.add_row(self._t("vad_filter"), self.vad_toggle)
         self.vad_label = self._vad_row.label
 
+        self.auto_insert_toggle = QCheckBox()
+        self.auto_insert_toggle.setChecked(True)
+        self._auto_insert_row = perf_section.form.add_row(
+            self._t("auto_insert"),
+            self.auto_insert_toggle,
+        )
+        self.auto_insert_label = self._auto_insert_row.label
+
         # Размер луча
         beam_widget = QWidget()
         beam_layout = QHBoxLayout(beam_widget)
@@ -2558,6 +2566,11 @@ class MainWindow(QMainWindow):
 
         # Дополнительные
         self.vad_toggle.toggled.connect(lambda v: self.config.update(vad_filter=v))
+        self.auto_insert_toggle.toggled.connect(
+            lambda enabled: self.config.update(
+                auto_insert_enabled=enabled
+            )
+        )
         self.beam_slider.valueChanged.connect(self._on_beam_change)
 
         # Overlay настройки
@@ -2618,6 +2631,9 @@ class MainWindow(QMainWindow):
 
         # Дополнительные
         self.vad_toggle.setChecked(bool(cfg.get("vad_filter", True)))
+        self.auto_insert_toggle.setChecked(
+            bool(cfg.get("auto_insert_enabled", True))
+        )
         beam = int(cfg.get("beam_size", 5))
         self.beam_slider.setValue(beam)
         self.beam_value_label.setText(str(beam))
@@ -2864,6 +2880,7 @@ class MainWindow(QMainWindow):
         # Дополнительная вкладка
         self.perf_section_label.setTitle(self._t("performance_section"))
         self.vad_label.setText(self._t("vad_filter"))
+        self.auto_insert_label.setText(self._t("auto_insert"))
         self.beam_label.setText(self._t("beam_size"))
         self.model_path_label.setText(self._t("model_path"))
         if hasattr(self, "model_sources_label"):
@@ -3009,6 +3026,16 @@ class MainWindow(QMainWindow):
         self.tray_record_action.triggered.connect(self._tray_start_recording)
         tray_menu.addAction(self.tray_record_action)
 
+        self.tray_repeat_insert_action = QAction(
+            self._t("repeat_last_insert"),
+            self,
+        )
+        self.tray_repeat_insert_action.setEnabled(bool(self.last_text))
+        self.tray_repeat_insert_action.triggered.connect(
+            self._repeat_last_insert
+        )
+        tray_menu.addAction(self.tray_repeat_insert_action)
+
         tray_menu.addSeparator()
 
         # Выход
@@ -3042,6 +3069,26 @@ class MainWindow(QMainWindow):
         self._really_quit = True
         self.close()
 
+    def _repeat_last_insert(self) -> None:
+        """Retry the last durable transcript against its captured target."""
+        if not self.last_text:
+            return
+        result = insert_text_result(self.last_text)
+        if result.success:
+            self._add_journal_entry(
+                "success",
+                "auto_insert_done",
+                is_translatable=True,
+            )
+            return
+        failure = result.failure.value if result.failure else "unknown"
+        self._add_journal_entry(
+            "error",
+            "insert_failed",
+            text=failure,
+            is_translatable=True,
+        )
+
     def _update_tray_icon(self, recording: bool) -> None:
         """Обновить иконку в трее."""
         if self.tray_icon:
@@ -3052,6 +3099,9 @@ class MainWindow(QMainWindow):
         if self.tray_icon:
             self.tray_show_action.setText(self._t("show_window"))
             self.tray_record_action.setText(self._t("start_recording"))
+            self.tray_repeat_insert_action.setText(
+                self._t("repeat_last_insert")
+            )
             self.tray_exit_action.setText(self._t("exit"))
 
     def _apply_overlay_settings(self) -> None:
@@ -3216,7 +3266,9 @@ class MainWindow(QMainWindow):
         operation_token = self._dictation.operation_token
         if not self._dictation.begin_transcription(
             operation_token,
-            auto_insert=True,
+            auto_insert=bool(
+                self.config.config.get("auto_insert_enabled", True)
+            ),
         ):
             return
 
@@ -3438,6 +3490,8 @@ class MainWindow(QMainWindow):
             return
 
         self.last_text = text
+        if self.tray_icon:
+            self.tray_repeat_insert_action.setEnabled(bool(text))
 
         # Добавляем в историю транскрипций (если вкладка История включена)
         if text and hasattr(self, 'transcription_history'):
@@ -3466,12 +3520,18 @@ class MainWindow(QMainWindow):
         if not self._dictation.claim_auto_insert(operation_token):
             return
 
-        ok = insert_text(text)
-        if ok:
+        result = insert_text_result(text)
+        if result.success:
             self._add_journal_entry("success", "auto_insert_done", is_translatable=True)
             self.overlay.show_success()
         else:
-            self._add_journal_entry("error", "error", text="insert_failed", is_translatable=True)
+            failure = result.failure.value if result.failure else "unknown"
+            self._add_journal_entry(
+                "error",
+                "insert_failed",
+                text=failure,
+                is_translatable=True,
+            )
             self.overlay.show_error(self._t("error"))
 
     def _cancel_transcription(self) -> None:

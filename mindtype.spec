@@ -3,6 +3,7 @@
 
 from pathlib import Path
 
+from comtypes.client import GetModule
 from PyInstaller.utils.hooks import collect_data_files
 
 
@@ -32,6 +33,10 @@ for filename in [
 
 datas += collect_data_files("certifi")
 
+# Generate UI Automation type-library wrappers while the build environment is
+# writable, then include them in the frozen application.
+GetModule("UIAutomationCore.dll")
+
 hiddenimports = [
     "app.llm.anthropic",
     "app.llm.gemini",
@@ -46,6 +51,7 @@ hiddenimports = [
     "sounddevice",
     "PyQt6.QtPdf",
     "PyQt6.QtSvg",
+    "comtypes.gen.UIAutomationClient",
 ]
 
 a = Analysis(

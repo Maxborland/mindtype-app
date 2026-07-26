@@ -119,6 +119,7 @@ def _default_config() -> Dict[str, Any]:
         "ui_language": "ru",                 # Язык интерфейса приложения
         "beam_size": 5,
         "vad_filter": True,
+        "auto_insert_enabled": True,
         "hotkey": "ctrl+alt+v",
         "microphone": None,
         "cpu_threads": 4,

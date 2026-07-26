@@ -13,6 +13,7 @@ scikit-learn>=1.0.0
 psutil>=7.2.2
 keyring>=24.0.0
 cryptography>=44.0.0,<50.0.0
+comtypes>=1.4.0,<2.0.0
 num2words>=0.5.13
 dateparser>=1.4.0
 transliterate>=1.10.2

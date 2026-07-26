@@ -20,6 +20,15 @@ from .base import (
     BaseWindowManager,
     BaseTextInserter,
 )
+from ..insertion import (
+    ClipboardPasteAdapter,
+    InsertionFailure,
+    InsertionPipeline,
+    InsertionResult,
+    UIAutomationValueAdapter,
+    UnicodeInputAdapter,
+)
+from ..insertion.uia_windows import set_value_via_uia
 
 
 # Windows API
@@ -116,8 +125,14 @@ class WindowsHotkeyListener(BaseHotkeyListener):
         self._filter: Optional[WinEventFilter] = None
         self._check_timer: Optional[QTimer] = None
         self._vk_keys: List[int] = []
+        self._atom_id: Optional[int] = None
 
         self._parse_combo()
+        if not self._vk_code:
+            raise ValueError(
+                "Глобальный хоткей должен содержать основную клавишу, "
+                "а не только модификаторы."
+            )
 
     def _parse_combo(self) -> None:
         parts = self.combo.lower().replace(" ", "").split("+")
@@ -151,17 +166,30 @@ class WindowsHotkeyListener(BaseHotkeyListener):
         if self._registered_id is not None:
             return
 
-        self._registered_id = hash(self.combo) & 0xFFFF
+        atom_name = f"MindType.Hotkey.{self.combo.lower().replace(' ', '')}"
+        atom_id = int(kernel32.GlobalAddAtomW(atom_name))
+        if not atom_id:
+            raise RuntimeError("Не удалось выделить стабильный ID для хоткея")
+        self._atom_id = atom_id
+        self._registered_id = atom_id
 
-        success = user32.RegisterHotKey(
-            None,
-            self._registered_id,
-            self._modifiers,
-            self._vk_code
-        )
+        try:
+            success = user32.RegisterHotKey(
+                None,
+                self._registered_id,
+                self._modifiers,
+                self._vk_code
+            )
+        except Exception:
+            self._registered_id = None
+            kernel32.GlobalDeleteAtom(self._atom_id)
+            self._atom_id = None
+            raise
 
         if not success:
             self._registered_id = None
+            kernel32.GlobalDeleteAtom(self._atom_id)
+            self._atom_id = None
             raise RuntimeError(
                 f"Не удалось зарегистрировать хоткей: {self.combo}. "
                 "Возможно, он уже используется другим приложением."
@@ -176,6 +204,9 @@ class WindowsHotkeyListener(BaseHotkeyListener):
         if self._registered_id is not None:
             user32.UnregisterHotKey(None, self._registered_id)
             self._registered_id = None
+        if self._atom_id is not None:
+            kernel32.GlobalDeleteAtom(self._atom_id)
+            self._atom_id = None
 
         if self._filter:
             app = QApplication.instance()
@@ -261,8 +292,12 @@ class WindowsHotkeyRecorder(BaseHotkeyRecorder):
         elif event.type() == QEvent.Type.KeyRelease:
             if self._pressed_keys:
                 combo = self._format_combo()
-                self.stop()
-                self._on_recorded(combo)
+                main_key = combo.split("+")[-1] if combo else ""
+                if main_key not in {"ctrl", "alt", "shift", "win", ""}:
+                    self.stop()
+                    self._on_recorded(combo)
+                else:
+                    self._pressed_keys.clear()
             return True
 
         return False
@@ -322,6 +357,9 @@ class WindowsWindowManager(BaseWindowManager):
     def get_foreground_window(self) -> int:
         return user32.GetForegroundWindow()
 
+    def is_window_valid(self, window) -> bool:
+        return bool(window and user32.IsWindow(window))
+
     def get_window_title(self, window) -> str:
         if not window:
             return ""
@@ -334,9 +372,14 @@ class WindowsWindowManager(BaseWindowManager):
             return ""
 
     def set_foreground_window(self, window) -> bool:
-        if not window:
+        if not self.is_window_valid(window) or self.is_our_window(window):
             return False
 
+        attached_current = False
+        attached_target = False
+        current_thread_id = 0
+        target_thread_id = 0
+        our_thread_id = 0
         try:
             current_hwnd = user32.GetForegroundWindow()
 
@@ -347,9 +390,6 @@ class WindowsWindowManager(BaseWindowManager):
             target_thread_id = user32.GetWindowThreadProcessId(window, None)
             our_thread_id = kernel32.GetCurrentThreadId()
 
-            attached_current = False
-            attached_target = False
-
             if current_thread_id != our_thread_id:
                 user32.AttachThreadInput(our_thread_id, current_thread_id, True)
                 attached_current = True
@@ -359,17 +399,16 @@ class WindowsWindowManager(BaseWindowManager):
                 attached_target = True
 
             user32.ShowWindow(window, SW_RESTORE)
-            user32.SetForegroundWindow(window)
+            foreground_set = bool(user32.SetForegroundWindow(window))
             user32.BringWindowToTop(window)
-
-            if attached_current:
-                user32.AttachThreadInput(our_thread_id, current_thread_id, False)
-            if attached_target:
-                user32.AttachThreadInput(our_thread_id, target_thread_id, False)
-
-            return True
+            return foreground_set or user32.GetForegroundWindow() == window
         except Exception:
             return False
+        finally:
+            if attached_target:
+                user32.AttachThreadInput(our_thread_id, target_thread_id, False)
+            if attached_current:
+                user32.AttachThreadInput(our_thread_id, current_thread_id, False)
 
     def minimize_window(self, window) -> bool:
         if not window:
@@ -384,77 +423,112 @@ class WindowsWindowManager(BaseWindowManager):
 class WindowsTextInserter(BaseTextInserter):
     """Windows реализация вставки текста."""
 
-    def __init__(self, window_manager: WindowsWindowManager) -> None:
+    def __init__(
+        self,
+        window_manager: WindowsWindowManager,
+        *,
+        pipeline: Optional[InsertionPipeline] = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         super().__init__(window_manager)
+        self._sleep = sleep
+        self._unicode_adapter = UnicodeInputAdapter(
+            send_code_unit=self._send_unicode_code_unit
+        )
+        self._pipeline = pipeline or InsertionPipeline(
+            [
+                ClipboardPasteAdapter(
+                    read_clipboard=pyperclip.paste,
+                    write_clipboard=pyperclip.copy,
+                    send_paste=self._send_ctrl_v,
+                    release_modifiers=self._release_modifiers,
+                    sleep=sleep,
+                ),
+                self._unicode_adapter,
+                UIAutomationValueAdapter(set_value=set_value_via_uia),
+            ],
+            validate_target=self._target_is_active,
+        )
+        self.last_result = InsertionResult.failed(InsertionFailure.EMPTY_TEXT)
 
     def insert_text(self, text: str, delay: float = 0.1) -> bool:
+        """Compatibility wrapper for callers that only need success/failure."""
+        return self.insert_text_result(text, delay).success
+
+    def insert_text_result(
+        self,
+        text: str,
+        delay: float = 0.1,
+    ) -> InsertionResult:
         if not text:
-            return False
+            self.last_result = InsertionResult.failed(
+                InsertionFailure.EMPTY_TEXT
+            )
+            return self.last_result
 
         try:
-            # Полное восстановление фокуса на целевое окно
-            if self._window_manager.has_saved_window:
-                self._window_manager.restore_window()
-                time.sleep(delay + 0.1) # Увеличиваем задержку для надежного переключения
+            target = self._window_manager.saved_window
+            if (
+                not target
+                or not self._window_manager.is_window_valid(target)
+                or self._window_manager.is_our_window(target)
+            ):
+                self.last_result = InsertionResult.failed(
+                    InsertionFailure.TARGET_INVALID
+                )
+                return self.last_result
+            if not self._window_manager.restore_window():
+                self.last_result = InsertionResult.failed(
+                    InsertionFailure.TARGET_NOT_FOCUSED
+                )
+                return self.last_result
 
-            # Проверка текущего активного окна
-            current_hwnd = user32.GetForegroundWindow()
-            # Если мы всё еще в нашем окне, вставка может не сработать
-            if self._window_manager._our_window and current_hwnd == self._window_manager._our_window:
-                # Попытка №2: форсированное переключение
-                self._window_manager.restore_window()
-                time.sleep(0.2)
+            self._sleep(delay + 0.1)
+            if self._window_manager.get_foreground_window() != target:
+                self.last_result = InsertionResult.failed(
+                    InsertionFailure.TARGET_NOT_FOCUSED
+                )
+                return self.last_result
 
-            # Сохраняем предыдущий буфер обмена
-            prev_clip: Optional[str] = None
-            try:
-                prev_clip = pyperclip.paste()
-            except Exception:
-                prev_clip = None
-
-            # Копируем текст
-            pyperclip.copy(text)
-            time.sleep(0.05)
-
-            # Освобождаем модификаторы (Ctrl, Shift, Alt, Win), которые могут быть зажаты
-            self._release_modifiers()
-            time.sleep(0.05)
-
-            # Вставляем через Ctrl+V
-            self._send_ctrl_v()
-            time.sleep(delay)
-
-            # Восстанавливаем буфер обмена
-            if prev_clip is not None:
-                try:
-                    pyperclip.copy(prev_clip)
-                except Exception:
-                    pass
-
-            return True
+            self.last_result = self._pipeline.insert(
+                text,
+                target=target,
+                delay=delay,
+            )
+            return self.last_result
         except Exception as e:
             if 'logger' in globals():
                 logger.error(f"Ошибка вставки текста: {e}")
-            return False
+            self.last_result = InsertionResult.failed(
+                InsertionFailure.ALL_METHODS_FAILED,
+                error=str(e),
+            )
+            return self.last_result
 
     def type_text(self, text: str) -> bool:
         """Напечатать текст посимвольно через SendInput."""
         if not text:
             return False
 
-        try:
-            for char in text:
-                self._send_char(char)
-                time.sleep(0.01)
-            return True
-        except Exception:
-            return False
+        result = self._unicode_adapter.attempt(
+            text,
+            target=self._window_manager.get_foreground_window(),
+            delay=0,
+        )
+        return result.success
 
     def _release_modifiers(self) -> None:
         """Освободить зажатые модификаторы."""
         modifiers = [0x11, 0x12, 0x10, 0x5B]  # Ctrl, Alt, Shift, Win
         for vk in modifiers:
             user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+    def _target_is_active(self, target: object) -> bool:
+        return bool(
+            self._window_manager.is_window_valid(target)
+            and not self._window_manager.is_our_window(target)
+            and self._window_manager.get_foreground_window() == target
+        )
 
     def _send_ctrl_v(self) -> None:
         """Отправить Ctrl+V."""
@@ -463,8 +537,8 @@ class WindowsTextInserter(BaseTextInserter):
         user32.keybd_event(0x56, 0, KEYEVENTF_KEYUP, 0)
         user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
 
-    def _send_char(self, char: str) -> None:
-        """Отправить один символ."""
+    def _send_unicode_code_unit(self, code_unit: int, key_up: bool) -> bool:
+        """Отправить одну UTF-16 code unit через SendInput."""
         # Используем SendInput для unicode символов
         from ctypes import Structure, Union, sizeof
 
@@ -487,17 +561,20 @@ class WindowsTextInserter(BaseTextInserter):
         KEYEVENTF_UNICODE = 0x0004
         INPUT_KEYBOARD = 1
 
-        # Key down
         inp = INPUT()
         inp.type = INPUT_KEYBOARD
         inp.ki.wVk = 0
-        inp.ki.wScan = ord(char)
-        inp.ki.dwFlags = KEYEVENTF_UNICODE
-        user32.SendInput(1, ctypes.byref(inp), sizeof(INPUT))
+        inp.ki.wScan = code_unit
+        inp.ki.dwFlags = KEYEVENTF_UNICODE | (
+            KEYEVENTF_KEYUP if key_up else 0
+        )
+        return user32.SendInput(1, ctypes.byref(inp), sizeof(INPUT)) == 1
 
-        # Key up
-        inp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-        user32.SendInput(1, ctypes.byref(inp), sizeof(INPUT))
+    def _send_char(self, char: str) -> None:
+        """Compatibility helper for a single Unicode character."""
+        result = self._unicode_adapter.attempt(char, target=None, delay=0)
+        if not result.success:
+            raise RuntimeError(result.error or "SendInput failed")
 
 
 class WindowsPlatform(BasePlatform):
@@ -536,5 +613,3 @@ class WindowsPlatform(BasePlatform):
 
     def create_text_inserter(self) -> WindowsTextInserter:
         return WindowsTextInserter(self.create_window_manager())
-
-

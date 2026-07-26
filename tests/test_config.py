@@ -53,6 +53,7 @@ class TestDefaultConfig:
         assert defaults["language"] == "ru"
         assert defaults["hotkey"] == "ctrl+alt+v"
         assert defaults["vad_filter"] is True
+        assert defaults["auto_insert_enabled"] is True
 
     def test_config_contains_overlay_settings(self):
         """_default_config должен содержать настройки overlay."""
