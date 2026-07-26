@@ -1,0 +1,6 @@
+# Test and release tooling. Install together with base.lock.
+pytest>=9.0.3
+pytest-cov>=4.0.0
+pyinstaller>=6.0.0,<7.0.0
+pip-tools>=7.5.0,<8.0.0
+cyclonedx-bom>=7.0.0,<8.0.0

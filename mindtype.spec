@@ -13,10 +13,22 @@ for source, destination in [
     (ROOT / "app" / "assets", "app/assets"),
     (ROOT / "app" / "ui" / "fonts", "app/ui/fonts"),
     (ROOT / "assets", "assets"),
-    (ROOT / "bin" / "win-x64", "bin/win-x64"),
 ]:
     if source.exists():
         datas.append((str(source), destination))
+
+for filename in [
+    "whisper-cli.exe",
+    "whisper-server.exe",
+    "whisper.dll",
+    "ggml-base.dll",
+    "ggml-cpu.dll",
+    "ggml-vulkan.dll",
+    "ggml.dll",
+]:
+    source = ROOT / "bin" / "win-x64" / filename
+    if source.exists():
+        datas.append((str(source), "bin/win-x64"))
 
 datas += collect_data_files("certifi")
 

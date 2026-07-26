@@ -79,6 +79,62 @@ def test_onnx_dependencies_use_a_compatible_transformers_range():
     assert "openwakeword>=0.6.0" in assistant
 
 
+def test_dependency_inputs_are_split_by_installable_capability():
+    requirements = ROOT / "requirements"
+    base = (requirements / "base.in").read_text(encoding="utf-8")
+    development = (requirements / "dev.in").read_text(encoding="utf-8")
+    onnx = (requirements / "local-onnx.in").read_text(encoding="utf-8")
+    assistant = (requirements / "assistant.in").read_text(encoding="utf-8")
+
+    assert "PyQt6" in base
+    assert "cryptography" in base
+    assert "pytest" not in base
+    assert "pytest" in development
+    assert "pyinstaller" in development.lower()
+    assert "transformers" in onnx
+    assert "onnxruntime" in onnx
+    assert "openwakeword" in assistant
+    for optional in ["torch", "transformers", "optimum", "onnxruntime"]:
+        assert optional not in base.lower()
+
+
+def test_dependency_locks_are_exact_hashed_and_keep_optional_ml_out_of_base():
+    requirements = ROOT / "requirements"
+    lock_names = ["base.lock", "dev.lock", "local-onnx.lock", "assistant.lock"]
+
+    for lock_name in lock_names:
+        lock = (requirements / lock_name).read_text(encoding="utf-8")
+        assert "# WARNING" not in lock
+        assert "==" in lock
+        assert "--hash=sha256:" in lock
+
+    base = (requirements / "base.lock").read_text(encoding="utf-8").lower()
+    for optional in ["torch==", "transformers==", "optimum==", "onnxruntime=="]:
+        assert optional not in base
+
+
+def test_release_installs_hashed_locks_and_publishes_validated_sbom():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    assert "--require-hashes" in workflow
+    assert "-r requirements/base.lock" in workflow
+    assert "-r requirements/dev.lock" in workflow
+    assert "pip install -r requirements.txt" not in workflow
+    assert "python -m cyclonedx_py requirements" in workflow
+    assert "--validate" in workflow
+    assert ".cdx.json" in workflow
+    assert "requirements/*.in" in workflow
+    assert "requirements/*.lock" in workflow
+
+
+def test_release_verifies_and_publishes_native_artifact_manifests():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    assert "scripts/verify_artifact_manifests.py" in workflow
+    assert "--release" in workflow
+    assert "manifests/*.json" in workflow
+
+
 def test_base_pyinstaller_excludes_optional_ml_runtimes():
     spec = (ROOT / "mindtype.spec").read_text(encoding="utf-8")
 

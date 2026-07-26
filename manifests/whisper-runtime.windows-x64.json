@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "manifest_kind": "runtime",
+  "release_ready": false,
+  "artifacts": [],
+  "unverified_artifacts": [
+    {
+      "path": "bin/win-x64/whisper-cli.exe",
+      "size": 481280,
+      "sha256": "dc1648751878e91acb5cfaa69bd85cff64ede44497a108844ad9d4f106cb14e8",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    },
+    {
+      "path": "bin/win-x64/whisper-server.exe",
+      "size": 721408,
+      "sha256": "a2c982310ca6823bf32674e9b23c6fed408a83fabacfc5aa888b8287544794f8",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    },
+    {
+      "path": "bin/win-x64/whisper.dll",
+      "size": 1307648,
+      "sha256": "b047fc73d130843dc4b35f9f036ae8a2a57cc35a62eb97e0b7f7fc83b52f12ff",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    },
+    {
+      "path": "bin/win-x64/ggml-base.dll",
+      "size": 533504,
+      "sha256": "c4efa65924a362ab7311ba8a952b7c3a8d05cad159cbf209c288bff5868b4471",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    },
+    {
+      "path": "bin/win-x64/ggml-cpu.dll",
+      "size": 650752,
+      "sha256": "2c631ca267f7687fe72faf64d0bd700a477af91cc1d53228e96b9bcc2e211eee",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    },
+    {
+      "path": "bin/win-x64/ggml-vulkan.dll",
+      "size": 48899072,
+      "sha256": "b502c014eea4fbff687df6ab3ad5c01987afb7f6386a072809df4815989b4aa7",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    },
+    {
+      "path": "bin/win-x64/ggml.dll",
+      "size": 67584,
+      "sha256": "8bfc742bf36a61c4524d1b5bbf599a49825277a64df71bbd2f70a02247f2fdcc",
+      "reason": "Upstream whisper.cpp commit, build flags, source URL, and license record are not documented."
+    }
+  ]
+}

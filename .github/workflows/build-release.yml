@@ -38,6 +38,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements/base.lock
+            requirements/dev.lock
 
       - name: Determine and validate version
         id: version
@@ -59,8 +62,9 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller
+          python -m pip install --require-hashes `
+            -r requirements/base.lock `
+            -r requirements/dev.lock
           python -m pip check
 
       - name: Embed and verify release entitlement trust root
@@ -79,6 +83,18 @@ jobs:
           }
           python scripts/embed_release_trust_root.py
           python scripts/embed_release_trust_root.py --check
+
+      - name: Verify native runtime and model manifests
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            python scripts/verify_artifact_manifests.py --release
+          } else {
+            python scripts/verify_artifact_manifests.py
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native artifact manifest verification failed"
+          }
 
       - name: Run regression gate
         shell: pwsh
@@ -191,6 +207,21 @@ jobs:
           "$Hash  $(Split-Path $Installer -Leaf)" |
             Set-Content -Encoding ascii "$Installer.sha256"
 
+      - name: Generate and validate CycloneDX SBOM
+        shell: pwsh
+        run: |
+          $Sbom = "dist\MindType-${{ steps.version.outputs.version }}.cdx.json"
+          python -m cyclonedx_py requirements requirements/base.lock `
+            --mc-type application `
+            --spec-version 1.6 `
+            --output-reproducible `
+            --output-format JSON `
+            --output-file $Sbom `
+            --validate
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Sbom)) {
+            throw "CycloneDX SBOM generation or validation failed"
+          }
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
@@ -203,6 +234,10 @@ jobs:
           path: |
             dist/MindType-${{ steps.version.outputs.version }}-Setup.exe
             dist/MindType-${{ steps.version.outputs.version }}-Setup.exe.sha256
+            dist/MindType-${{ steps.version.outputs.version }}.cdx.json
+            requirements/*.in
+            requirements/*.lock
+            manifests/*.json
           if-no-files-found: error
           retention-days: 30
 
@@ -234,4 +269,4 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-          files: artifacts/*
+          files: artifacts/**/*
