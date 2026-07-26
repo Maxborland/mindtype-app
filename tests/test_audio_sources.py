@@ -187,6 +187,46 @@ def test_device_disconnect_preserves_partial_system_recording(
         assert audio.getnframes() == 1
 
 
+def test_stop_does_not_publish_track_while_capture_still_owns_wav(
+    tmp_path: Path,
+) -> None:
+    entered_record = threading.Event()
+    release_record = threading.Event()
+
+    class _BlockedRecorder(_FakeRecorder):
+        def record(self, *, numframes: int) -> np.ndarray:
+            del numframes
+            entered_record.set()
+            release_record.wait(timeout=2)
+            return np.empty((0, 2), dtype=np.float32)
+
+    backend = _FakeSoundCard(
+        [
+            _FakeMicrophone(
+                identifier="speaker-1",
+                name="Speakers",
+                isloopback=True,
+                recorder=_BlockedRecorder([]),
+            )
+        ]
+    )
+    recorder = SystemAudioRecorder(backend=backend, temp_dir=tmp_path)
+
+    recorder.start(device_id="speaker-1")
+    assert entered_record.wait(timeout=1)
+    unfinished = recorder.stop(timeout=0.01)
+
+    assert unfinished.status is AudioCaptureStatus.INTERRUPTED
+    assert unfinished.track is None
+
+    release_record.set()
+    finalized = recorder.stop(timeout=1)
+
+    assert finalized.status is AudioCaptureStatus.INTERRUPTED
+    assert finalized.track is not None
+    assert finalized.track.path.is_file()
+
+
 def test_device_is_rediscovered_when_capture_starts(tmp_path: Path) -> None:
     backend = _FakeSoundCard(
         [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,74 @@ def response(status: int, payload=None, headers=None):
         else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     )
     return HTTPResponse(status=status, headers=headers or {}, body=body)
+
+
+def test_url_transport_wraps_success_response_read_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.providers.mindtype_cloud import TransportError, UrlLibTransport
+
+    class StalledResponse:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            raise TimeoutError("response body stalled")
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: StalledResponse(),
+    )
+
+    with pytest.raises(TransportError, match="response body stalled"):
+        UrlLibTransport().request(
+            "GET",
+            "https://mindtype.space/v1/usage",
+            headers={},
+            body=None,
+            timeout=1,
+        )
+
+
+def test_url_transport_wraps_error_response_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.providers.mindtype_cloud import TransportError, UrlLibTransport
+
+    class StalledErrorBody:
+        def read(self):
+            raise OSError("error body stalled")
+
+        def close(self):
+            return None
+
+    failure = urllib.error.HTTPError(
+        "https://mindtype.space/v1/usage",
+        503,
+        "unavailable",
+        {},
+        StalledErrorBody(),
+    )
+
+    def raise_failure(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_failure)
+
+    with pytest.raises(TransportError, match="error body stalled"):
+        UrlLibTransport().request(
+            "GET",
+            "https://mindtype.space/v1/usage",
+            headers={},
+            body=None,
+            timeout=1,
+        )
 
 
 def test_401_refreshes_once_and_preserves_idempotency_key() -> None:

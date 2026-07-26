@@ -291,13 +291,21 @@ class SystemAudioRecorder:
 
         ended_at = self._ended_at_ns or time.monotonic_ns()
         started_at = self._started_at_ns or ended_at
-        track = RecordedTrack(
-            source=AudioSourceKind.SYSTEM,
-            path=path,
-            sample_rate=self.sample_rate,
-            channels=self.channels,
-            started_at_monotonic_ns=started_at,
-            ended_at_monotonic_ns=max(started_at, ended_at),
+        capture_finalized = (
+            self._capture_thread is None
+            and self._writer_thread is None
+        )
+        track = (
+            RecordedTrack(
+                source=AudioSourceKind.SYSTEM,
+                path=path,
+                sample_rate=self.sample_rate,
+                channels=self.channels,
+                started_at_monotonic_ns=started_at,
+                ended_at_monotonic_ns=max(started_at, ended_at),
+            )
+            if capture_finalized and path.is_file()
+            else None
         )
         error = self._capture_error or self._writer_error
         status = (
@@ -305,7 +313,7 @@ class SystemAudioRecorder:
             if error is not None
             else AudioCaptureStatus.COMPLETED
         )
-        if self._capture_thread is None and self._writer_thread is None:
+        if capture_finalized:
             self._path = None
             self._started_at_ns = None
             self._ended_at_ns = None

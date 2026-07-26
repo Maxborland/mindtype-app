@@ -86,6 +86,13 @@ class HTTPTransport(Protocol):
 
 
 class UrlLibTransport:
+    @staticmethod
+    def _read_body(response: Any) -> bytes:
+        try:
+            return response.read()
+        except OSError as exc:
+            raise TransportError(str(exc)) from exc
+
     def request(
         self,
         method: str,
@@ -106,16 +113,20 @@ class UrlLibTransport:
                 return HTTPResponse(
                     status=response.status,
                     headers=dict(response.headers.items()),
-                    body=response.read(),
+                    body=self._read_body(response),
                 )
         except urllib.error.HTTPError as exc:
             return HTTPResponse(
                 status=exc.code,
                 headers=dict(exc.headers.items()) if exc.headers else {},
-                body=exc.read(),
+                body=self._read_body(exc),
             )
+        except TransportError:
+            raise
         except urllib.error.URLError as exc:
             raise TransportError(str(exc.reason)) from exc
+        except OSError as exc:
+            raise TransportError(str(exc)) from exc
 
 
 TokenSource = str | Callable[[], str]
