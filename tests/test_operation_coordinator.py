@@ -174,6 +174,236 @@ def test_recorded_dictation_is_adopted_and_completed_before_source_cleanup(
     assert completed.canonical_result_path.is_file()
 
 
+def test_multitrack_dictation_keeps_tracks_and_projects_channels(
+    tmp_path: Path,
+) -> None:
+    import json
+    import wave
+
+    import numpy as np
+
+    from app.audio_sources import (
+        AudioCaptureResult,
+        AudioCaptureStatus,
+        AudioSourceKind,
+        MultiTrackCapture,
+        RecordedTrack,
+    )
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    def write_wav(path: Path, channels: int, sample_rate: int) -> None:
+        with wave.open(str(path), "wb") as output:
+            output.setnchannels(channels)
+            output.setsampwidth(2)
+            output.setframerate(sample_rate)
+            output.writeframes(
+                np.zeros((sample_rate // 10, channels), dtype="<i2").tobytes()
+            )
+
+    mic_path = tmp_path / "mic.wav"
+    system_path = tmp_path / "system.wav"
+    write_wav(mic_path, 1, 16_000)
+    write_wav(system_path, 2, 48_000)
+    capture = MultiTrackCapture(
+        results=(
+            AudioCaptureResult(
+                AudioCaptureStatus.COMPLETED,
+                RecordedTrack(
+                    AudioSourceKind.MICROPHONE,
+                    mic_path,
+                    16_000,
+                    1,
+                    10,
+                    100_000_010,
+                ),
+            ),
+            AudioCaptureResult(
+                AudioCaptureStatus.COMPLETED,
+                RecordedTrack(
+                    AudioSourceKind.SYSTEM,
+                    system_path,
+                    48_000,
+                    2,
+                    20,
+                    100_000_020,
+                ),
+            ),
+        )
+    )
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+
+    operation = coordinator.adopt_multitrack_dictation(
+        capture,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="multitrack-dictation",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    completed = coordinator.complete_dictation(
+        operation.operation_id,
+        text="Встреча",
+        language="ru",
+        confidence=1.0,
+        duration_ms=100,
+    )
+    payload = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+    operation_dir = tmp_path / "spool" / "multitrack-dictation"
+
+    assert operation.source_asset_path.name == "source.wav"
+    assert (operation_dir / "track-microphone.wav").is_file()
+    assert (operation_dir / "track-system.wav").is_file()
+    assert [channel["source"] for channel in payload["source"]["channels"]] == [
+        "microphone",
+        "system",
+    ]
+    assert not mic_path.exists()
+    assert not system_path.exists()
+
+    coordinator.acknowledge_result(operation.operation_id)
+    assert not operation.source_asset_path.exists()
+    assert not (operation_dir / "track-microphone.wav").exists()
+    assert not (operation_dir / "track-system.wav").exists()
+
+
+def test_interrupted_multitrack_capture_is_retryable_with_partial_track(
+    tmp_path: Path,
+) -> None:
+    import wave
+
+    import numpy as np
+
+    from app.audio_sources import (
+        AudioCaptureResult,
+        AudioCaptureStatus,
+        AudioSourceKind,
+        MultiTrackCapture,
+        RecordedTrack,
+    )
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    partial = tmp_path / "partial.wav"
+    with wave.open(str(partial), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16_000)
+        output.writeframes(np.zeros(160, dtype="<i2").tobytes())
+    capture = MultiTrackCapture(
+        results=(
+            AudioCaptureResult(
+                AudioCaptureStatus.INTERRUPTED,
+                RecordedTrack(
+                    AudioSourceKind.MICROPHONE,
+                    partial,
+                    16_000,
+                    1,
+                    1,
+                    10_000_001,
+                ),
+                "device disconnected",
+            ),
+        )
+    )
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+
+    operation = coordinator.adopt_multitrack_dictation(
+        capture,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="interrupted-dictation",
+    )
+
+    assert operation.status is OperationStatus.RETRYABLE
+    assert operation.source_asset_path.is_file()
+    assert "device disconnected" in (operation.last_error_code or "")
+
+
+def test_failed_multitrack_projection_cleans_spool_copies_not_originals(
+    tmp_path: Path,
+) -> None:
+    import wave
+
+    import numpy as np
+    import pytest
+
+    from app.audio_sources import (
+        AudioCaptureResult,
+        AudioCaptureStatus,
+        AudioSourceKind,
+        MultiTrackCapture,
+        RecordedTrack,
+    )
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    valid = tmp_path / "mic.wav"
+    with wave.open(str(valid), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16_000)
+        output.writeframes(np.zeros(160, dtype="<i2").tobytes())
+    corrupt = tmp_path / "system.wav"
+    corrupt.write_bytes(b"not-a-wave")
+    capture = MultiTrackCapture(
+        results=(
+            AudioCaptureResult(
+                AudioCaptureStatus.COMPLETED,
+                RecordedTrack(
+                    AudioSourceKind.MICROPHONE,
+                    valid,
+                    16_000,
+                    1,
+                    1,
+                    10_000_001,
+                ),
+            ),
+            AudioCaptureResult(
+                AudioCaptureStatus.COMPLETED,
+                RecordedTrack(
+                    AudioSourceKind.SYSTEM,
+                    corrupt,
+                    48_000,
+                    2,
+                    1,
+                    10_000_001,
+                ),
+            ),
+        )
+    )
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+
+    with pytest.raises(wave.Error):
+        coordinator.adopt_multitrack_dictation(
+            capture,
+            route={"transcription": {"provider": "local", "model": "tiny"}},
+            operation_id="failed-projection",
+        )
+
+    operation_dir = tmp_path / "spool" / "failed-projection"
+    assert list(operation_dir.glob("source.*")) == []
+    assert list(operation_dir.glob("track-*.wav")) == []
+    assert valid.is_file()
+    assert corrupt.is_file()
+
+
 def test_file_task_completion_persists_canonical_raw_and_processed_result(
     tmp_path: Path,
 ) -> None:

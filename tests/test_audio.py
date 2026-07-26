@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from app.audio import AudioRecorder
+from app.audio_sources import AudioCaptureStatus, AudioSourceKind
 
 
 class TestAudioRecorder:
@@ -245,3 +246,44 @@ class TestErrorHandling:
 
         assert result is False
         assert recorder.monitoring is False
+
+    @patch("app.audio.sd.RawInputStream")
+    def test_typed_stop_preserves_completed_microphone_track(
+        self,
+        mock_stream,
+    ):
+        recorder = AudioRecorder()
+        recorder.start()
+
+        result = recorder.stop_capture()
+
+        assert result.status is AudioCaptureStatus.COMPLETED
+        assert result.track is not None
+        assert result.track.source is AudioSourceKind.MICROPHONE
+        assert result.track.path.is_file()
+        result.track.path.unlink()
+
+    @patch("app.audio.sd.RawInputStream")
+    def test_typed_stop_preserves_partial_track_after_device_disconnect(
+        self,
+        mock_stream,
+    ):
+        stream = MagicMock()
+        stream.stop.side_effect = OSError("device disconnected")
+        mock_stream.return_value = stream
+        recorder = AudioRecorder()
+        recorder.start()
+        recorder._callback(
+            np.array([100, -100], dtype=np.int16).tobytes(),
+            2,
+            None,
+            None,
+        )
+
+        result = recorder.stop_capture()
+
+        assert result.status is AudioCaptureStatus.INTERRUPTED
+        assert result.track is not None
+        assert result.track.path.is_file()
+        assert "device disconnected" in (result.error or "")
+        result.track.path.unlink()

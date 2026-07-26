@@ -1,0 +1,383 @@
+"""Typed Windows audio-source lifecycle for microphone and WASAPI loopback."""
+
+from __future__ import annotations
+
+import queue
+import tempfile
+import threading
+import time
+import wave
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, Optional, Protocol
+
+import numpy as np
+
+
+class AudioSourceKind(str, Enum):
+    MICROPHONE = "microphone"
+    SYSTEM = "system"
+    MICROPHONE_SYSTEM = "microphone_system"
+
+
+class AudioCaptureStatus(str, Enum):
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+
+
+@dataclass(frozen=True)
+class AudioDevice:
+    device_id: str
+    name: str
+    source: AudioSourceKind
+
+
+@dataclass(frozen=True)
+class RecordedTrack:
+    source: AudioSourceKind
+    path: Path
+    sample_rate: int
+    channels: int
+    started_at_monotonic_ns: int
+    ended_at_monotonic_ns: int
+
+    def canonical_channel(self, *, sha256: Optional[str] = None) -> dict[str, Any]:
+        channel: dict[str, Any] = {
+            "source": self.source.value,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
+            "started_at_monotonic_ns": self.started_at_monotonic_ns,
+            "ended_at_monotonic_ns": self.ended_at_monotonic_ns,
+        }
+        if sha256 is not None:
+            channel["sha256"] = sha256
+        return channel
+
+
+@dataclass(frozen=True)
+class AudioCaptureResult:
+    status: AudioCaptureStatus
+    track: Optional[RecordedTrack]
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MultiTrackCapture:
+    results: tuple[AudioCaptureResult, ...]
+
+    @property
+    def interrupted(self) -> bool:
+        return any(
+            result.status is AudioCaptureStatus.INTERRUPTED
+            for result in self.results
+        )
+
+    @property
+    def tracks(self) -> tuple[RecordedTrack, ...]:
+        return tuple(
+            result.track for result in self.results if result.track is not None
+        )
+
+
+class _SoundCardBackend(Protocol):
+    def all_microphones(self, *, include_loopback: bool) -> list[Any]: ...
+
+
+def _load_soundcard() -> _SoundCardBackend:
+    try:
+        import soundcard
+    except ImportError as exc:
+        raise RuntimeError(
+            "Windows system audio is unavailable: SoundCard is not installed"
+        ) from exc
+    return soundcard
+
+
+def _device_id(device: Any) -> str:
+    identifier = getattr(device, "id", None)
+    if identifier is None:
+        identifier = getattr(device, "_id", None)
+    if identifier is None:
+        raise RuntimeError("WASAPI device has no stable backend identifier")
+    return str(identifier)
+
+
+class SystemAudioRecorder:
+    """Record one WASAPI loopback endpoint to a separate stereo WAV."""
+
+    def __init__(
+        self,
+        *,
+        backend: Optional[_SoundCardBackend] = None,
+        temp_dir: Optional[Path] = None,
+        sample_rate: int = 48_000,
+        channels: int = 2,
+        block_frames: int = 1_024,
+        queue_blocks: int = 256,
+    ) -> None:
+        if sample_rate <= 0 or channels <= 0 or block_frames <= 0:
+            raise ValueError("audio dimensions must be positive")
+        if queue_blocks <= 0:
+            raise ValueError("queue_blocks must be positive")
+        self._backend = backend
+        self._temp_dir = Path(temp_dir) if temp_dir is not None else None
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.block_frames = block_frames
+        self._queue_blocks = queue_blocks
+        self._queue: queue.Queue[Optional[bytes]] = queue.Queue(
+            maxsize=queue_blocks
+        )
+        self._stop_requested = threading.Event()
+        self._active = threading.Event()
+        self._capture_thread: Optional[threading.Thread] = None
+        self._writer_thread: Optional[threading.Thread] = None
+        self._path: Optional[Path] = None
+        self._started_at_ns: Optional[int] = None
+        self._ended_at_ns: Optional[int] = None
+        self._capture_error: Optional[str] = None
+        self._writer_error: Optional[str] = None
+
+    @property
+    def _soundcard(self) -> _SoundCardBackend:
+        if self._backend is None:
+            self._backend = _load_soundcard()
+        return self._backend
+
+    def _loopback_devices(self) -> list[Any]:
+        return [
+            device
+            for device in self._soundcard.all_microphones(include_loopback=True)
+            if bool(getattr(device, "isloopback", False))
+        ]
+
+    def list_devices(self) -> list[AudioDevice]:
+        return [
+            AudioDevice(
+                device_id=_device_id(device),
+                name=str(getattr(device, "name", _device_id(device))),
+                source=AudioSourceKind.SYSTEM,
+            )
+            for device in self._loopback_devices()
+        ]
+
+    def _resolve_device(self, device_id: Optional[str]) -> Any:
+        devices = self._loopback_devices()
+        if not devices:
+            raise RuntimeError("No Windows system-audio loopback device is available")
+        if device_id is None:
+            return devices[0]
+        for device in devices:
+            if _device_id(device) == str(device_id):
+                return device
+        raise RuntimeError("The selected system-audio device is no longer available")
+
+    def start(self, device_id: Optional[str] = None) -> None:
+        if self._active.is_set():
+            return
+        device = self._resolve_device(device_id)
+        temporary = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".wav",
+            dir=self._temp_dir,
+        )
+        self._path = Path(temporary.name)
+        temporary.close()
+        self._queue = queue.Queue(maxsize=self._queue_blocks)
+        self._stop_requested.clear()
+        self._capture_error = None
+        self._writer_error = None
+        self._started_at_ns = time.monotonic_ns()
+        self._ended_at_ns = None
+        self._active.set()
+
+        def write_wav() -> None:
+            assert self._path is not None
+            try:
+                with wave.open(str(self._path), "wb") as output:
+                    output.setnchannels(self.channels)
+                    output.setsampwidth(2)
+                    output.setframerate(self.sample_rate)
+                    while True:
+                        block = self._queue.get()
+                        if block is None:
+                            break
+                        output.writeframes(block)
+            except BaseException as exc:
+                self._writer_error = str(exc)
+                self._stop_requested.set()
+
+        def capture() -> None:
+            try:
+                with device.recorder(
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    blocksize=self.block_frames,
+                ) as native:
+                    while not self._stop_requested.is_set():
+                        frames = np.asarray(
+                            native.record(numframes=self.block_frames),
+                            dtype=np.float32,
+                        )
+                        if frames.size == 0:
+                            continue
+                        if frames.ndim == 1:
+                            frames = frames.reshape(-1, 1)
+                        if frames.shape[1] != self.channels:
+                            raise RuntimeError(
+                                "WASAPI returned an unexpected channel count"
+                            )
+                        pcm = np.rint(
+                            np.clip(frames, -1.0, 1.0) * 32767.0
+                        ).astype("<i2", copy=False)
+                        try:
+                            self._queue.put_nowait(pcm.tobytes(order="C"))
+                        except queue.Full:
+                            self._capture_error = (
+                                "system audio buffer overflowed; partial audio preserved"
+                            )
+                            self._stop_requested.set()
+            except BaseException as exc:
+                self._capture_error = str(exc)
+                self._stop_requested.set()
+            finally:
+                self._ended_at_ns = time.monotonic_ns()
+                self._active.clear()
+                try:
+                    self._queue.put(None, timeout=2.0)
+                except queue.Full:
+                    if self._capture_error is None:
+                        self._capture_error = (
+                            "system audio writer did not drain its bounded buffer"
+                        )
+
+        self._writer_thread = threading.Thread(
+            target=write_wav,
+            name="mindtype-system-audio-writer",
+            daemon=True,
+        )
+        self._capture_thread = threading.Thread(
+            target=capture,
+            name="mindtype-system-audio-capture",
+            daemon=True,
+        )
+        self._writer_thread.start()
+        self._capture_thread.start()
+
+    def stop(self, timeout: float = 5.0) -> AudioCaptureResult:
+        path = self._path
+        if path is None:
+            return AudioCaptureResult(
+                status=AudioCaptureStatus.INTERRUPTED,
+                track=None,
+                error="system audio was not recording",
+            )
+        self._stop_requested.set()
+        if self._capture_thread is not None:
+            self._capture_thread.join(timeout=timeout)
+            if self._capture_thread.is_alive():
+                self._capture_error = (
+                    "system audio device did not stop before timeout"
+                )
+            else:
+                self._capture_thread = None
+        if self._writer_thread is not None and self._capture_thread is None:
+            self._writer_thread.join(timeout=timeout)
+            if self._writer_thread.is_alive():
+                self._writer_error = "system audio WAV writer did not finish"
+            else:
+                self._writer_thread = None
+
+        ended_at = self._ended_at_ns or time.monotonic_ns()
+        started_at = self._started_at_ns or ended_at
+        track = RecordedTrack(
+            source=AudioSourceKind.SYSTEM,
+            path=path,
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+            started_at_monotonic_ns=started_at,
+            ended_at_monotonic_ns=max(started_at, ended_at),
+        )
+        error = self._capture_error or self._writer_error
+        status = (
+            AudioCaptureStatus.INTERRUPTED
+            if error is not None
+            else AudioCaptureStatus.COMPLETED
+        )
+        if self._capture_thread is None and self._writer_thread is None:
+            self._path = None
+            self._started_at_ns = None
+            self._ended_at_ns = None
+        return AudioCaptureResult(status=status, track=track, error=error)
+
+    @property
+    def recording(self) -> bool:
+        return self._active.is_set()
+
+
+class MultiTrackAudioRecorder:
+    """Coordinate independent microphone and system-audio recorders."""
+
+    def __init__(self, *, microphone: Any, system: SystemAudioRecorder) -> None:
+        self.microphone = microphone
+        self.system = system
+        self._source: Optional[AudioSourceKind] = None
+
+    def start(
+        self,
+        source: AudioSourceKind,
+        *,
+        microphone_device: Optional[int] = None,
+        system_device: Optional[str] = None,
+        level_callback: Any = None,
+    ) -> None:
+        if self._source is not None:
+            return
+        normalized_source = AudioSourceKind(source)
+        self._source = normalized_source
+        system_started = False
+        try:
+            if normalized_source in {
+                AudioSourceKind.SYSTEM,
+                AudioSourceKind.MICROPHONE_SYSTEM,
+            }:
+                self.system.start(device_id=system_device)
+                system_started = True
+            if normalized_source in {
+                AudioSourceKind.MICROPHONE,
+                AudioSourceKind.MICROPHONE_SYSTEM,
+            }:
+                self.microphone.start(
+                    device=microphone_device,
+                    level_callback=level_callback,
+                )
+        except Exception:
+            if system_started:
+                partial = self.system.stop()
+                if partial.track is not None:
+                    partial.track.path.unlink(missing_ok=True)
+            self._source = None
+            raise
+
+    def stop(self) -> MultiTrackCapture:
+        source = self._source
+        if source is None:
+            return MultiTrackCapture(results=())
+        results: list[AudioCaptureResult] = []
+        if source in {
+            AudioSourceKind.MICROPHONE,
+            AudioSourceKind.MICROPHONE_SYSTEM,
+        }:
+            results.append(self.microphone.stop_capture())
+        if source in {
+            AudioSourceKind.SYSTEM,
+            AudioSourceKind.MICROPHONE_SYSTEM,
+        }:
+            results.append(self.system.stop())
+        self._source = None
+        return MultiTrackCapture(results=tuple(results))
+
+    @property
+    def recording(self) -> bool:
+        return self._source is not None

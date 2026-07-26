@@ -66,6 +66,81 @@ def test_canonical_result_accepts_v1_additive_fields() -> None:
     assert validated["future_minor_field"] == {"safe": True}
 
 
+def test_canonical_result_validates_multitrack_source_channels() -> None:
+    from app.result_schema import validate_canonical_result
+
+    result = canonical_result()
+    result["source"]["channels"] = [
+        {
+            "source": "microphone",
+            "sample_rate": 16000,
+            "channels": 1,
+            "started_at_monotonic_ns": 10,
+            "ended_at_monotonic_ns": 20,
+            "sha256": "b" * 64,
+        },
+        {
+            "source": "system",
+            "sample_rate": 48000,
+            "channels": 2,
+            "started_at_monotonic_ns": 11,
+            "ended_at_monotonic_ns": 21,
+        },
+    ]
+
+    validated = validate_canonical_result(result)
+
+    assert validated["source"]["channels"][1]["source"] == "system"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source", "desktop"),
+        ("sample_rate", 0),
+        ("channels", 0),
+        ("started_at_monotonic_ns", -1),
+    ],
+)
+def test_canonical_result_rejects_invalid_track_metadata(
+    field: str,
+    value: object,
+) -> None:
+    from app.result_schema import CanonicalResultError, validate_canonical_result
+
+    result = canonical_result()
+    channel = {
+        "source": "microphone",
+        "sample_rate": 16000,
+        "channels": 1,
+        "started_at_monotonic_ns": 10,
+        "ended_at_monotonic_ns": 20,
+    }
+    channel[field] = value
+    result["source"]["channels"] = [channel]
+
+    with pytest.raises(CanonicalResultError):
+        validate_canonical_result(result)
+
+
+def test_canonical_result_rejects_inverted_track_timestamps() -> None:
+    from app.result_schema import CanonicalResultError, validate_canonical_result
+
+    result = canonical_result()
+    result["source"]["channels"] = [
+        {
+            "source": "system",
+            "sample_rate": 48000,
+            "channels": 2,
+            "started_at_monotonic_ns": 20,
+            "ended_at_monotonic_ns": 10,
+        }
+    ]
+
+    with pytest.raises(CanonicalResultError, match="inverted"):
+        validate_canonical_result(result)
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

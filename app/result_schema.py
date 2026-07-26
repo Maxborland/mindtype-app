@@ -71,8 +71,46 @@ def validate_canonical_result(
     source_hash = _require_string(source.get("sha256"), "source.sha256")
     if not _SHA256.fullmatch(source_hash):
         raise CanonicalResultError("source.sha256 must be a SHA-256 hex digest")
-    if not isinstance(source.get("channels"), list):
+    source_channels = source.get("channels")
+    if not isinstance(source_channels, list):
         raise CanonicalResultError("source.channels must be an array")
+    for index, raw_channel in enumerate(source_channels):
+        path = f"source.channels[{index}]"
+        channel = _require_mapping(raw_channel, path)
+        channel_source = _require_string(channel.get("source"), f"{path}.source")
+        if channel_source not in {"microphone", "system"}:
+            raise CanonicalResultError(
+                f"{path}.source must be microphone or system"
+            )
+        sample_rate = _require_nonnegative_int(
+            channel.get("sample_rate"),
+            f"{path}.sample_rate",
+        )
+        channel_count = _require_nonnegative_int(
+            channel.get("channels"),
+            f"{path}.channels",
+        )
+        if sample_rate == 0 or channel_count == 0:
+            raise CanonicalResultError(
+                f"{path} sample_rate and channels must be positive"
+            )
+        started_at = _require_nonnegative_int(
+            channel.get("started_at_monotonic_ns"),
+            f"{path}.started_at_monotonic_ns",
+        )
+        ended_at = _require_nonnegative_int(
+            channel.get("ended_at_monotonic_ns"),
+            f"{path}.ended_at_monotonic_ns",
+        )
+        if started_at > ended_at:
+            raise CanonicalResultError(f"{path} has inverted timestamps")
+        channel_hash = channel.get("sha256")
+        if channel_hash is not None:
+            channel_hash = _require_string(channel_hash, f"{path}.sha256")
+            if not _SHA256.fullmatch(channel_hash):
+                raise CanonicalResultError(
+                    f"{path}.sha256 must be a SHA-256 hex digest"
+                )
 
     route = _require_mapping(result.get("route"), "route")
     transcription_route = _require_mapping(

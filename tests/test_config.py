@@ -54,6 +54,9 @@ class TestDefaultConfig:
         assert defaults["hotkey"] == "ctrl+alt+v"
         assert defaults["vad_filter"] is True
         assert defaults["auto_insert_enabled"] is True
+        assert defaults["audio_source"] == "microphone"
+        assert defaults["system_audio_device"] is None
+        assert defaults["system_audio_consent"] is False
 
     def test_config_contains_overlay_settings(self):
         """_default_config должен содержать настройки overlay."""

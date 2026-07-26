@@ -139,6 +139,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Основные настройки
         "audio_input": "Аудио вход",
+        "audio_source": "Источник записи",
+        "microphone_only": "Только микрофон",
+        "system_audio_only": "Только звук системы",
+        "microphone_and_system": "Микрофон и звук системы",
+        "system_audio_device": "Устройство вывода",
+        "system_audio_consent": "Я понимаю, что записывается звук системы, и получил согласие участников",
+        "system_audio_consent_required": "Подтвердите согласие на запись системного звука",
         "hotkey": "Хоткей",
         "ui_language": "Язык приложения",
         "transcription_language": "Язык транскрипции",
@@ -556,6 +563,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Basic settings
         "audio_input": "Audio Input",
+        "audio_source": "Recording source",
+        "microphone_only": "Microphone only",
+        "system_audio_only": "System audio only",
+        "microphone_and_system": "Microphone and system audio",
+        "system_audio_device": "Output device",
+        "system_audio_consent": "I understand system audio is recorded and have participant consent",
+        "system_audio_consent_required": "Confirm consent before recording system audio",
         "hotkey": "Hotkey",
         "ui_language": "App Language",
         "transcription_language": "Transcription Language",

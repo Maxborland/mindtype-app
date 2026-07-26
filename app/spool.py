@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .audio_sources import AudioSourceKind
+
 
 MAX_SOURCE_SIZE = 4 * 1024 * 1024 * 1024
 _SAFE_OPERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -80,6 +82,41 @@ class SpoolManager:
 
     def import_source(self, operation_id: str, source_path: Path) -> SpoolAsset:
         source = Path(source_path).resolve(strict=True)
+        suffix = (
+            source.suffix
+            if re.fullmatch(r"\.[A-Za-z0-9]{1,15}", source.suffix)
+            else ".bin"
+        )
+        return self._import_asset(
+            operation_id,
+            source,
+            final_name=f"source{suffix.lower()}",
+        )
+
+    def import_track(
+        self,
+        operation_id: str,
+        source_path: Path,
+        *,
+        source: AudioSourceKind,
+    ) -> SpoolAsset:
+        source_kind = AudioSourceKind(source)
+        if source_kind is AudioSourceKind.MICROPHONE_SYSTEM:
+            raise ValueError("a combined source is not an original audio track")
+        return self._import_asset(
+            operation_id,
+            Path(source_path).resolve(strict=True),
+            final_name=f"track-{source_kind.value}.wav",
+        )
+
+    def _import_asset(
+        self,
+        operation_id: str,
+        source: Path,
+        *,
+        final_name: str,
+    ) -> SpoolAsset:
+        source = Path(source).resolve(strict=True)
         if not source.is_file():
             raise FileNotFoundError(source)
         size = source.stat().st_size
@@ -89,8 +126,11 @@ class SpoolManager:
         operation_dir = self.operation_dir(operation_id)
         operation_dir.mkdir(parents=True, exist_ok=True)
         part_path = operation_dir / "source.part"
-        suffix = source.suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,15}", source.suffix) else ".bin"
-        final_path = operation_dir / f"source{suffix.lower()}"
+        if part_path.exists():
+            raise FileExistsError(part_path)
+        final_path = operation_dir / final_name
+        if final_path.exists():
+            raise FileExistsError(final_path)
 
         hardlinked = False
         try:
@@ -120,6 +160,7 @@ class SpoolManager:
         *,
         retention_deadline: Optional[datetime],
         display_name: Optional[str] = None,
+        channels: Optional[list[dict[str, object]]] = None,
     ) -> Path:
         if retention_deadline is not None and retention_deadline.tzinfo is None:
             raise ValueError("retention_deadline must be timezone-aware")
@@ -137,6 +178,11 @@ class SpoolManager:
                 display_name
                 if display_name is not None
                 else existing.get("display_name")
+            ),
+            "channels": (
+                channels
+                if channels is not None
+                else existing.get("channels", [])
             ),
         }
         try:
@@ -198,7 +244,11 @@ class SpoolManager:
             raise InvalidSpoolPath("operation path escapes the spool root")
 
         removed: list[Path] = []
-        for candidate in resolved_dir.glob("source.*"):
+        candidates = [
+            *resolved_dir.glob("source.*"),
+            *resolved_dir.glob("track-*.wav"),
+        ]
+        for candidate in candidates:
             resolved = candidate.resolve()
             if resolved.parent != resolved_dir or not candidate.is_file():
                 continue

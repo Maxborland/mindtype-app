@@ -36,6 +36,29 @@ def test_imported_source_is_spooled_without_mutating_original(tmp_path: Path) ->
     assert asset.sha256 == hashlib.sha256(b"original-audio").hexdigest()
 
 
+def test_track_import_uses_controlled_name_and_ack_cleanup_removes_audio(
+    tmp_path: Path,
+) -> None:
+    from app.audio_sources import AudioSourceKind
+    from app.spool import SpoolManager
+
+    original = tmp_path / "captured.wav"
+    original.write_bytes(b"track-audio")
+    spool = SpoolManager(tmp_path / "spool")
+
+    track = spool.import_track(
+        "operation-tracks",
+        original,
+        source=AudioSourceKind.SYSTEM,
+    )
+    source = spool.import_source("operation-tracks", original)
+    removed = spool.delete_source("operation-tracks")
+
+    assert track.path.name == "track-system.wav"
+    assert set(removed) == {track.path, source.path}
+    assert original.is_file()
+
+
 def test_retention_cleanup_removes_only_expired_spool_assets(tmp_path: Path) -> None:
     from app.spool import SpoolManager
 

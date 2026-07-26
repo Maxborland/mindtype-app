@@ -119,6 +119,7 @@ cffi==2.1.0 \
     --hash=sha256:ff067a8d8d880e7809e4ac88eb009bb848870115317b306666502ccad30b147f
     # via
     #   cryptography
+    #   soundcard
     #   sounddevice
     #   soundfile
 charset-normalizer==3.4.9 \
@@ -552,6 +553,7 @@ numpy==2.4.6 \
     #   numba
     #   scikit-learn
     #   scipy
+    #   soundcard
     #   soundfile
     #   soxr
 packaging==26.2 \
@@ -967,6 +969,10 @@ six==1.17.0 \
     #   pynput
     #   python-dateutil
     #   transliterate
+soundcard==0.4.6 ; sys_platform == "win32" \
+    --hash=sha256:9b46d64a26f97cd7d88bcfc385c97c069f97c5ec3404e4e7c23771598a8cf47b \
+    --hash=sha256:ab44b8c1033ac6ec49c5d618ce096dab9b60c7d7a427c92bef15856e5ebb3e09
+    # via -r requirements/base.in
 sounddevice==0.5.5 \
     --hash=sha256:05eb9fd6c54c38d67741441c19164c0dae8ce80453af2d8c4ad2e7823d15b722 \
     --hash=sha256:1234cc9b4c9df97b6cbe748146ae0ec64dd7d6e44739e8e42eaa5b595313a103 \

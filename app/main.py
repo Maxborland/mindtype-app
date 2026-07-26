@@ -57,6 +57,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush, QDesktopServices, QDragEnterEvent, QDropEvent
 
 from .audio import AudioRecorder
+from .audio_sources import (
+    AudioSourceKind,
+    MultiTrackAudioRecorder,
+    SystemAudioRecorder,
+)
 from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
 from .cloud_jobs import CloudJobStore, FileCloudJobTracker
 from .operation_coordinator import OperationCoordinator
@@ -588,6 +593,11 @@ class MainWindow(QMainWindow):
             logger.exception("Could not initialize durable cloud job store")
             self._cloud_job_tracker = None
         self.audio = AudioRecorder()
+        self.system_audio = SystemAudioRecorder()
+        self.audio_session = MultiTrackAudioRecorder(
+            microphone=self.audio,
+            system=self.system_audio,
+        )
         saved_backend = self.config.config.get("transcriber_backend", "whisper_cpp")
         backend = select_available_backend(saved_backend)
         if backend != saved_backend:
@@ -1566,10 +1576,42 @@ class MainWindow(QMainWindow):
         rec_section = SectionBox(self._t("recognition_section"), label_width=140)
         self.recognition_section_label = rec_section
 
+        self.audio_source_box = QComboBox()
+        self.audio_source_box.addItem(
+            self._t("microphone_only"),
+            AudioSourceKind.MICROPHONE.value,
+        )
+        self.audio_source_box.addItem(
+            self._t("system_audio_only"),
+            AudioSourceKind.SYSTEM.value,
+        )
+        self.audio_source_box.addItem(
+            self._t("microphone_and_system"),
+            AudioSourceKind.MICROPHONE_SYSTEM.value,
+        )
+        self._audio_source_row = rec_section.form.add_row(
+            self._t("audio_source"),
+            self.audio_source_box,
+        )
+
         # Аудио вход
         self.mic_box = QComboBox()
-        self._audio_input_row = rec_section.form.add_row(self._t("audio_input"), self.mic_box)
+        self._audio_input_row = rec_section.form.add_row(
+            self._t("audio_input"),
+            self.mic_box,
+        )
         self.audio_input_label = self._audio_input_row.label
+
+        self.system_audio_box = QComboBox()
+        self._system_audio_row = rec_section.form.add_row(
+            self._t("system_audio_device"),
+            self.system_audio_box,
+        )
+        self.system_audio_consent_toggle = QCheckBox(
+            self._t("system_audio_consent")
+        )
+        rec_section.form.add_widget(self.system_audio_consent_toggle)
+        self._system_audio_consent_row = self.system_audio_consent_toggle
 
         # Хоткей
         hotkey_widget = QWidget()
@@ -2561,7 +2603,18 @@ class MainWindow(QMainWindow):
         self.backend_box.currentIndexChanged.connect(self._on_backend_change)
         self.transcribe_refresh_btn.clicked.connect(self._on_refresh_transcribe_models)
         self.transcribe_model_combo.currentIndexChanged.connect(self._on_transcribe_model_changed)
+        self.audio_source_box.currentIndexChanged.connect(
+            self._on_audio_source_change
+        )
         self.mic_box.currentTextChanged.connect(self._on_mic_change)
+        self.system_audio_box.currentIndexChanged.connect(
+            self._on_system_audio_device_change
+        )
+        self.system_audio_consent_toggle.toggled.connect(
+            lambda enabled: self.config.update(
+                system_audio_consent=enabled
+            )
+        )
         self.hotkey_record_btn.clicked.connect(self._start_hotkey_recording)
 
         # Дополнительные
@@ -2640,11 +2693,24 @@ class MainWindow(QMainWindow):
 
         # Микрофоны
         self._load_mics()
+        self._load_system_audio_devices()
         mic = cfg.get("microphone")
         if mic:
             idx = self.mic_box.findText(mic)
             if idx >= 0:
                 self.mic_box.setCurrentIndex(idx)
+        source = cfg.get("audio_source", AudioSourceKind.MICROPHONE.value)
+        idx = self.audio_source_box.findData(source)
+        self.audio_source_box.setCurrentIndex(idx if idx >= 0 else 0)
+        system_device = cfg.get("system_audio_device")
+        if system_device:
+            idx = self.system_audio_box.findData(system_device)
+            if idx >= 0:
+                self.system_audio_box.setCurrentIndex(idx)
+        self.system_audio_consent_toggle.setChecked(
+            bool(cfg.get("system_audio_consent", False))
+        )
+        self._refresh_audio_source_controls()
 
         # Overlay настройки
         position = cfg.get("overlay_position", "bottom-center")
@@ -2685,6 +2751,47 @@ class MainWindow(QMainWindow):
         for dev in self.audio.list_input_devices():
             self.mic_box.addItem(dev)
         self.mic_box.blockSignals(False)
+
+    def _load_system_audio_devices(self) -> None:
+        self.system_audio_box.blockSignals(True)
+        self.system_audio_box.clear()
+        try:
+            for device in self.system_audio.list_devices():
+                self.system_audio_box.addItem(device.name, device.device_id)
+        except Exception:
+            logger.exception("Could not enumerate Windows system-audio devices")
+        self.system_audio_box.blockSignals(False)
+
+    def _selected_audio_source(self) -> AudioSourceKind:
+        value = self.audio_source_box.currentData()
+        try:
+            return AudioSourceKind(value)
+        except (TypeError, ValueError):
+            return AudioSourceKind.MICROPHONE
+
+    def _on_audio_source_change(self, _index: int = -1) -> None:
+        source = self._selected_audio_source()
+        self.config.update(audio_source=source.value)
+        self._refresh_audio_source_controls()
+
+    def _on_system_audio_device_change(self, _index: int = -1) -> None:
+        self.config.update(
+            system_audio_device=self.system_audio_box.currentData()
+        )
+
+    def _refresh_audio_source_controls(self) -> None:
+        source = self._selected_audio_source()
+        uses_microphone = source in {
+            AudioSourceKind.MICROPHONE,
+            AudioSourceKind.MICROPHONE_SYSTEM,
+        }
+        uses_system = source in {
+            AudioSourceKind.SYSTEM,
+            AudioSourceKind.MICROPHONE_SYSTEM,
+        }
+        self._audio_input_row.setVisible(uses_microphone)
+        self._system_audio_row.setVisible(uses_system)
+        self._system_audio_consent_row.setVisible(uses_system)
 
     def _get_current_mic_index(self) -> Optional[int]:
         """Получить индекс текущего микрофона."""
@@ -2855,6 +2962,16 @@ class MainWindow(QMainWindow):
 
         # Основная вкладка
         self.audio_input_label.setText(self._t("audio_input"))
+        self._audio_source_row.label.setText(self._t("audio_source"))
+        self.audio_source_box.setItemText(0, self._t("microphone_only"))
+        self.audio_source_box.setItemText(1, self._t("system_audio_only"))
+        self.audio_source_box.setItemText(2, self._t("microphone_and_system"))
+        self._system_audio_row.label.setText(
+            self._t("system_audio_device")
+        )
+        self.system_audio_consent_toggle.setText(
+            self._t("system_audio_consent")
+        )
         self.hotkey_label.setText(self._t("hotkey"))
         self.hotkey_record_btn.setText(self._t("record_hotkey"))
         self.ui_lang_label.setText(self._t("ui_language"))
@@ -3060,7 +3177,7 @@ class MainWindow(QMainWindow):
 
     def _tray_start_recording(self) -> None:
         """Начать запись из трея."""
-        if not self.audio.recording:
+        if not self.audio_session.recording:
             focus_manager.save_current_window()
             self._start_recording_with_overlay()
 
@@ -3200,7 +3317,7 @@ class MainWindow(QMainWindow):
             self._cancel_transcription()
             return
 
-        if not self.audio.recording:
+        if not self.audio_session.recording:
             focus_manager.save_current_window()
             self._add_journal_entry(
                 "pending",
@@ -3212,12 +3329,12 @@ class MainWindow(QMainWindow):
 
     def _handle_hotkey_release(self) -> None:
         """Обработчик отпускания хоткея (Qt thread)."""
-        if self.audio.recording:
+        if self.audio_session.recording:
             self._stop_recording_with_auto_insert()
 
     def _start_recording_with_overlay(self) -> None:
         """Начать запись с показом overlay."""
-        if self.audio.recording:
+        if self.audio_session.recording:
             return
         info = self.license_manager.get_license_info()
         quota_seconds = (
@@ -3236,7 +3353,24 @@ class MainWindow(QMainWindow):
             def on_level(levels: List[float]) -> None:
                 self.waveform_signal.emit(levels)
 
-            self.audio.start(device=device_id, level_callback=on_level)
+            source = self._selected_audio_source()
+            if (
+                source
+                in {
+                    AudioSourceKind.SYSTEM,
+                    AudioSourceKind.MICROPHONE_SYSTEM,
+                }
+                and not self.system_audio_consent_toggle.isChecked()
+            ):
+                raise RuntimeError(
+                    self._t("system_audio_consent_required")
+                )
+            self.audio_session.start(
+                source,
+                microphone_device=device_id,
+                system_device=self.system_audio_box.currentData(),
+                level_callback=on_level,
+            )
             self.overlay.show_recording()
             self._update_tray_icon(recording=True)
             if quota_seconds is not None:
@@ -3255,12 +3389,12 @@ class MainWindow(QMainWindow):
         if self._dictation.recording_quota_reached(
             operation_token,
             now=time.monotonic(),
-        ) and self.audio.recording:
+        ) and self.audio_session.recording:
             self._stop_recording_with_auto_insert()
 
     def _stop_recording_with_auto_insert(self) -> None:
         """Остановить запись и включить автовставку."""
-        if not self.audio.recording:
+        if not self.audio_session.recording:
             return
 
         operation_token = self._dictation.operation_token
@@ -3273,7 +3407,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            path = self.audio.stop()
+            capture = self.audio_session.stop()
         except Exception as exc:
             self._dictation.finish_transcription(
                 operation_token,
@@ -3294,7 +3428,7 @@ class MainWindow(QMainWindow):
 
         self.overlay.show_processing()
 
-        if not path:
+        if not capture.tracks:
             self._add_journal_entry("error", "error", text="no_audio", is_translatable=True)
             self.overlay.show_error(self._t("error"))
             self._dictation.finish_transcription(
@@ -3332,10 +3466,31 @@ class MainWindow(QMainWindow):
             }
         }
         try:
-            operation = self._operation_coordinator.adopt_recorded_dictation(
-                path,
+            operation = self._operation_coordinator.adopt_multitrack_dictation(
+                capture,
                 route=route,
             )
+            if capture.interrupted:
+                self._dictation.finish_transcription(
+                    operation_token,
+                    succeeded=False,
+                )
+                errors = "; ".join(
+                    result.error
+                    for result in capture.results
+                    if result.error
+                )
+                self._add_journal_entry(
+                    "error",
+                    "error",
+                    text=(
+                        f"{errors or 'Audio capture interrupted'}. "
+                        "Partial audio was preserved for recovery."
+                    ),
+                    is_translatable=False,
+                )
+                self.overlay.show_error(self._t("error"))
+                return
             self._operation_coordinator.begin_attempt(
                 operation.operation_id,
                 stage=OperationStage.TRANSCRIBE,
@@ -4863,8 +5018,8 @@ class MainWindow(QMainWindow):
                 pass
 
         # Останавливаем запись аудио если идёт
-        if self.audio.recording:
-            self.audio.stop()
+        if self.audio_session.recording:
+            self.audio_session.stop()
         self.audio.stop_monitoring()
 
         # Останавливаем QThread воркеры

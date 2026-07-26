@@ -74,6 +74,7 @@ def test_onnx_dependencies_use_a_compatible_transformers_range():
     assert "optimum" not in base
     assert "onnxruntime" not in base
     assert "openwakeword" not in base
+    assert "soundcard" in base
     assert "transformers>=4.56.0,<4.58.0" in onnx
     assert "optimum[onnxruntime]>=2.1.0,<2.3.0" in onnx
     assert "openwakeword>=0.6.0" in assistant

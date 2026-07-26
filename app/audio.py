@@ -5,6 +5,7 @@
 import queue
 import tempfile
 import threading
+import time
 import wave
 from collections import deque
 from pathlib import Path
@@ -12,6 +13,13 @@ from typing import Callable, Deque, List, Optional
 
 import numpy as np
 import sounddevice as sd
+
+from .audio_sources import (
+    AudioCaptureResult,
+    AudioCaptureStatus,
+    AudioSourceKind,
+    RecordedTrack,
+)
 
 
 # Callback для уровня громкости: принимает список нормализованных значений [0.0-1.0]
@@ -30,6 +38,7 @@ class AudioRecorder:
         self._running = threading.Event()
         self._overflowed = threading.Event()
         self._writer_error: Optional[BaseException] = None
+        self._started_at_monotonic_ns: Optional[int] = None
         self._level_callback: Optional[LevelCallback] = None
         # P12: Use deque instead of list for O(1) operations (list.pop(0) was O(n))
         self._level_history: Deque[float] = deque(maxlen=32)
@@ -146,19 +155,27 @@ class AudioRecorder:
                 self._tmp_path = None
             raise RuntimeError(f"Не удалось запустить устройство записи: {exc}") from exc
 
+        self._started_at_monotonic_ns = time.monotonic_ns()
         self._running.set()
 
-    def stop(self, timeout: float = 5.0) -> Optional[Path]:
+    def _stop_path(self, timeout: float = 5.0) -> Optional[Path]:
         if not self._running.is_set():
             return None
         self._running.clear()
         self._level_callback = None
 
+        stream_error: Optional[BaseException] = None
         if self._stream:
             try:
                 self._stream.stop()
+            except BaseException as exc:
+                stream_error = exc
             finally:
-                self._stream.close()
+                try:
+                    self._stream.close()
+                except BaseException as exc:
+                    if stream_error is None:
+                        stream_error = exc
                 self._stream = None
         try:
             self._queue.put(None, timeout=timeout)
@@ -178,10 +195,72 @@ class AudioRecorder:
             self._writer_error = None
             raise RuntimeError(f"Не удалось записать WAV-файл: {error}") from error
         if self._overflowed.is_set():
-            if path:
-                path.unlink(missing_ok=True)
+            self._tmp_path = path
             raise RuntimeError("Запись повреждена: аудиобуфер был переполнен")
+        if stream_error is not None:
+            self._tmp_path = path
+            raise RuntimeError(
+                f"Устройство записи было отключено: {stream_error}"
+            ) from stream_error
         return path
+
+    def stop_capture(self, timeout: float = 5.0) -> AudioCaptureResult:
+        started_at = self._started_at_monotonic_ns
+        try:
+            path = self._stop_path(timeout=timeout)
+        except RuntimeError as exc:
+            path = self._tmp_path
+            writer_is_alive = bool(
+                self._writer_thread is not None
+                and self._writer_thread.is_alive()
+            )
+            if not writer_is_alive:
+                self._tmp_path = None
+            ended_at = time.monotonic_ns()
+            track = (
+                RecordedTrack(
+                    source=AudioSourceKind.MICROPHONE,
+                    path=path,
+                    sample_rate=self.samplerate,
+                    channels=self.channels,
+                    started_at_monotonic_ns=started_at or ended_at,
+                    ended_at_monotonic_ns=ended_at,
+                )
+                if (
+                    path is not None
+                    and path.exists()
+                    and not writer_is_alive
+                )
+                else None
+            )
+            self._started_at_monotonic_ns = None
+            return AudioCaptureResult(
+                status=AudioCaptureStatus.INTERRUPTED,
+                track=track,
+                error=str(exc),
+            )
+        ended_at = time.monotonic_ns()
+        self._started_at_monotonic_ns = None
+        track = (
+            RecordedTrack(
+                source=AudioSourceKind.MICROPHONE,
+                path=path,
+                sample_rate=self.samplerate,
+                channels=self.channels,
+                started_at_monotonic_ns=started_at or ended_at,
+                ended_at_monotonic_ns=ended_at,
+            )
+            if path is not None
+            else None
+        )
+        return AudioCaptureResult(
+            status=AudioCaptureStatus.COMPLETED,
+            track=track,
+        )
+
+    def stop(self, timeout: float = 5.0) -> Optional[Path]:
+        """Compatibility wrapper for microphone-only callers."""
+        return self._stop_path(timeout=timeout)
 
     @property
     def recording(self) -> bool:

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from .audio_mix import mix_tracks_to_wav
+from .audio_sources import MultiTrackCapture, RecordedTrack
 from .operation_models import (
     OperationKind,
     OperationRecord,
@@ -55,12 +57,14 @@ class OperationCoordinator:
         asset: SpoolAsset,
         route: Mapping[str, Any],
         display_name: str,
+        channels: Optional[list[dict[str, Any]]] = None,
     ) -> OperationRecord:
         deadline = utc_now() + timedelta(days=7)
         self.spool.write_operation_metadata(
             operation_id,
             retention_deadline=deadline,
             display_name=display_name,
+            channels=channels,
         )
         created = self.store.create(
             operation_id=operation_id,
@@ -118,6 +122,85 @@ class OperationCoordinator:
             display_name=source.name,
         )
         source.unlink(missing_ok=True)
+        return operation
+
+    def adopt_multitrack_dictation(
+        self,
+        capture: MultiTrackCapture,
+        *,
+        route: Mapping[str, Any],
+        operation_id: Optional[str] = None,
+    ) -> OperationRecord:
+        """Durably adopt original tracks and a provider-compatible PCM projection."""
+        identifier = operation_id or str(uuid.uuid4())
+        source_tracks = [result.track for result in capture.results if result.track]
+        if not source_tracks:
+            raise ValueError("capture has no preserved audio track")
+        kinds = [track.source for track in source_tracks]
+        if len(set(kinds)) != len(kinds):
+            raise ValueError("capture contains duplicate audio source tracks")
+        if self.store.get(identifier) is not None:
+            raise ValueError("operation_id already exists")
+
+        durable_tracks: list[RecordedTrack] = []
+        channels: list[dict[str, Any]] = []
+        try:
+            for track in source_tracks:
+                asset = self.spool.import_track(
+                    identifier,
+                    track.path,
+                    source=track.source,
+                )
+                durable = RecordedTrack(
+                    source=track.source,
+                    path=asset.path,
+                    sample_rate=track.sample_rate,
+                    channels=track.channels,
+                    started_at_monotonic_ns=track.started_at_monotonic_ns,
+                    ended_at_monotonic_ns=track.ended_at_monotonic_ns,
+                )
+                durable_tracks.append(durable)
+                channels.append(
+                    durable.canonical_channel(sha256=asset.sha256)
+                )
+
+            if len(durable_tracks) == 1:
+                source_asset = self.spool.import_source(
+                    identifier,
+                    durable_tracks[0].path,
+                )
+            else:
+                projection_path = self.spool.prepare_recording(identifier)
+                mix_tracks_to_wav(durable_tracks, projection_path)
+                source_asset = self.spool.finalize_recording(identifier)
+
+            operation = self._register_asset(
+                identifier,
+                kind=OperationKind.DICTATION,
+                asset=source_asset,
+                route=route,
+                display_name="dictation.wav",
+                channels=channels,
+            )
+        except Exception:
+            self.spool.delete_source(identifier)
+            self.spool.delete_partial_outputs(identifier)
+            raise
+        for track in source_tracks:
+            track.path.unlink(missing_ok=True)
+
+        if capture.interrupted:
+            errors = "; ".join(
+                result.error
+                for result in capture.results
+                if result.error is not None
+            )
+            operation = self.store.transition(
+                operation.operation_id,
+                OperationStatus.RETRYABLE,
+                stage=OperationStage.PERSIST,
+                last_error_code=errors or "AUDIO_CAPTURE_INTERRUPTED",
+            )
         return operation
 
     def begin_attempt(
@@ -242,7 +325,9 @@ class OperationCoordinator:
                 "display_name": "dictation.wav",
                 "duration_ms": duration_ms,
                 "sha256": operation.source_sha256,
-                "channels": [],
+                "channels": self.spool.read_operation_metadata(
+                    operation_id
+                ).get("channels", []),
             },
             "route": operation.route,
             "transcript": {
