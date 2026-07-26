@@ -26,6 +26,8 @@ class TranscriberBackend(Protocol):
 
     def cancel_current(self) -> None: ...
 
+    def shutdown(self) -> None: ...
+
     def load_model(
         self,
         model_size: str,
@@ -236,8 +238,8 @@ class FasterWhisperTranscriber:
 def _prefer_cpp() -> bool:
     """Решать, использовать ли whisper.cpp по умолчанию."""
     if sys.platform == "win32":
-        # На Windows всегда предпочитаем whisper.cpp, если есть бинарник
-        binary = Path(__file__).parent.parent / "bin" / "win-x64" / "whisper-cli.exe"
+        # Windows GA uses the persistent server, not a new CLI process per phrase.
+        binary = Path(__file__).parent.parent / "bin" / "win-x64" / "whisper-server.exe"
         return binary.exists()
     return False
 
@@ -324,6 +326,11 @@ class Transcriber:
         cancel = getattr(self._impl, "cancel_current", None)
         if callable(cancel):
             cancel()
+
+    def shutdown(self) -> None:
+        shutdown = getattr(self._impl, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
     def download_model(self, model_size: str, models_dir: Path, progress_callback=None) -> Path:
         if hasattr(self._impl, "download_model"):

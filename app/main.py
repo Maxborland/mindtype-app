@@ -4313,8 +4313,13 @@ class MainWindow(QMainWindow):
             self.backend_box.blockSignals(False)
             self._update_transcribe_ui_visibility()
             return
+        previous_transcriber = self.transcriber
         self.transcriber = new_transcriber
         self._transcriber_backend = backend
+        try:
+            previous_transcriber.shutdown()
+        except Exception:
+            logger.exception("Не удалось остановить предыдущий transcriber backend")
         self.config.update(transcriber_backend=backend)
         # Голосовой ассистент держит свою ссылку на транскрайбер — переподключаем,
         # иначе он продолжит работать на старом бэкенде до перезапуска.
@@ -5021,6 +5026,10 @@ class MainWindow(QMainWindow):
         if self.audio_session.recording:
             self.audio_session.stop()
         self.audio.stop_monitoring()
+        try:
+            self.transcriber.shutdown()
+        except Exception:
+            logger.exception("Не удалось остановить transcriber backend")
 
         # Останавливаем QThread воркеры
         for worker in [
