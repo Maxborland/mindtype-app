@@ -15,6 +15,22 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
+def test_frozen_build_entitlement_trust_root_ignores_environment(
+    monkeypatch,
+):
+    from app import env
+
+    monkeypatch.setenv("MINDTYPE_LICENSE_PUBLIC_KEY", "attacker-key")
+    monkeypatch.setattr(env, "_is_production", lambda: True)
+    monkeypatch.setattr(
+        env,
+        "_PRODUCTION_LICENSE_ED25519_PUBLIC_KEY",
+        "release-key",
+    )
+
+    assert env._get_license_ed25519_public_key() == "release-key"
+
+
 class TestDefaultConfig:
     """Тесты для значений по умолчанию."""
 

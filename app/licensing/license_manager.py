@@ -21,6 +21,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, Callable
 
+from .entitlement import (
+    EntitlementClaims,
+    EntitlementLeaseStore,
+    EntitlementLeaseVerifier,
+    LeaseValidationError,
+)
 from .key_validator import KeyValidator
 from .trial import TrialManager, TRIAL_DURATION_DAYS, TRIAL_TRANSCRIPTION_LIMIT_SECONDS
 
@@ -254,17 +260,67 @@ class LicenseManager:
     - Оффлайн работа с кэшем
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        lease_verifier: Optional[EntitlementLeaseVerifier] = None,
+    ):
         self._data_dir = _get_data_dir()
         self._license_file = self._data_dir / "license.dat"
+        self._lease_file = self._data_dir / "entitlement.lease"
+        self._lease_marker_file = self._data_dir / "entitlement.seen"
         self._trial_manager = TrialManager()
         self._license_data: Optional[dict] = None
+        self._lease_claims: Optional[EntitlementClaims] = None
+        self._lease_error_code: Optional[str] = None
         self._device_id = _get_device_id()
         self._device_name = _get_device_name()
+        if lease_verifier is None:
+            try:
+                from ..env import LICENSE_ED25519_PUBLIC_KEY
+
+                if LICENSE_ED25519_PUBLIC_KEY:
+                    lease_verifier = EntitlementLeaseVerifier(
+                        LICENSE_ED25519_PUBLIC_KEY
+                    )
+            except (ImportError, LeaseValidationError) as exc:
+                logger.error("Entitlement verifier is unavailable: %s", exc)
+        self._lease_store = (
+            EntitlementLeaseStore(
+                self._lease_file,
+                lease_verifier,
+                device_id=self._device_id,
+            )
+            if lease_verifier is not None
+            else None
+        )
         self._load_license()
 
     def _load_license(self) -> None:
         """Загрузить данные лицензии из кэша."""
+        self._lease_claims = None
+        self._lease_error_code = None
+        if self._lease_file.exists():
+            if self._lease_store is None:
+                self._license_data = None
+                self._lease_error_code = "ENTITLEMENT_VERIFIER_UNAVAILABLE"
+                return
+            try:
+                self._lease_claims = self._lease_store.load()
+                self._license_data = None
+                return
+            except (LeaseValidationError, OSError, UnicodeError) as exc:
+                self._license_data = None
+                self._lease_error_code = getattr(
+                    exc,
+                    "code",
+                    "ENTITLEMENT_CACHE_INVALID",
+                )
+                return
+        if self._lease_marker_file.exists():
+            self._license_data = None
+            self._lease_error_code = "ENTITLEMENT_REQUIRED"
+            return
         if not self._license_file.exists():
             self._license_data = None
             return
@@ -288,7 +344,43 @@ class LicenseManager:
     def _clear_cached_license(self) -> None:
         """Удалить локальное утверждение о лицензии."""
         self._license_data = None
+        self._lease_claims = None
+        self._lease_error_code = None
         self._license_file.unlink(missing_ok=True)
+        if self._lease_store is not None:
+            self._lease_store.clear()
+        else:
+            self._lease_file.unlink(missing_ok=True)
+        self._lease_marker_file.unlink(missing_ok=True)
+
+    def install_entitlement_lease(self, token: str) -> EntitlementClaims:
+        """Verify and atomically adopt a server-issued offline lease."""
+        if self._lease_store is None:
+            raise LeaseValidationError(
+                "ENTITLEMENT_VERIFIER_UNAVAILABLE",
+                "desktop build has no entitlement public key",
+            )
+        claims = self._lease_store.save(token)
+        self._lease_marker_file.write_text("1", encoding="ascii")
+        self._lease_claims = claims
+        self._lease_error_code = None
+        self._license_data = None
+        self._license_file.unlink(missing_ok=True)
+        return claims
+
+    def _refresh_entitlement_lease(self) -> None:
+        if self._lease_store is None or not self._lease_file.exists():
+            return
+        try:
+            self._lease_claims = self._lease_store.load()
+            self._lease_error_code = None
+        except (LeaseValidationError, OSError, UnicodeError) as exc:
+            self._lease_claims = None
+            self._lease_error_code = getattr(
+                exc,
+                "code",
+                "ENTITLEMENT_CACHE_INVALID",
+            )
 
     def _save_license(self) -> None:
         """Сохранить данные лицензии в кэш с подписью."""
@@ -421,6 +513,25 @@ class LicenseManager:
             return result, msg, None
 
         if response and response.get("valid"):
+            signed_lease = response.get("entitlementLease")
+            if signed_lease:
+                try:
+                    self.install_entitlement_lease(signed_lease)
+                except LeaseValidationError as exc:
+                    logger.error(
+                        "Server returned unusable entitlement lease: %s",
+                        exc.code,
+                    )
+                    return (
+                        ValidationResult.SERVER_ERROR,
+                        exc.code.lower(),
+                        None,
+                    )
+                return (
+                    ValidationResult.SUCCESS,
+                    response.get("message", "activation_success"),
+                    response,
+                )
             # Успешная активация - сохраняем в кэш
             self._license_data = {
                 "license_key": normalized_key,
@@ -543,7 +654,23 @@ class LicenseManager:
         Returns:
             LicenseInfo с текущим статусом
         """
-        # Проверяем полную лицензию из кэша
+        self._refresh_entitlement_lease()
+        if self._lease_claims is not None:
+            claims = self._lease_claims
+            max_devices = claims.limits.get("max_devices", 1)
+            if isinstance(max_devices, bool) or not isinstance(max_devices, int):
+                max_devices = 1
+            return LicenseInfo(
+                status=LicenseStatus.VALID,
+                activation_date=claims.issued_at,
+                plan=claims.plan,
+                expires_at=claims.expires_at,
+                max_devices=max_devices,
+            )
+        if self._lease_error_code is not None:
+            return LicenseInfo(status=LicenseStatus.INVALID)
+
+        # Compatibility: legacy machine-HMAC cache is accepted for one release.
         if self._license_data is not None:
             key = self._license_data.get("license_key")
             if key:
@@ -632,9 +759,7 @@ class LicenseManager:
             # Даже если сервер вернул ошибку, мы удаляем локальный кэш
             # чтобы пользователь мог попробовать активировать другой ключ
 
-        if self._license_file.exists():
-            self._license_file.unlink()
-        self._license_data = None
+        self._clear_cached_license()
         return True
 
     def start_trial(self) -> bool:
@@ -658,6 +783,8 @@ class LicenseManager:
         # Если полная лицензия - доступ есть
         if info.status == LicenseStatus.VALID:
             return True, info
+        if info.status == LicenseStatus.INVALID:
+            return False, info
 
         # Если trial не начат - начинаем его
         if not self._trial_manager.has_trial_started():
@@ -709,4 +836,3 @@ def get_license_manager() -> LicenseManager:
     if _license_manager is None:
         _license_manager = LicenseManager()
     return _license_manager
-

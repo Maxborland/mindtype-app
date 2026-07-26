@@ -124,6 +124,19 @@ UPDATE_AUTO_DOWNLOAD: bool = _get_env_bool("MINDTYPE_UPDATE_AUTO_DOWNLOAD", Fals
 # Интервал ревалидации лицензии (секунды, по умолчанию 7 дней)
 LICENSE_REVALIDATION_INTERVAL: int = _get_env_int("MINDTYPE_LICENSE_REVALIDATION", 604800)
 
+# The release pipeline replaces this with the offline entitlement public key.
+# Runtime environment variables must never replace a frozen build's trust root.
+_PRODUCTION_LICENSE_ED25519_PUBLIC_KEY = ""
+
+
+def _get_license_ed25519_public_key() -> str:
+    if _is_production():
+        return _PRODUCTION_LICENSE_ED25519_PUBLIC_KEY
+    return _get_env("MINDTYPE_LICENSE_PUBLIC_KEY", "").strip()
+
+
+LICENSE_ED25519_PUBLIC_KEY: str = _get_license_ed25519_public_key()
+
 
 def _get_secret_file_path() -> Path:
     """Получить путь к файлу с HMAC секретом."""
@@ -346,5 +359,3 @@ if __name__ == "__main__":
     print(f"Updates:    {get_update_url()}")
     print(f"Validate:   {get_license_validate_url()}")
     print(f"Deactivate: {get_license_deactivate_url()}")
-
-
