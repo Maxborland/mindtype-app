@@ -240,3 +240,31 @@ def test_restart_recovery_preserves_source_and_exposes_manual_retry(
     assert [operation.operation_id for operation in store.list_retryable()] == [
         "running-operation"
     ]
+
+
+def test_retry_route_can_be_replaced_before_user_starts_new_attempt(
+    tmp_path: Path,
+) -> None:
+    from app.operation_models import OperationKind, OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"audio")
+    store = OperationStore(tmp_path / "operations.sqlite3")
+    store.create(
+        operation_id="route-retry",
+        kind=OperationKind.FILE,
+        source_asset_path=source,
+        route={"audio": "OpenRouter"},
+        stage=OperationStage.PERSIST,
+    )
+    store.transition("route-retry", OperationStatus.RETRYABLE)
+
+    updated = store.update_route(
+        "route-retry",
+        {"transcription": {"provider": "local", "model": "tiny"}},
+    )
+
+    assert updated.route == {
+        "transcription": {"provider": "local", "model": "tiny"}
+    }

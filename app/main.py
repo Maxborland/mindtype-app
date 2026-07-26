@@ -60,7 +60,7 @@ from .audio import AudioRecorder
 from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
 from .cloud_jobs import CloudJobStore, FileCloudJobTracker
 from .operation_coordinator import OperationCoordinator
-from .operation_models import OperationStage, OperationStatus
+from .operation_models import OperationStage, OperationStatus, utc_now
 from .operation_store import OperationStore
 from .spool import SpoolManager
 from .accelerator import has_npu, detect_available_providers
@@ -89,7 +89,7 @@ from .transcriber import (
     select_available_backend,
 )
 from .dictation_state import DictationState
-from .data_routes import resolve_processing_route
+from .data_routes import canonical_processing_route, resolve_processing_route
 from .translations import (
     get_text,
     UI_LANGUAGES,
@@ -708,6 +708,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_initial_state()
         self._restore_retryable_cloud_tasks()
+        self._spool_cleanup_timer = QTimer(self)
+        self._spool_cleanup_timer.setInterval(24 * 60 * 60 * 1000)
+        self._spool_cleanup_timer.timeout.connect(self._cleanup_expired_spool)
+        self._spool_cleanup_timer.start()
         self._init_hotkey()
         self._setup_focus_manager()
 
@@ -4373,6 +4377,26 @@ class MainWindow(QMainWindow):
                 "auto",
             ),
         )
+        if self._operation_coordinator is None:
+            QMessageBox.critical(
+                self,
+                self._t("error"),
+                "Durable operation storage is unavailable. Files were not started.",
+            )
+            return
+
+        canonical_route = canonical_processing_route(processing_route, cfg)
+        try:
+            for task in pending_tasks:
+                self._operation_coordinator.prepare_file_task(
+                    task,
+                    route=canonical_route,
+                )
+        except Exception as exc:
+            logger.exception("Could not persist files before processing")
+            QMessageBox.critical(self, self._t("error"), str(exc))
+            return
+
         if processing_route.uses_cloud:
             if self._cloud_job_tracker is None:
                 QMessageBox.critical(
@@ -4389,10 +4413,11 @@ class MainWindow(QMainWindow):
             }
             try:
                 for task in pending_tasks:
-                    self._cloud_job_tracker.register(
-                        task,
-                        route=route_snapshot,
-                    )
+                    if not task.cloud_job_id:
+                        self._cloud_job_tracker.register(
+                            task,
+                            route=route_snapshot,
+                        )
                     self._cloud_job_tracker.begin(task)
             except Exception as exc:
                 logger.exception("Could not persist cloud processing jobs")
@@ -4479,6 +4504,11 @@ class MainWindow(QMainWindow):
 
     def _on_file_task_progress(self, task: FileTask) -> None:
         """Обновление прогресса задачи."""
+        if self._operation_coordinator:
+            try:
+                self._operation_coordinator.sync_file_task(task)
+            except Exception:
+                logger.exception("Could not persist durable file progress")
         if self._cloud_job_tracker and task.cloud_job_id:
             try:
                 self._cloud_job_tracker.sync(task)
@@ -4491,6 +4521,40 @@ class MainWindow(QMainWindow):
 
     def _on_file_task_completed(self, task: FileTask) -> None:
         """Задача завершена."""
+        if self._operation_coordinator:
+            try:
+                operation = self._operation_coordinator.sync_file_task(
+                    task,
+                    preserve_inflight=(
+                        self._preserve_cloud_jobs_on_shutdown
+                        and task.status is FileStatus.CANCELLED
+                    ),
+                )
+                if task.status is FileStatus.COMPLETED:
+                    if operation.canonical_result_path is None:
+                        raise RuntimeError("Canonical file result was not saved")
+                    task.output_files["json"] = operation.canonical_result_path
+                    self._operation_coordinator.acknowledge_result(
+                        operation.operation_id
+                    )
+            except Exception as exc:
+                logger.exception("Could not persist durable file completion")
+                task.status = FileStatus.ERROR
+                task.error_message = str(exc)
+                try:
+                    operation = self._operation_coordinator.store.get(
+                        task.operation_id
+                    )
+                    if (
+                        operation is not None
+                        and operation.status is OperationStatus.RUNNING
+                    ):
+                        self._operation_coordinator.mark_retryable(
+                            task.operation_id,
+                            error_code="CANONICAL_SAVE_FAILED",
+                        )
+                except Exception:
+                    logger.exception("Could not mark failed canonical save retryable")
         if (
             self._cloud_job_tracker
             and task.cloud_job_id
@@ -4598,36 +4662,70 @@ class MainWindow(QMainWindow):
 
     def _discard_cloud_task(self, task: FileTask) -> None:
         """Не восстанавливать задачу, которую пользователь удалил из очереди."""
+        task.status = FileStatus.CANCELLED
+        if self._operation_coordinator:
+            try:
+                self._operation_coordinator.sync_file_task(task)
+            except Exception:
+                logger.exception("Could not cancel durable file operation")
         if not self._cloud_job_tracker or not task.cloud_job_id:
             return
-        task.status = FileStatus.CANCELLED
         try:
             self._cloud_job_tracker.sync(task)
         except Exception:
             logger.exception("Could not cancel durable cloud task")
 
     def _restore_retryable_cloud_tasks(self) -> None:
-        """Вернуть незавершённые cloud-файлы в UI без автоматического списания."""
-        if self._cloud_job_tracker is None:
-            return
-        try:
-            restored = self._cloud_job_tracker.restore_retryable_tasks()
-        except Exception:
-            logger.exception("Could not recover durable cloud tasks")
-            return
+        """Restore pending file work without starting it or spending BYOK."""
+        legacy_tasks: list[FileTask] = []
+        if self._cloud_job_tracker is not None:
+            try:
+                legacy_tasks = (
+                    self._cloud_job_tracker.restore_retryable_tasks()
+                )
+            except Exception:
+                logger.exception("Could not recover legacy cloud tasks")
 
-        existing = {
-            self._task_key(task.file_path)
+        durable_tasks: list[FileTask] = []
+        if self._operation_coordinator is not None:
+            try:
+                durable_tasks = (
+                    self._operation_coordinator.restore_retryable_file_tasks()
+                )
+            except Exception:
+                logger.exception("Could not recover durable file operations")
+
+        restored_by_operation = {
+            task.operation_id: task
+            for task in legacy_tasks
+        }
+        for durable in durable_tasks:
+            existing = restored_by_operation.get(durable.operation_id)
+            if existing is None:
+                restored_by_operation[durable.operation_id] = durable
+                continue
+            existing.source_asset_path = durable.source_asset_path
+            existing.display_name = durable.display_name
+
+        existing_operation_ids = {
+            task.operation_id
             for task in self._file_tasks
         }
-        for task in restored:
-            key = self._task_key(task.file_path)
-            if key in existing:
+        for task in restored_by_operation.values():
+            if task.operation_id in existing_operation_ids:
                 continue
             self._file_tasks.append(task)
             self._add_file_widget(task)
-            existing.add(key)
+            existing_operation_ids.add(task.operation_id)
         self._update_file_queue_ui()
+
+    def _cleanup_expired_spool(self) -> None:
+        if self._operation_coordinator is None:
+            return
+        try:
+            self._operation_coordinator.cleanup_expired(now=utc_now())
+        except Exception:
+            logger.exception("Could not clean expired durable operation data")
 
     def _on_open_file_result(self, task: FileTask) -> None:
         """Открыть папку с результатом."""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -44,6 +44,7 @@ class OperationCoordinator:
             kind=OperationKind.FILE,
             asset=asset,
             route=route,
+            display_name=Path(source_path).name,
         )
 
     def _register_asset(
@@ -53,11 +54,13 @@ class OperationCoordinator:
         kind: OperationKind,
         asset: SpoolAsset,
         route: Mapping[str, Any],
+        display_name: str,
     ) -> OperationRecord:
         deadline = utc_now() + timedelta(days=7)
         self.spool.write_operation_metadata(
             operation_id,
             retention_deadline=deadline,
+            display_name=display_name,
         )
         created = self.store.create(
             operation_id=operation_id,
@@ -93,6 +96,7 @@ class OperationCoordinator:
             kind=OperationKind.DICTATION,
             asset=asset,
             route=route,
+            display_name="dictation.wav",
         )
 
     def adopt_recorded_dictation(
@@ -111,6 +115,7 @@ class OperationCoordinator:
             kind=OperationKind.DICTATION,
             asset=asset,
             route=route,
+            display_name=source.name,
         )
         source.unlink(missing_ok=True)
         return operation
@@ -126,6 +131,58 @@ class OperationCoordinator:
             OperationStatus.RUNNING,
             stage=stage,
             new_attempt=True,
+        )
+
+    def prepare_file_task(
+        self,
+        task: Any,
+        *,
+        route: Mapping[str, Any],
+    ) -> OperationRecord:
+        """Spool or upgrade a file task, record its route, then start an attempt."""
+        operation = self.store.get(task.operation_id)
+        if operation is None:
+            operation = self.create_file_operation(
+                task.file_path,
+                route=route,
+                operation_id=task.operation_id,
+            )
+        elif operation.retention_deadline is None:
+            operation = self.store.transition(
+                operation.operation_id,
+                operation.status,
+                retention_deadline=utc_now() + timedelta(days=7),
+            )
+        if operation.source_sha256 is None:
+            source = task.processing_path
+            asset = self.spool.import_source(operation.operation_id, source)
+            self.spool.write_operation_metadata(
+                operation.operation_id,
+                retention_deadline=operation.retention_deadline,
+                display_name=task.file_name,
+            )
+            operation = self.store.update_source_asset(
+                operation.operation_id,
+                source_asset_path=asset.path,
+                source_sha256=asset.sha256,
+            )
+        if operation.route != route:
+            operation = self.store.update_route(operation.operation_id, route)
+
+        task.source_asset_path = operation.source_asset_path
+        self.spool.write_operation_metadata(
+            operation.operation_id,
+            retention_deadline=operation.retention_deadline,
+            display_name=task.file_name,
+        )
+        metadata = self.spool.read_operation_metadata(operation.operation_id)
+        if not task.display_name:
+            task.display_name = str(
+                metadata.get("display_name") or task.file_path.name
+            )
+        return self.begin_attempt(
+            operation.operation_id,
+            stage=OperationStage.TRANSCRIBE,
         )
 
     def save_canonical_result(
@@ -213,6 +270,196 @@ class OperationCoordinator:
             },
         }
         return self.save_canonical_result(operation_id, payload)
+
+    @staticmethod
+    def _canonical_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        canonical: list[dict[str, Any]] = []
+        for word in words:
+            start_ms = word.get("start_ms")
+            if start_ms is None:
+                start_ms = round(float(word.get("start", 0.0)) * 1000)
+            end_ms = word.get("end_ms")
+            if end_ms is None:
+                end = word.get("end")
+                end_ms = (
+                    round(float(end) * 1000)
+                    if end is not None
+                    else start_ms
+                )
+            item: dict[str, Any] = {
+                "start_ms": int(start_ms),
+                "end_ms": int(end_ms),
+                "text": str(word.get("text", word.get("word", ""))),
+            }
+            if word.get("confidence") is not None:
+                item["confidence"] = word["confidence"]
+            canonical.append(item)
+        return canonical
+
+    def complete_file_task(self, task: Any) -> OperationRecord:
+        """Persist the worker result as canonical JSON before publishing success."""
+        operation = self.store.get(task.operation_id)
+        if operation is None:
+            raise KeyError(task.operation_id)
+        if operation.kind is not OperationKind.FILE:
+            raise ValueError("operation is not a file operation")
+        if task.result is None:
+            raise ValueError("file task has no transcription result")
+
+        result = task.result
+        segments = []
+        for index, segment in enumerate(result.segments, start=1):
+            segments.append(
+                {
+                    "segment_id": f"segment-{index:04d}",
+                    "start_ms": round(float(segment.start) * 1000),
+                    "end_ms": round(float(segment.end) * 1000),
+                    "text": segment.text,
+                    "speaker_id": segment.speaker,
+                    "words": self._canonical_words(segment.words),
+                    "confidence": None,
+                    "postprocessed": False,
+                }
+            )
+        segment_ids = [segment["segment_id"] for segment in segments]
+        speakers = []
+        for stats in result.speaker_stats or []:
+            speakers.append(
+                {
+                    "speaker_id": stats.speaker_id,
+                    "display_name": stats.speaker_name,
+                    "total_duration_ms": round(stats.total_duration * 1000),
+                    "segment_count": stats.segment_count,
+                    "word_count": stats.word_count,
+                }
+            )
+
+        summary = None
+        if result.summary is not None:
+            summary = {
+                "text": result.summary,
+                "preset": result.summary_preset_name or "generic",
+                "generated": True,
+                "source_segment_ids": segment_ids,
+            }
+        warnings = [task.warning] if task.warning else []
+        payload = {
+            "schema_version": "1.0",
+            "operation_id": operation.operation_id,
+            "source": {
+                "display_name": task.file_name,
+                "duration_ms": round(float(result.duration) * 1000),
+                "sha256": operation.source_sha256,
+                "channels": [],
+            },
+            "route": operation.route,
+            "transcript": {
+                "language": result.detected_language or "und",
+                "confidence": max(
+                    0.0,
+                    min(1.0, float(result.language_probability)),
+                ),
+                "segments": segments,
+                "processed_text": result.processed_text,
+            },
+            "speakers": speakers,
+            "summary": summary,
+            "warnings": warnings,
+            "provenance": {
+                "server_job_ids": list(operation.server_job_ids.values()),
+                "created_at": utc_now().isoformat(),
+            },
+        }
+        return self.save_canonical_result(operation.operation_id, payload)
+
+    def restore_retryable_file_tasks(self) -> list[Any]:
+        """Expose interrupted file work as pending UI tasks without starting it."""
+        from .transcription_models import FileStatus, FileTask
+
+        self.cleanup_expired(now=utc_now())
+        self.store.recover_incomplete()
+        restored = []
+        for operation in self.store.list_retryable():
+            if operation.kind is not OperationKind.FILE:
+                continue
+            metadata = self.spool.read_operation_metadata(operation.operation_id)
+            display_name = metadata.get("display_name")
+            restored.append(
+                FileTask(
+                    file_path=operation.source_asset_path,
+                    source_asset_path=operation.source_asset_path,
+                    display_name=(
+                        str(display_name)
+                        if display_name
+                        else operation.source_asset_path.name
+                    ),
+                    status=FileStatus.PENDING,
+                    operation_id=operation.operation_id,
+                )
+            )
+        return restored
+
+    def cleanup_expired(self, *, now: datetime) -> list[str]:
+        removed = self.spool.cleanup_expired(now=now)
+        for operation_id in removed:
+            operation = self.store.get(operation_id)
+            if operation is None or operation.status in {
+                OperationStatus.COMPLETED,
+                OperationStatus.FAILED,
+                OperationStatus.CANCELLED,
+            }:
+                continue
+            self.store.transition(
+                operation_id,
+                OperationStatus.FAILED,
+                last_error_code="RETENTION_EXPIRED",
+            )
+        return removed
+
+    def sync_file_task(
+        self,
+        task: Any,
+        *,
+        preserve_inflight: bool = False,
+    ) -> OperationRecord:
+        """Mirror one observable worker state into the durable lifecycle."""
+        from .transcription_models import FileStatus
+
+        operation = self.store.get(task.operation_id)
+        if operation is None:
+            raise KeyError(task.operation_id)
+
+        stage_by_status = {
+            FileStatus.EXTRACTING: OperationStage.TRANSCRIBE,
+            FileStatus.TRANSCRIBING: OperationStage.TRANSCRIBE,
+            FileStatus.PROCESSING: OperationStage.DIARIZE,
+            FileStatus.SUMMARIZING: OperationStage.SUMMARIZE,
+            FileStatus.GENERATING: OperationStage.EXPORT,
+        }
+        if task.status in stage_by_status:
+            return self.store.transition(
+                operation.operation_id,
+                OperationStatus.RUNNING,
+                stage=stage_by_status[task.status],
+                progress=task.progress,
+            )
+        if task.status is FileStatus.COMPLETED:
+            return self.complete_file_task(task)
+        if task.status is FileStatus.ERROR:
+            return self.mark_retryable(
+                operation.operation_id,
+                error_code="PROCESSING_FAILED",
+            )
+        if task.status is FileStatus.CANCELLED and not preserve_inflight:
+            if operation.status in {
+                OperationStatus.CREATED,
+                OperationStatus.RUNNING,
+                OperationStatus.RETRYABLE,
+            }:
+                operation = self.request_cancel(operation.operation_id)
+            if operation.status is OperationStatus.CANCEL_REQUESTED:
+                return self.finish_cancel(operation.operation_id)
+        return operation
 
     def acknowledge_result(
         self,

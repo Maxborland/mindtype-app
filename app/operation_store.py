@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .operation_models import (
+    InvalidOperationTransition,
     OperationKind,
     OperationRecord,
     OperationStage,
@@ -264,6 +265,93 @@ class OperationStore:
                 "SELECT COUNT(*) AS count FROM operations"
             ).fetchone()
         return int(row["count"])
+
+    def update_route(
+        self,
+        operation_id: str,
+        route: Mapping[str, Any],
+    ) -> OperationRecord:
+        """Replace provenance only while work is idle and user-startable."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(operation_id)
+            current = self._from_row(row)
+            if current.status not in {
+                OperationStatus.CREATED,
+                OperationStatus.RETRYABLE,
+            }:
+                raise InvalidOperationTransition(
+                    "route can change only before a new attempt"
+                )
+            connection.execute(
+                """
+                UPDATE operations
+                SET route_json = ?, updated_at = ?
+                WHERE operation_id = ?
+                """,
+                (
+                    json.dumps(
+                        dict(route),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    utc_now().isoformat(),
+                    operation_id,
+                ),
+            )
+        updated = self.get(operation_id)
+        if updated is None:
+            raise RuntimeError("operation disappeared after route update")
+        return updated
+
+    def update_source_asset(
+        self,
+        operation_id: str,
+        *,
+        source_asset_path: Path,
+        source_sha256: str,
+    ) -> OperationRecord:
+        """Attach a durable spool asset while an operation is idle."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(operation_id)
+            current = self._from_row(row)
+            if current.status not in {
+                OperationStatus.CREATED,
+                OperationStatus.RETRYABLE,
+            }:
+                raise InvalidOperationTransition(
+                    "source can change only before a new attempt"
+                )
+            connection.execute(
+                """
+                UPDATE operations
+                SET source_asset_path = ?,
+                    source_sha256 = ?,
+                    updated_at = ?
+                WHERE operation_id = ?
+                """,
+                (
+                    str(Path(source_asset_path).resolve()),
+                    source_sha256,
+                    utc_now().isoformat(),
+                    operation_id,
+                ),
+            )
+        updated = self.get(operation_id)
+        if updated is None:
+            raise RuntimeError("operation disappeared after source update")
+        return updated
 
     def recover_incomplete(self) -> list[OperationRecord]:
         """Make interrupted work explicit without starting network work."""

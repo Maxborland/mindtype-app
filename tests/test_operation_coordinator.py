@@ -172,3 +172,355 @@ def test_recorded_dictation_is_adopted_and_completed_before_source_cleanup(
     coordinator.acknowledge_result(adopted.operation_id)
     assert not completed.source_asset_path.exists()
     assert completed.canonical_result_path.is_file()
+
+
+def test_file_task_completion_persists_canonical_raw_and_processed_result(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import (
+        FileTask,
+        SpeakerStats,
+        TranscriptionResult,
+        TranscriptionSegment,
+    )
+
+    original = tmp_path / "interview.wav"
+    original.write_bytes(b"interview-audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={
+            "transcription": {"provider": "mindtype_cloud", "model": "auto"},
+            "diarization": {"provider": "mindtype_cloud", "model": "auto"},
+            "summary": {"provider": "openrouter", "model": "anthropic/claude"},
+        },
+        operation_id="file-canonical",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    task = FileTask(
+        file_path=original,
+        source_asset_path=operation.source_asset_path,
+        display_name=original.name,
+        operation_id=operation.operation_id,
+        warning="low confidence",
+    )
+    task.result = TranscriptionResult(
+        file_path=original,
+        segments=[
+            TranscriptionSegment(
+                start=0.0,
+                end=1.25,
+                text="сырой текст",
+                speaker="SPEAKER_00",
+                words=[{"start": 0.0, "end": 0.5, "word": "сырой"}],
+            )
+        ],
+        detected_language="ru",
+        language_probability=0.88,
+        duration=1.25,
+        model_used="auto",
+        processed_text="Исправленный текст.",
+        summary="Краткий итог встречи.",
+        summary_preset_name="PM",
+        speaker_stats=[
+            SpeakerStats("SPEAKER_00", "Интервьюер", 1.25, 1, 2),
+        ],
+        num_speakers=1,
+        speaker_names={"SPEAKER_00": "Интервьюер"},
+    )
+
+    completed = coordinator.complete_file_task(task)
+    payload = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+
+    assert completed.status is OperationStatus.COMPLETED
+    assert payload["transcript"]["segments"][0]["text"] == "сырой текст"
+    assert payload["transcript"]["processed_text"] == "Исправленный текст."
+    assert payload["transcript"]["segments"][0]["start_ms"] == 0
+    assert payload["transcript"]["segments"][0]["end_ms"] == 1250
+    assert payload["summary"]["generated"] is True
+    assert payload["summary"]["source_segment_ids"] == ["segment-0001"]
+    assert payload["warnings"] == ["low confidence"]
+
+
+def test_file_completion_accepts_word_without_end_timestamp(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import (
+        FileTask,
+        TranscriptionResult,
+        TranscriptionSegment,
+    )
+
+    source = tmp_path / "meeting.wav"
+    source.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    task = FileTask(file_path=source)
+    coordinator.prepare_file_task(
+        task,
+        route={
+            "transcription": {"provider": "local", "model": "test"},
+            "diarization": {"provider": "disabled", "model": "none"},
+            "summary": {"provider": "disabled", "model": "none"},
+        },
+    )
+    task.result = TranscriptionResult(
+        file_path=source,
+        segments=[
+            TranscriptionSegment(
+                start=0.0,
+                end=1.0,
+                text="hello",
+                words=[{"start": 0.2, "word": "hello"}],
+            )
+        ],
+        detected_language="en",
+        language_probability=1.0,
+        duration=1.0,
+        model_used="test",
+    )
+
+    completed = coordinator.complete_file_task(task)
+
+    payload = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+    word = payload["transcript"]["segments"][0]["words"][0]
+    assert word["start_ms"] == 200
+    assert word["end_ms"] == 200
+
+
+def test_restart_restores_file_task_from_spool_without_starting_retry(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import FileStatus
+
+    original = tmp_path / "customer interview.wav"
+    original.write_bytes(b"audio")
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="file-recovery",
+    )
+    started = coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    original.unlink()
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    restored = reopened.restore_retryable_file_tasks()
+    persisted = reopened.store.get(operation.operation_id)
+
+    assert len(restored) == 1
+    assert restored[0].status is FileStatus.PENDING
+    assert restored[0].operation_id == operation.operation_id
+    assert restored[0].processing_path == operation.source_asset_path
+    assert restored[0].file_name == "customer interview.wav"
+    assert persisted.status is OperationStatus.RETRYABLE
+    assert persisted.attempt_count == started.attempt_count
+
+
+def test_file_task_progress_and_error_are_persisted_without_source_loss(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import FileStatus, FileTask
+
+    original = tmp_path / "meeting.wav"
+    original.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="file-progress",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    task = FileTask(
+        file_path=original,
+        source_asset_path=operation.source_asset_path,
+        operation_id=operation.operation_id,
+        status=FileStatus.PROCESSING,
+        progress=62,
+    )
+
+    processing = coordinator.sync_file_task(task)
+    task.status = FileStatus.ERROR
+    task.error_message = "provider unavailable"
+    retryable = coordinator.sync_file_task(task)
+
+    assert processing.stage is OperationStage.DIARIZE
+    assert processing.progress == 62
+    assert retryable.status is OperationStatus.RETRYABLE
+    assert retryable.last_error_code == "PROCESSING_FAILED"
+    assert retryable.source_asset_path.is_file()
+
+
+def test_legacy_retry_is_upgraded_to_spool_and_canonical_route(
+    tmp_path: Path,
+) -> None:
+    from app.cloud_jobs import CloudJobStore
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import FileTask
+
+    original = tmp_path / "legacy.wav"
+    original.write_bytes(b"legacy-audio")
+    database = tmp_path / "cloud_jobs.sqlite3"
+    legacy = CloudJobStore(database)
+    legacy.create_or_get(
+        idempotency_key="legacy-operation",
+        source_path=original,
+        operation="file_processing",
+        route={"audio": "OpenRouter"},
+    )
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    task = FileTask(
+        file_path=original,
+        operation_id="legacy-operation",
+    )
+    canonical_route = {
+        "transcription": {"provider": "local", "model": "tiny"}
+    }
+
+    prepared = coordinator.prepare_file_task(task, route=canonical_route)
+
+    assert prepared.status is OperationStatus.RUNNING
+    assert prepared.source_sha256 is not None
+    assert prepared.source_asset_path.parent == (
+        tmp_path / "spool" / "legacy-operation"
+    )
+    assert prepared.route == canonical_route
+    assert prepared.retention_deadline is not None
+    assert task.processing_path == prepared.source_asset_path
+    assert original.is_file()
+
+
+def test_shutdown_cancellation_stays_recoverable_until_next_start(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import FileStatus, FileTask
+
+    original = tmp_path / "long-call.wav"
+    original.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    task = FileTask(file_path=original, operation_id="shutdown-file")
+    running = coordinator.prepare_file_task(
+        task,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+    )
+    task.status = FileStatus.CANCELLED
+
+    preserved = coordinator.sync_file_task(task, preserve_inflight=True)
+    restored = coordinator.restore_retryable_file_tasks()
+
+    assert running.status is OperationStatus.RUNNING
+    assert preserved.status is OperationStatus.RUNNING
+    assert len(restored) == 1
+    assert restored[0].operation_id == task.operation_id
+    assert coordinator.store.get(task.operation_id).status is (
+        OperationStatus.RETRYABLE
+    )
+
+
+def test_expired_retry_source_is_removed_and_operation_becomes_failed(
+    tmp_path: Path,
+) -> None:
+    from datetime import timedelta
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus, utc_now
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import FileTask
+
+    original = tmp_path / "expired.wav"
+    original.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    task = FileTask(file_path=original, operation_id="expired-operation")
+    running = coordinator.prepare_file_task(
+        task,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+    )
+    retryable = coordinator.mark_retryable(
+        running.operation_id,
+        error_code="PROVIDER_UNAVAILABLE",
+    )
+    deadline = utc_now() - timedelta(seconds=1)
+    coordinator.store.transition(
+        retryable.operation_id,
+        OperationStatus.RETRYABLE,
+        retention_deadline=deadline,
+    )
+    coordinator.spool.write_operation_metadata(
+        retryable.operation_id,
+        retention_deadline=deadline,
+        display_name=task.file_name,
+    )
+
+    removed = coordinator.cleanup_expired(now=utc_now())
+    failed = coordinator.store.get(retryable.operation_id)
+
+    assert removed == [retryable.operation_id]
+    assert failed.status is OperationStatus.FAILED
+    assert failed.last_error_code == "RETENTION_EXPIRED"
+    assert not failed.source_asset_path.exists()
+    assert original.is_file()

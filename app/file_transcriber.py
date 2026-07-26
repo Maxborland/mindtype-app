@@ -277,7 +277,8 @@ class FileTranscriptionQueue:
 
     def _process_task(self, task: FileTask) -> None:
         """Обработать одну задачу."""
-        audio_path = task.file_path
+        processing_path = task.processing_path
+        audio_path = processing_path
 
         def finish_cancelled() -> bool:
             if not self._cancelled.is_set():
@@ -302,7 +303,7 @@ class FileTranscriptionQueue:
                         self._on_completed(task)
                     return
 
-                audio_path = extract_audio_from_video(task.file_path)
+                audio_path = extract_audio_from_video(processing_path)
                 self._temp_files.append(audio_path)
                 task.progress = 20
                 if finish_cancelled():
@@ -321,7 +322,7 @@ class FileTranscriptionQueue:
                 return
 
             # Получаем длительность
-            duration = get_file_duration(task.file_path)
+            duration = get_file_duration(processing_path)
 
             # Транскрибируем
             segments_data, detected_lang, prob = self.transcriber.transcribe_with_timestamps(
@@ -372,7 +373,11 @@ class FileTranscriptionQueue:
 
             # Создаём результат
             task.result = TranscriptionResult(
-                file_path=task.file_path,
+                file_path=(
+                    Path(task.display_name)
+                    if task.display_name
+                    else task.file_path
+                ),
                 segments=segments,
                 detected_language=detected_lang,
                 language_probability=prob,

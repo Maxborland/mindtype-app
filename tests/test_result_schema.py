@@ -118,3 +118,19 @@ def test_canonical_result_is_atomically_written_without_partial_file(
     assert written == result_path
     assert json.loads(written.read_text(encoding="utf-8"))["schema_version"] == "1.0"
     assert not (result_path.parent / "result.json.part").exists()
+
+
+def test_canonical_result_rejects_inverted_word_timestamps() -> None:
+    from app.result_schema import CanonicalResultError, validate_canonical_result
+
+    result = canonical_result()
+    result["transcript"]["segments"][0]["words"] = [
+        {
+            "start_ms": 900,
+            "end_ms": 100,
+            "text": "broken",
+        }
+    ]
+
+    with pytest.raises(CanonicalResultError, match="word has inverted timestamps"):
+        validate_canonical_result(result)

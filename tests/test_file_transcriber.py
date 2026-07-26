@@ -124,6 +124,22 @@ class TestFileTask:
 
         assert task.file_name == "test.mp3"
 
+    def test_file_task_uses_durable_asset_without_losing_display_name(
+        self,
+        tmp_path,
+    ):
+        from app.file_transcriber import FileTask
+
+        spool_source = tmp_path / "spool" / "operation-1" / "source.wav"
+        task = FileTask(
+            file_path=Path("C:/Users/customer/interview.wav"),
+            source_asset_path=spool_source,
+            display_name="customer interview.wav",
+        )
+
+        assert task.processing_path == spool_source
+        assert task.file_name == "customer interview.wav"
+
 
 class TestFileStatus:
     """Тесты для FileStatus."""
@@ -210,6 +226,67 @@ class TestFileCancellation:
 
         assert task.status is FileStatus.CANCELLED
         assert completed == [task]
+
+
+class TestDurableFileSource:
+    def test_queue_reads_spool_asset_when_original_is_unavailable(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        class CapturingTranscriber:
+            def __init__(self):
+                self.audio_path = None
+
+            def transcribe_with_timestamps(self, *, audio_path, **_kwargs):
+                self.audio_path = audio_path
+                return (
+                    [{"start": 0.0, "end": 1.0, "text": "durable text"}],
+                    "en",
+                    0.9,
+                )
+
+        original = tmp_path / "deleted-original.wav"
+        spool_source = tmp_path / "spool" / "operation-1" / "source.wav"
+        spool_source.parent.mkdir(parents=True)
+        spool_source.write_bytes(b"audio")
+        duration_paths = []
+        monkeypatch.setattr(
+            "app.file_transcriber.get_file_duration",
+            lambda path: duration_paths.append(path) or 1.0,
+        )
+        transcriber = CapturingTranscriber()
+        queue = FileTranscriptionQueue(
+            transcriber,
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="en",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+        )
+        task = FileTask(
+            file_path=original,
+            source_asset_path=spool_source,
+            display_name="customer interview.wav",
+        )
+
+        queue._process_task(task)
+
+        assert task.status is FileStatus.COMPLETED
+        assert transcriber.audio_path == spool_source
+        assert duration_paths == [spool_source]
+        assert task.result.file_path.name == "customer interview.wav"
 
     def test_worker_cleans_temporary_files_after_unexpected_failure(
         self,

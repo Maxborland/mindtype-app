@@ -379,3 +379,25 @@ def test_idempotency_key_cannot_be_reused_for_different_input(
             operation="file_processing",
             route={"audio": "MindType Cloud"},
         )
+
+
+def test_compatibility_tracker_uses_durable_processing_path(tmp_path: Path) -> None:
+    from app.cloud_jobs import CloudJobStore, FileCloudJobTracker
+    from app.transcription_models import FileTask
+
+    original = tmp_path / "original.wav"
+    original.write_bytes(b"original")
+    durable = tmp_path / "spool" / "operation" / "source.wav"
+    durable.parent.mkdir(parents=True)
+    durable.write_bytes(b"durable")
+    tracker = FileCloudJobTracker(
+        CloudJobStore(tmp_path / "jobs.sqlite3")
+    )
+    task = FileTask(
+        file_path=original,
+        source_asset_path=durable,
+    )
+
+    registered = tracker.register(task, route={"audio": "OpenRouter"})
+
+    assert registered.source_path == durable.resolve()

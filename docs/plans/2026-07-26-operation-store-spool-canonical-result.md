@@ -55,6 +55,23 @@ atomically saved.
 - **AC10:** A dictation transcription error becomes `RETRYABLE` and keeps its
   source. Cancellation moves through `CANCEL_REQUESTED` to `CANCELLED`; a late
   successful callback cannot save a result or insert text.
+- **AC11:** Every file task is copied or hardlinked into the spool before its
+  worker starts. The UI keeps the original display name, while extraction,
+  duration probing, transcription, and post-processing read only the durable
+  `processing_path`.
+- **AC12:** File progress advances the operation stage monotonically.
+  `COMPLETED` is published only after report generation and canonical JSON
+  persistence. A report or canonical-save failure becomes `RETRYABLE` and keeps
+  the spool source.
+- **AC13:** Canonical file results preserve raw segments, timestamps, speaker
+  labels, optional word timestamps, processed text separately, summary
+  provenance, warnings, route, and the source SHA-256.
+- **AC14:** On startup, interrupted file operations become visible as pending
+  tasks backed by their spool source. Recovery never starts processing or
+  charges BYOK automatically; the user must press Start.
+- **AC15:** User removal and explicit cancellation make the v2 operation
+  terminal and remove partial outputs. Application shutdown leaves in-flight
+  work recoverable rather than converting it to a user cancellation.
 
 ## Failure behavior and assumptions
 
@@ -98,3 +115,11 @@ atomically saved.
 - AC9 → recorded-file adoption and canonical dictation completion; main-window
   wiring verification plus the full desktop regression suite.
 - AC10 → coordinator cancellation test and existing stale-token worker tests.
+- AC11 → `FileTask.processing_path` queue test using a missing original and a
+  valid spool asset.
+- AC12–AC13 → file-task canonical completion test and error/cancellation
+  transition tests.
+- AC14 → operation-store restart plus file-task restoration without worker
+  execution.
+- AC15 → coordinator discard/cancel behavior and existing shutdown-preservation
+  tests.

@@ -119,6 +119,7 @@ class SpoolManager:
         operation_id: str,
         *,
         retention_deadline: Optional[datetime],
+        display_name: Optional[str] = None,
     ) -> Path:
         if retention_deadline is not None and retention_deadline.tzinfo is None:
             raise ValueError("retention_deadline must be timezone-aware")
@@ -126,10 +127,16 @@ class SpoolManager:
         operation_dir.mkdir(parents=True, exist_ok=True)
         final_path = operation_dir / "operation.json"
         part_path = operation_dir / "operation.json.part"
+        existing = self.read_operation_metadata(operation_id)
         payload = {
             "operation_id": operation_id,
             "retention_deadline": (
                 retention_deadline.isoformat() if retention_deadline else None
+            ),
+            "display_name": (
+                display_name
+                if display_name is not None
+                else existing.get("display_name")
             ),
         }
         try:
@@ -144,6 +151,16 @@ class SpoolManager:
             part_path.unlink(missing_ok=True)
             raise
         return final_path
+
+    def read_operation_metadata(self, operation_id: str) -> dict[str, object]:
+        metadata_path = self.operation_dir(operation_id) / "operation.json"
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict) or payload.get("operation_id") != operation_id:
+            return {}
+        return payload
 
     def cleanup_expired(self, *, now: datetime) -> list[str]:
         if now.tzinfo is None:

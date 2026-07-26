@@ -144,6 +144,8 @@ class TranscriptionResult:
 class FileTask:
     """Задача на обработку файла."""
     file_path: Path
+    source_asset_path: Optional[Path] = None
+    display_name: Optional[str] = None
     status: FileStatus = FileStatus.PENDING
     progress: int = 0  # 0-100
     error_message: str = ""
@@ -174,7 +176,12 @@ class FileTask:
     @property
     def file_name(self) -> str:
         """Имя файла."""
-        return self.file_path.name
+        return self.display_name or self.file_path.name
+
+    @property
+    def processing_path(self) -> Path:
+        """Durable source used by workers; `file_path` remains display metadata."""
+        return self.source_asset_path or self.file_path
 
 
 # Типы callback'ов

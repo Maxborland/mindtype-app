@@ -50,3 +50,39 @@ def test_disabled_processing_stages_are_not_claimed_as_cloud():
     assert route.diarization == "Off"
     assert route.summary == "Off"
     assert route.uses_cloud is False
+
+
+def test_canonical_route_records_provider_and_model_per_enabled_stage():
+    from app.data_routes import ProcessingRoute, canonical_processing_route
+
+    route = ProcessingRoute(
+        audio="OpenRouter",
+        diarization="Local",
+        summary="MindType Cloud",
+    )
+
+    canonical = canonical_processing_route(
+        route,
+        {
+            "openrouter_transcribe_model": "openai/whisper-1",
+            "model_size": "large-v3",
+            "openrouter_diarization_model": "",
+            "openrouter_model": "must-not-leak-into-cloud",
+            "llm_provider": "mindtype_cloud",
+        },
+    )
+
+    assert canonical == {
+        "transcription": {
+            "provider": "openrouter",
+            "model": "openai/whisper-1",
+        },
+        "diarization": {
+            "provider": "local",
+            "model": "mfcc",
+        },
+        "summary": {
+            "provider": "mindtype_cloud",
+            "model": "auto",
+        },
+    }

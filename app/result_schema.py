@@ -116,8 +116,34 @@ def validate_canonical_result(
         speaker_id = segment.get("speaker_id")
         if speaker_id is not None:
             _require_string(speaker_id, f"{path}.speaker_id")
-        if "words" in segment and not isinstance(segment["words"], list):
-            raise CanonicalResultError(f"{path}.words must be an array")
+        if "words" in segment:
+            words = segment["words"]
+            if not isinstance(words, list):
+                raise CanonicalResultError(f"{path}.words must be an array")
+            for word_index, raw_word in enumerate(words):
+                word_path = f"{path}.words[{word_index}]"
+                word = _require_mapping(raw_word, word_path)
+                word_start = _require_nonnegative_int(
+                    word.get("start_ms"),
+                    f"{word_path}.start_ms",
+                )
+                word_end = _require_nonnegative_int(
+                    word.get("end_ms"),
+                    f"{word_path}.end_ms",
+                )
+                if word_start > word_end:
+                    raise CanonicalResultError(
+                        f"{word_path} word has inverted timestamps"
+                    )
+                _require_string(
+                    word.get("text"),
+                    f"{word_path}.text",
+                    allow_empty=True,
+                )
+                _validate_confidence(
+                    word.get("confidence"),
+                    f"{word_path}.confidence",
+                )
         _validate_confidence(segment.get("confidence"), f"{path}.confidence")
         if "postprocessed" in segment and not isinstance(
             segment["postprocessed"], bool

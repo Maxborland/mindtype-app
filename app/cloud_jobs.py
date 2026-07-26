@@ -434,7 +434,7 @@ class FileCloudJobTracker:
     ) -> CloudJob:
         job = self.store.create_or_get(
             idempotency_key=task.operation_id,
-            source_path=task.file_path,
+            source_path=getattr(task, "processing_path", task.file_path),
             operation="file_processing",
             route=route,
         )
