@@ -181,6 +181,94 @@ class TestFileStatus:
 
 
 class TestFileCancellation:
+    def test_cancel_returns_every_pending_task_for_durable_sync(self, tmp_path):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        completed = []
+        queue = FileTranscriptionQueue(
+            MagicMock(),
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=completed.append,
+        )
+        active = FileTask(file_path=tmp_path / "active.wav")
+        active.status = FileStatus.TRANSCRIBING
+        pending = [
+            FileTask(file_path=tmp_path / "second.wav"),
+            FileTask(file_path=tmp_path / "third.wav"),
+        ]
+        queue._tasks.extend([active, *pending])
+
+        cancelled = queue.cancel()
+
+        assert cancelled == pending
+        assert completed == pending
+        assert all(task.status is FileStatus.CANCELLED for task in pending)
+        assert active.status is FileStatus.TRANSCRIBING
+
+    def test_cancel_persists_every_prepared_batch_item(self, tmp_path):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+        from app.operation_coordinator import OperationCoordinator
+        from app.operation_models import OperationStatus
+        from app.operation_store import OperationStore
+        from app.spool import SpoolManager
+
+        coordinator = OperationCoordinator(
+            store=OperationStore(tmp_path / "operations.sqlite3"),
+            spool=SpoolManager(tmp_path / "spool"),
+        )
+        tasks = []
+        for index in range(2):
+            source = tmp_path / f"batch-{index}.wav"
+            source.write_bytes(f"audio-{index}".encode())
+            task = FileTask(file_path=source)
+            coordinator.prepare_file_task(
+                task,
+                route={"transcription": {"provider": "local", "model": "tiny"}},
+            )
+            tasks.append(task)
+
+        queue = FileTranscriptionQueue(
+            MagicMock(),
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=coordinator.sync_file_task,
+        )
+        queue._tasks.extend(tasks)
+
+        queue.cancel()
+
+        assert all(task.status is FileStatus.CANCELLED for task in tasks)
+        assert all(
+            coordinator.store.get(task.operation_id).status
+            is OperationStatus.CANCELLED
+            for task in tasks
+        )
+
     def test_cancel_during_transcription_cannot_return_to_completed(
         self,
         tmp_path,

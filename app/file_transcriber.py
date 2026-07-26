@@ -14,7 +14,10 @@ from .text_processor.repetition_filter import (
     filter_hallucinated_segments,
     check_transcription_quality,
 )
-from .optional_features import local_diarization_available
+from .optional_features import (
+    effective_diarization_backend,
+    local_diarization_available,
+)
 
 # Настройка логирования в файл
 def _setup_logger():
@@ -112,17 +115,11 @@ class FileTranscriptionQueue:
         # Настройки постобработки
         self.enable_postprocessing = postprocess.enable
         self.postprocessing_diarization = postprocess.diarization
-        # Разрешаем "auto": OpenRouter при наличии ключа, иначе локальная
-        backend = postprocess.diarization_backend
-        if backend == "auto":
-            if postprocess.diarization_api_key.strip():
-                backend = "openrouter"
-            elif local_diarization_available():
-                backend = "local"
-            else:
-                backend = "disabled"
-        elif backend == "local" and not local_diarization_available():
-            backend = "disabled"
+        backend = effective_diarization_backend(
+            postprocess.diarization_backend,
+            api_key=postprocess.diarization_api_key,
+            local_available=local_diarization_available(),
+        )
         self.postprocessing_diarization_backend = backend
         self.postprocessing_diarization_api_key = postprocess.diarization_api_key
         self.postprocessing_diarization_model = postprocess.diarization_model
@@ -202,7 +199,7 @@ class FileTranscriptionQueue:
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
 
-    def cancel(self) -> None:
+    def cancel(self) -> list[FileTask]:
         """Отменить обработку."""
         self._cancelled.set()
         self._running.clear()
@@ -213,10 +210,14 @@ class FileTranscriptionQueue:
             except Exception:
                 pass
 
-        # Помечаем все pending задачи как отменённые
+        cancelled_tasks = []
         for task in self._tasks:
             if task.status == FileStatus.PENDING:
                 task.status = FileStatus.CANCELLED
+                cancelled_tasks.append(task)
+                if self._on_completed:
+                    self._on_completed(task)
+        return cancelled_tasks
 
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""

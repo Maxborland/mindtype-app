@@ -4768,6 +4768,7 @@ class MainWindow(QMainWindow):
                 ),
             ),
             on_thinking=lambda text: self.thinking_signal.emit(text),
+            on_completed=self._on_file_task_completed,
         )
 
         # Добавляем файлы

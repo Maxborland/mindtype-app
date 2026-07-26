@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .optional_features import effective_diarization_backend
+
 
 @dataclass(frozen=True)
 class ProcessingRoute:
@@ -105,14 +107,18 @@ def resolve_processing_route(
         else "Local"
     )
 
+    effective_backend = effective_diarization_backend(
+        diarization_backend,
+        api_key=str(config.get("openrouter_api_key") or ""),
+    )
     if not config.get("postprocessing_diarization", True):
         diarization = "Off"
-    elif diarization_backend == "openrouter":
+    elif effective_backend == "openrouter":
         diarization = "OpenRouter"
-    elif diarization_backend == "auto" and config.get("openrouter_api_key"):
-        diarization = "OpenRouter"
-    else:
+    elif effective_backend == "local":
         diarization = "Local"
+    else:
+        diarization = "Off"
 
     if not summary_enabled:
         summary = "Off"

@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from app.data_routes import resolve_processing_route
 
 
@@ -20,20 +22,37 @@ def test_laptop_cloud_route_is_explicit():
 
 
 def test_fully_local_route_is_identified():
-    route = resolve_processing_route(
-        {
-            "transcriber_backend": "whisper_cpp",
-            "llm_provider": "ollama",
-            "postprocessing_diarization": True,
-        },
-        summary_enabled=True,
-        diarization_backend="local",
-    )
+    with patch("app.optional_features.local_diarization_available", return_value=True):
+        route = resolve_processing_route(
+            {
+                "transcriber_backend": "whisper_cpp",
+                "llm_provider": "ollama",
+                "postprocessing_diarization": True,
+            },
+            summary_enabled=True,
+            diarization_backend="local",
+        )
 
     assert route.audio == "Local"
     assert route.diarization == "Local"
     assert route.summary == "Local"
     assert route.uses_cloud is False
+
+
+def test_unavailable_auto_diarization_is_reported_as_off():
+    with patch("app.optional_features.local_diarization_available", return_value=False):
+        route = resolve_processing_route(
+            {
+                "transcriber_backend": "whisper_cpp",
+                "llm_provider": "ollama",
+                "openrouter_api_key": "",
+                "postprocessing_diarization": True,
+            },
+            summary_enabled=False,
+            diarization_backend="auto",
+        )
+
+    assert route.diarization == "Off"
 
 
 def test_disabled_processing_stages_are_not_claimed_as_cloud():
