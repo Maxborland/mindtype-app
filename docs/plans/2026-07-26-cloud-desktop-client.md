@@ -22,10 +22,16 @@ the backend repository and session endpoint are available.
 - Result is validated as canonical JSON before being returned.
 - ACK is a separate call made only by the coordinator after local atomic save.
 - Cancellation addresses the existing server job.
+- `/api/license/session` adopts a 15-minute in-memory access token.
+- Refresh tokens are stored only through the Windows keyring backend.
+- The entitlement lease is Ed25519-verified before the session is adopted.
+- Authoritative license denial clears the local session; network errors do not
+  destroy a still-valid offline lease.
 
 ## Not implemented here
 
 - Backend endpoints, storage, billing, reserve/finalize, and retention workers.
-- Session issuance and refresh-token persistence, because the backend contract
-  for refresh is not present in this repository.
+- Backend session issuance and refresh-token exchange. The desktop session
+  response and secure persistence boundary exist, but no refresh endpoint was
+  specified or supplied by the backend.
 - UI activation of the client before an end-to-end backend exists.
