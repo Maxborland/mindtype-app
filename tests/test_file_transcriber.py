@@ -92,6 +92,9 @@ class TestFileTask:
         assert task.progress == 0
         assert task.error_message == ""
         assert task.result is None
+        assert task.output_files == {}
+        assert task.claim_trial_time_charge() is True
+        assert task.claim_trial_time_charge() is False
 
     def test_file_task_is_video(self):
         """is_video должен возвращать True для видео файлов."""
@@ -159,6 +162,106 @@ class TestFileStatus:
         # Переход в completed
         task.status = FileStatus.COMPLETED
         assert task.status == FileStatus.COMPLETED
+
+
+class TestFileCancellation:
+    def test_cancel_during_transcription_cannot_return_to_completed(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        class CancellingTranscriber:
+            queue = None
+
+            def transcribe_with_timestamps(self, **kwargs):
+                self.queue.cancel()
+                return ([{"start": 0.0, "end": 1.0, "text": "текст"}], "ru", 1.0)
+
+        transcriber = CancellingTranscriber()
+        completed = []
+        queue = FileTranscriptionQueue(
+            transcriber,
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=completed.append,
+        )
+        transcriber.queue = queue
+        task = FileTask(file_path=audio_path)
+        monkeypatch.setattr("app.file_transcriber.get_file_duration", lambda _: 1.0)
+
+        queue._process_task(task)
+
+        assert task.status is FileStatus.CANCELLED
+        assert completed == [task]
+
+    def test_worker_cleans_temporary_files_after_unexpected_failure(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        class LoadedTranscriber:
+            def load_model(self, **kwargs):
+                return None
+
+        completed = []
+        queue = FileTranscriptionQueue(
+            LoadedTranscriber(),
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=completed.append,
+        )
+        source = tmp_path / "source.wav"
+        source.touch()
+        temporary = tmp_path / "extracted.wav"
+        temporary.touch()
+        task = FileTask(file_path=source)
+        queue._tasks.append(task)
+        queue._queue.put(task)
+        queue._temp_files.append(temporary)
+        queue._running.set()
+        monkeypatch.setattr(
+            queue,
+            "_process_task",
+            lambda _: (_ for _ in ()).throw(RuntimeError("unexpected")),
+        )
+
+        queue._worker()
+
+        assert not temporary.exists()
+        assert not queue.is_running
+        assert task.status is FileStatus.ERROR
+        assert completed == [task]
 
 
 class TestTranscriptionSegment:

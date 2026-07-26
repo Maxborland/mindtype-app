@@ -1,8 +1,32 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import threading
 import urllib.error
 import urllib.request
+from unittest.mock import MagicMock
+
+
+def test_cancel_current_process_terminates_then_kills_after_grace_timeout():
+    from app.transcriber_cpp import WhisperCppTranscriber
+
+    process = MagicMock()
+    process.poll.return_value = None
+    process.wait.side_effect = [
+        subprocess.TimeoutExpired(cmd="whisper-cli", timeout=0.01),
+        0,
+    ]
+    transcriber = WhisperCppTranscriber.__new__(WhisperCppTranscriber)
+    transcriber._process_lock = threading.Lock()
+    transcriber._current_process = process
+    transcriber._cancel_requested = threading.Event()
+
+    transcriber.cancel_current(grace_timeout=0.01)
+
+    process.terminate.assert_called_once()
+    process.kill.assert_called_once()
+    assert transcriber._cancel_requested.is_set()
 
 
 def test_whisper_cpp_download_tries_sources_in_order(tmp_path: Path, monkeypatch) -> None:

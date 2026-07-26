@@ -3,9 +3,6 @@ import sys
 import json
 import logging
 import urllib.request
-import urllib.parse
-import subprocess
-import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, Callable, List
 from enum import Enum, auto
@@ -26,6 +23,13 @@ FALLBACK_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/ve
 
 # Список URL для проверки (в порядке приоритета)
 VERSION_URLS: List[str] = [PRIMARY_VERSION_URL, FALLBACK_VERSION_URL]
+
+# Artifact download and execution stay disabled until the update channel has a
+# signed manifest, mandatory hashes, redirect checks, and platform signatures.
+AUTOMATIC_UPDATE_DISABLED_MESSAGE = (
+    "Автоматическое обновление временно отключено. "
+    "Установите новую версию вручную из официального источника."
+)
 
 class UpdateStatus(Enum):
     IDLE = auto()
@@ -159,107 +163,11 @@ class Updater:
             return data.get("url"), data.get("sha256")
         return data, None
 
-    def _verify_hash(self, file_path: Path, expected_hash: str) -> bool:
-        """Проверяет SHA256 хеш файла."""
-        sha256_hash = hashlib.sha256()
-        try:
-            with open(file_path, "rb") as f:
-                for byte_block in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(byte_block)
-            actual_hash = sha256_hash.hexdigest().lower()
-            return actual_hash == expected_hash.lower()
-        except Exception as e:
-            logger.error(f"Ошибка при проверке хеша: {e}")
-            return False
-
     def download_update(self, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Optional[Path], Optional[str]]:
-        """
-        Скачивает обновление во временную папку с проверкой хеша.
-        """
-        url, expected_hash = self.get_download_info()
-        if not url:
-            return False, None, "URL для скачивания не найден"
-
-        # Безопасность: проверяем домен (whitelist)
-        ALLOWED_DOWNLOAD_DOMAINS = [
-            "github.com",
-            "objects.githubusercontent.com",
-            "raw.githubusercontent.com",
-            "mindtype.space",  # Свой сервер
-            "cdn.mindtype.space",  # CDN (если будет)
-        ]
-        parsed_url = urllib.parse.urlparse(url)
-        if parsed_url.netloc not in ALLOWED_DOWNLOAD_DOMAINS:
-            return False, None, f"Небезопасный URL для скачивания: {parsed_url.netloc}"
-
-        try:
-            ext = ".exe" if sys.platform == "win32" else ".dmg" if sys.platform == "darwin" else ".AppImage"
-
-            # Проверка расширения в URL
-            if not url.lower().endswith(ext):
-                return False, None, f"Неверное расширение файла в URL: ожидается {ext}"
-
-            temp_dir = Path(os.getenv("TEMP", "/tmp")) / "MindTypeUpdates"
-            temp_dir.mkdir(parents=True, exist_ok=True)
-
-            # Sanitize version string to prevent path traversal
-            import re
-            raw_version = self.latest_info.get('version', 'update')
-            # Only allow alphanumeric, dots, hyphens (valid semver chars)
-            safe_version = re.sub(r'[^a-zA-Z0-9.\-]', '', raw_version)[:32]
-            if not safe_version:
-                safe_version = 'update'
-
-            self._temp_path = temp_dir / f"MindType_Setup_{safe_version}{ext}"
-
-            logger.info(f"Скачивание обновления: {url} -> {self._temp_path}")
-
-            def reporthook(block_num, block_size, total_size):
-                if progress_callback:
-                    downloaded = block_num * block_size
-                    progress_callback(min(downloaded, total_size), total_size)
-
-            urllib.request.urlretrieve(url, str(self._temp_path), reporthook=reporthook if progress_callback else None)
-
-            # Проверка хеша если он предоставлен
-            if expected_hash:
-                logger.info(f"Проверка хеша SHA256...")
-                if not self._verify_hash(self._temp_path, expected_hash):
-                    if self._temp_path.exists():
-                        self._temp_path.unlink()
-                    return False, None, "Ошибка проверки целостности файла (хеш не совпадает)"
-                logger.info("Хеш совпадает.")
-            else:
-                logger.warning("Ожидаемый хеш не указан в version.json. Установка может быть небезопасной.")
-
-            return True, self._temp_path, None
-
-        except Exception as e:
-            logger.error(f"Ошибка скачивания: {e}")
-            return False, None, str(e)
+        """Fail closed until the complete update trust chain is implemented."""
+        return False, None, AUTOMATIC_UPDATE_DISABLED_MESSAGE
 
     def install_update(self) -> bool:
-        """
-        Запускает установку и закрывает приложение.
-        """
-        if not self._temp_path or not self._temp_path.exists():
-            logger.error("Файл обновления не найден для установки.")
-            return False
-
-        try:
-            logger.info(f"Запуск установки: {self._temp_path}")
-            # Безопасность: не используем shell=True
-            if sys.platform == "win32":
-                subprocess.Popen([str(self._temp_path)])
-            elif sys.platform == "linux":
-                os.chmod(self._temp_path, 0o700)
-                subprocess.Popen([str(self._temp_path)])
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(self._temp_path)])
-
-            # Закрываем приложение
-            sys.exit(0)
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка запуска установки: {e}")
-            return False
+        """Fail closed until downloaded artifacts can be authenticated."""
+        logger.warning(AUTOMATIC_UPDATE_DISABLED_MESSAGE)
+        return False

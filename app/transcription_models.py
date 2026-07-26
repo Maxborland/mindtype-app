@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+import uuid
 
 from .media_io import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 
@@ -148,6 +149,17 @@ class FileTask:
     error_message: str = ""
     warning: str = ""  # Предупреждение о качестве (не блокирует, но показывается)
     result: Optional[TranscriptionResult] = None
+    output_files: Dict[str, Path] = field(default_factory=dict)
+    trial_time_charged: bool = False
+    operation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    cloud_job_id: Optional[str] = None
+
+    def claim_trial_time_charge(self) -> bool:
+        """Вернуть True только для первого списания времени этой задачи."""
+        if self.trial_time_charged:
+            return False
+        self.trial_time_charged = True
+        return True
 
     @property
     def is_video(self) -> bool:

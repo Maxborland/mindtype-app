@@ -2,16 +2,9 @@
 PyQt6>=6.11.0
 sounddevice>=0.5.5
 numpy>=2.4.4
-huggingface-hub>=1.12.0
+huggingface-hub>=0.34.0,<1.0
 pyperclip>=1.8.2
 
-# ONNX runtime с поддержкой NPU и GPU
-onnxruntime-openvino>=1.17.0; sys_platform == 'win32'
-onnxruntime>=1.17.0; sys_platform != 'win32'
-optimum[onnxruntime]>=2.1.0
-
-# Transformers для Whisper ONNX
-transformers>=5.6.2
 librosa>=0.10.0
 soundfile>=0.12.0
 
@@ -39,11 +32,7 @@ keyring>=24.0.0
 pytest>=9.0.3
 pytest-cov>=4.0.0
 
-# Голосовой ассистент
-openwakeword>=0.6.0      # Wake word detection
-edge-tts>=6.1.0          # Microsoft TTS
-pydub>=0.25.0            # Декодирование MP3 для TTS (опционально, fallback на ffmpeg)
+# Нормализация текста
 num2words>=0.5.13        # Числа в слова
 dateparser>=1.4.0        # Парсинг дат
 transliterate>=1.10.2    # Транслитерация
-# tflite-runtime - опционально, openWakeWord может работать с ONNX

@@ -148,6 +148,10 @@ class FileTranscriptionQueue:
         """Получить список задач."""
         return self._tasks.copy()
 
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancelled.is_set()
+
     def add_files(self, file_paths: List[Path]) -> List[FileTask]:
         """
         Добавить файлы в очередь.
@@ -194,6 +198,12 @@ class FileTranscriptionQueue:
         """Отменить обработку."""
         self._cancelled.set()
         self._running.clear()
+        cancel_current = getattr(self.transcriber, "cancel_current", None)
+        if callable(cancel_current):
+            try:
+                cancel_current()
+            except Exception:
+                pass
 
         # Помечаем все pending задачи как отменённые
         for task in self._tasks:
@@ -202,56 +212,81 @@ class FileTranscriptionQueue:
 
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""
-        # Загружаем модель один раз
         try:
-            self.transcriber.load_model(
-                model_size=self.model_size,
-                compute_type=self.compute_type,
-                device=self.device,
-                models_dir=str(self.models_dir),
-            )
-        except Exception as e:
-            # Помечаем все задачи как ошибочные
-            for task in self._tasks:
-                if task.status == FileStatus.PENDING:
-                    task.status = FileStatus.ERROR
-                    task.error_message = f"Ошибка загрузки модели: {e}"
+            try:
+                prepare_operation = getattr(self.transcriber, "prepare_operation", None)
+                if callable(prepare_operation):
+                    prepare_operation()
+                self.transcriber.load_model(
+                    model_size=self.model_size,
+                    compute_type=self.compute_type,
+                    device=self.device,
+                    models_dir=str(self.models_dir),
+                )
+            except Exception as e:
+                for task in self._tasks:
+                    if task.status == FileStatus.PENDING:
+                        task.status = (
+                            FileStatus.CANCELLED
+                            if self._cancelled.is_set()
+                            else FileStatus.ERROR
+                        )
+                        if task.status is FileStatus.ERROR:
+                            task.error_message = f"Ошибка загрузки модели: {e}"
+                        if self._on_completed:
+                            self._on_completed(task)
+                return
+
+            while self._running.is_set():
+                try:
+                    task = self._queue.get(timeout=0.5)
+                except queue.Empty:
+                    remaining = [
+                        t for t in self._tasks if t.status == FileStatus.PENDING
+                    ]
+                    if not remaining:
+                        break
+                    continue
+
+                if self._cancelled.is_set():
+                    task.status = FileStatus.CANCELLED
                     if self._on_completed:
                         self._on_completed(task)
+                    continue
+
+                try:
+                    self._process_task(task)
+                except Exception as exc:
+                    task.status = (
+                        FileStatus.CANCELLED
+                        if self._cancelled.is_set()
+                        else FileStatus.ERROR
+                    )
+                    if task.status is FileStatus.ERROR:
+                        task.error_message = str(exc)
+                    if self._on_completed:
+                        self._on_completed(task)
+        finally:
+            for tmp in self._temp_files:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._temp_files.clear()
             self._running.clear()
-            return
-
-        while self._running.is_set():
-            try:
-                task = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                # Проверяем, есть ли ещё задачи
-                remaining = [t for t in self._tasks if t.status == FileStatus.PENDING]
-                if not remaining:
-                    break
-                continue
-
-            if self._cancelled.is_set():
-                task.status = FileStatus.CANCELLED
-                if self._on_completed:
-                    self._on_completed(task)
-                continue
-
-            self._process_task(task)
-
-        # Очистка временных файлов
-        for tmp in self._temp_files:
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-        self._temp_files.clear()
-
-        self._running.clear()
 
     def _process_task(self, task: FileTask) -> None:
         """Обработать одну задачу."""
         audio_path = task.file_path
+
+        def finish_cancelled() -> bool:
+            if not self._cancelled.is_set():
+                return False
+            task.status = FileStatus.CANCELLED
+            task.progress = 0
+            if self._on_completed:
+                self._on_completed(task)
+            return True
 
         try:
             # Если видео - извлекаем аудио
@@ -270,6 +305,8 @@ class FileTranscriptionQueue:
                 audio_path = extract_audio_from_video(task.file_path)
                 self._temp_files.append(audio_path)
                 task.progress = 20
+                if finish_cancelled():
+                    return
 
             # Транскрибция
             task.status = FileStatus.TRANSCRIBING
@@ -293,6 +330,8 @@ class FileTranscriptionQueue:
                 beam_size=self.beam_size,
                 vad_filter=self.vad_filter,
             )
+            if finish_cancelled():
+                return
 
             if not segments_data:
                 logger.warning(f"Транскрипция вернула 0 сегментов для {task.file_path.name}")
@@ -365,6 +404,8 @@ class FileTranscriptionQueue:
                         segments_data,
                         task,
                     )
+                    if finish_cancelled():
+                        return
                     logger.info(f"Постобработка завершена. Stats: {processed_result.processing_stats}")
                     task.result.processed_text = processed_result.processed_text
                     task.result.processing_stats = processed_result.processing_stats
@@ -432,12 +473,16 @@ class FileTranscriptionQueue:
 
                 try:
                     summary, metrics = self._summarize_text(task.result.text_for_summary, task)
+                    if finish_cancelled():
+                        return
                     if not summary or len(summary) < 10:
                         raise ValueError("Суммаризация вернула пустой или слишком короткий результат")
                     task.result.summary = summary
                     task.result.summary_metrics = metrics.to_dict() if metrics else None
                     task.result.summary_preset_name = self.summary_preset_name or None
                 except Exception as e:
+                    if finish_cancelled():
+                        return
                     logger.error(f"Ошибка суммаризации для {task.file_path.name}: {e}")
                     # Теперь мы считаем это ошибкой задачи, если саммаризация была включена и не удалась
                     task.status = FileStatus.ERROR
@@ -446,12 +491,18 @@ class FileTranscriptionQueue:
                         self._on_completed(task)
                     return
 
+            if finish_cancelled():
+                return
             task.status = FileStatus.COMPLETED
             task.progress = 100
 
         except Exception as e:
-            task.status = FileStatus.ERROR
-            task.error_message = str(e)
+            if self._cancelled.is_set():
+                task.status = FileStatus.CANCELLED
+                task.progress = 0
+            else:
+                task.status = FileStatus.ERROR
+                task.error_message = str(e)
 
         if self._on_completed:
             self._on_completed(task)
@@ -611,4 +662,3 @@ class FileTranscriptionQueue:
     def total_count(self) -> int:
         """Общее количество задач."""
         return len(self._tasks)
-

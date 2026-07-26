@@ -6,6 +6,8 @@ import pytest
 
 from app.report_generator import ReportGenerator
 from app.transcription_models import (
+    FileStatus,
+    FileTask,
     SpeakerStats,
     TranscriptionResult,
     TranscriptionSegment,
@@ -177,6 +179,70 @@ class TestSpeakersSection:
 class TestFullReport:
     """Интеграция: полный HTML-отчёт."""
 
+    def test_generated_report_has_strict_csp_and_no_scripts(self):
+        gen = ReportGenerator("ru")
+
+        report = gen.generate_html(make_result())
+        report_lower = report.lower()
+
+        assert "<script" not in report_lower
+        assert "http://" not in report_lower
+        assert "https://" not in report_lower
+        assert 'http-equiv="content-security-policy"' in report_lower
+        assert "default-src 'none'" in report_lower
+        assert "script-src 'none'" in report_lower
+        assert "connect-src 'none'" in report_lower
+
+    def test_latex_like_summary_is_plain_escaped_text(self):
+        gen = ReportGenerator("ru")
+        payload = "$</style><img src=x onerror=alert(1)>$"
+
+        report = gen.generate_html(make_result(summary=payload))
+
+        assert "<img" not in report.lower()
+        assert "&lt;/style&gt;&lt;img" in report
+        assert payload not in report
+
+    def test_generated_report_escapes_all_untrusted_fields(self):
+        gen = ReportGenerator("ru")
+        result = make_result(
+            file_path=Path('"><img src=x onerror=alert(1)>.mp3'),
+            detected_language='"><img src=x>',
+            model_used="<svg onload=alert(2)>",
+            segments=[
+                TranscriptionSegment(
+                    0,
+                    5,
+                    "<script>alert(3)</script>",
+                    speaker="SPEAKER_00",
+                )
+            ],
+            summary="<iframe src=https://evil.example></iframe>",
+            summary_preset_name="<object>preset</object>",
+            num_speakers=2,
+            speaker_stats=[
+                SpeakerStats("SPEAKER_00", "<embed>name</embed>", 5.0, 1, 1),
+            ],
+            speaker_names={"SPEAKER_00": "<embed>name</embed>"},
+            processed_text="<form action=https://evil.example>text</form>",
+        )
+
+        report = gen.generate_html(result)
+        report_lower = report.lower()
+
+        for active_tag in ("<img", "<svg", "<script", "<iframe", "<object", "<embed", "<form"):
+            assert active_tag not in report_lower
+        for escaped_tag in (
+            "&lt;img",
+            "&lt;svg",
+            "&lt;script",
+            "&lt;iframe",
+            "&lt;object",
+            "&lt;embed",
+            "&lt;form",
+        ):
+            assert escaped_tag in report_lower
+
     def test_generate_html(self, tmp_path):
         gen = ReportGenerator("ru")
         result = make_result(
@@ -209,3 +275,106 @@ class TestFullReport:
         html = gen.generate_html(result)
         assert "#transcript" in html
         assert "#summary" not in html
+
+
+class TestReportOutputPaths:
+    """Экспорт не должен уничтожать ранее созданные отчёты."""
+
+    def test_generate_preserves_existing_report_with_unique_name(self, tmp_path):
+        gen = ReportGenerator("ru")
+        existing = tmp_path / "call_transcription.html"
+        existing.write_text("original report", encoding="utf-8")
+
+        created = gen.generate(make_result(), tmp_path, format="html")
+
+        assert existing.read_text(encoding="utf-8") == "original report"
+        assert created["html"] == tmp_path / "call_transcription_2.html"
+        assert created["html"].exists()
+
+    def test_both_formats_share_unique_stem(self, tmp_path, monkeypatch):
+        gen = ReportGenerator("ru")
+        (tmp_path / "call_transcription.pdf").write_bytes(b"original pdf")
+
+        def generate_pdf(result, output_path):
+            output_path.write_bytes(b"new pdf")
+            return True
+
+        monkeypatch.setattr(gen, "generate_pdf", generate_pdf)
+
+        created = gen.generate(make_result(), tmp_path, format="both")
+
+        assert created["html"].stem == "call_transcription_2"
+        assert created["pdf"].stem == "call_transcription_2"
+        assert (tmp_path / "call_transcription.pdf").read_bytes() == b"original pdf"
+
+    def test_worker_hands_generated_paths_to_file_task(self, tmp_path):
+        from app.ui.workers import FileTranscriptionWorker
+
+        result = make_result()
+        task = FileTask(
+            file_path=result.file_path,
+            status=FileStatus.COMPLETED,
+            result=result,
+        )
+
+        class ImmediateQueue:
+            is_running = False
+
+            def start(self):
+                self._on_completed(task)
+
+        worker = FileTranscriptionWorker(
+            queue=ImmediateQueue(),
+            output_dir=tmp_path,
+            output_format="html",
+            ui_language="ru",
+        )
+
+        worker.run()
+
+        assert task.output_files == {
+            "html": tmp_path / "call_transcription.html",
+        }
+
+    def test_cancel_during_report_generation_cannot_finish_task(self, tmp_path):
+        from app.ui.workers import FileTranscriptionWorker
+
+        result = make_result()
+        task = FileTask(
+            file_path=result.file_path,
+            status=FileStatus.COMPLETED,
+            result=result,
+        )
+
+        class CancellingQueue:
+            is_running = False
+            cancel_requested = False
+
+            def start(self):
+                self._on_completed(task)
+
+            def cancel(self):
+                self.cancel_requested = True
+
+        queue = CancellingQueue()
+        worker = FileTranscriptionWorker(
+            queue=queue,
+            output_dir=tmp_path,
+            output_format="html",
+            ui_language="ru",
+        )
+
+        class CancellingGenerator:
+            def generate(self, *args, **kwargs):
+                output = tmp_path / "call_transcription.html"
+                output.write_text("partial", encoding="utf-8")
+                queue.cancel()
+                return {"html": output}
+
+        worker._report_generator = CancellingGenerator()
+
+        worker.run()
+
+        assert task.status is FileStatus.CANCELLED
+        assert task.output_files == {}
+        assert not (tmp_path / "call_transcription.html").exists()

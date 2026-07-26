@@ -156,63 +156,54 @@ class TestUpdaterCheckForUpdates:
 class TestUpdaterDownloadValidation:
     """Тесты для валидации скачивания."""
 
-    def test_allowed_download_domains(self):
-        """Проверка whitelist доменов для скачивания."""
-        from app.updater import Updater
+    def test_download_is_disabled_before_any_network_or_file_access(self):
+        """Отключённый updater не должен даже начинать загрузку."""
+        from app.updater import AUTOMATIC_UPDATE_DISABLED_MESSAGE, Updater
 
         updater = Updater(current_version="1.0.0")
         updater.latest_info = {
             "version": "1.1.0",
             "platforms": {
                 "windows": {
-                    "url": "https://evil.com/malware.exe",
-                    "sha256": "abc123"
+                    "url": "https://mindtype.space/MindType_Setup.exe",
+                    "sha256": "a" * 64,
                 }
-            }
+            },
         }
 
-        success, path, error = updater.download_update()
-
-        assert success is False
-        assert "Небезопасный URL" in error
-
-    def test_github_domain_allowed(self):
-        """GitHub домены должны быть разрешены."""
-        from app.updater import Updater
-        import urllib.parse
-
-        allowed_domains = [
-            "github.com",
-            "objects.githubusercontent.com",
-            "raw.githubusercontent.com",
-            "mindtype.space",
-        ]
-
-        for domain in allowed_domains:
-            url = f"https://{domain}/test.exe"
-            parsed = urllib.parse.urlparse(url)
-            assert parsed.netloc in allowed_domains or parsed.netloc == domain
-
-    def test_wrong_extension_rejected(self):
-        """Неверное расширение файла должно отклоняться."""
-        from app.updater import Updater
-
-        updater = Updater(current_version="1.0.0")
-        updater.latest_info = {
-            "version": "1.1.0",
-            "platforms": {
-                "windows": {
-                    "url": "https://github.com/repo/file.zip",  # Неверное расширение
-                    "sha256": "abc123"
-                }
-            }
-        }
-
-        with patch('sys.platform', 'win32'):
+        with (
+            patch.object(updater, "get_download_info") as get_download_info,
+            patch("urllib.request.urlretrieve") as urlretrieve,
+        ):
             success, path, error = updater.download_update()
 
-        assert success is False
-        assert "расширение" in error.lower() or "extension" in error.lower()
+        assert (success, path, error) == (
+            False,
+            None,
+            AUTOMATIC_UPDATE_DISABLED_MESSAGE,
+        )
+        get_download_info.assert_not_called()
+        urlretrieve.assert_not_called()
+
+class TestUpdaterInstallationDisabled:
+    """Автоматический запуск установщика закрыт до появления корня доверия."""
+
+    def test_install_is_disabled_without_process_or_exit(self, tmp_path):
+        from app.updater import Updater
+
+        updater = Updater(current_version="1.0.0")
+        updater._temp_path = tmp_path / "MindType_Setup.exe"
+        updater._temp_path.write_bytes(b"untrusted installer")
+
+        with (
+            patch("subprocess.Popen") as popen,
+            patch("sys.exit") as exit_app,
+        ):
+            installed = updater.install_update()
+
+        assert installed is False
+        popen.assert_not_called()
+        exit_app.assert_not_called()
 
 
 class TestUpdaterGetDownloadInfo:

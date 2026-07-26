@@ -1,8 +1,6 @@
 import logging
-import sys
+import importlib
 from typing import List, Optional
-
-import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +17,12 @@ PROVIDER_PRIORITY = [
 
 def detect_available_providers() -> List[str]:
     """Возвращает список доступных провайдеров ONNX Runtime."""
-    available = ort.get_available_providers()
+    try:
+        ort = importlib.import_module("onnxruntime")
+        available = ort.get_available_providers()
+    except (ImportError, OSError) as exc:
+        logger.warning("ONNX Runtime недоступен: %s", exc)
+        return []
 
     # Фильтруем и сортируем согласно нашему приоритету
     supported = [p for p in PROVIDER_PRIORITY if p in available]
@@ -96,6 +99,5 @@ def get_provider_options(provider: str) -> dict:
             "device_id": 0
         }
     return options
-
 
 

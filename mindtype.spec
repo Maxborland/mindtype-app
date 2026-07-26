@@ -1,0 +1,91 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""Windows onedir build for the current MindType desktop application."""
+
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files
+
+
+ROOT = Path(SPECPATH)
+
+datas = []
+for source, destination in [
+    (ROOT / "app" / "assets", "app/assets"),
+    (ROOT / "app" / "ui" / "fonts", "app/ui/fonts"),
+    (ROOT / "assets", "assets"),
+    (ROOT / "bin" / "win-x64", "bin/win-x64"),
+]:
+    if source.exists():
+        datas.append((str(source), destination))
+
+datas += collect_data_files("certifi")
+
+hiddenimports = [
+    "app.llm.anthropic",
+    "app.llm.gemini",
+    "app.llm.mindtype_cloud",
+    "app.llm.ollama",
+    "app.llm.openai",
+    "app.llm.openrouter",
+    "app.platform.windows",
+    "keyboard",
+    "pynput.keyboard._win32",
+    "pynput.mouse._win32",
+    "sounddevice",
+    "PyQt6.QtPdf",
+    "PyQt6.QtSvg",
+]
+
+a = Analysis(
+    [str(ROOT / "main.py")],
+    pathex=[str(ROOT)],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        "pytest",
+        "IPython",
+        "jupyter",
+        "notebook",
+        "tkinter",
+        # Optional local ML and assistant packs are deliberately not part of
+        # the laptop-friendly base installer.
+        "torch",
+        "transformers",
+        "optimum",
+        "onnxruntime",
+        "openwakeword",
+        "edge_tts",
+        "pydub",
+    ],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="MindType",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    icon=str(ROOT / "assets" / "icons" / "app.ico"),
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="MindType",
+)

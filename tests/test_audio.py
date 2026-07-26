@@ -89,6 +89,22 @@ class TestAudioRecorder:
         result = recorder.stop()
         assert result is None
 
+    def test_stop_does_not_return_path_while_writer_is_alive(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "unfinished.wav"
+        wav_path.touch()
+        recorder._tmp_path = wav_path
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = MagicMock()
+        recorder._writer_thread.is_alive.return_value = True
+
+        with pytest.raises(RuntimeError, match="ещё записывается"):
+            recorder.stop(timeout=0.01)
+
+        assert recorder.recording is False
+        assert recorder._tmp_path == wav_path
+
     @patch('app.audio.sd.RawInputStream')
     def test_start_monitoring_success(self, mock_stream):
         """Успешный старт мониторинга."""
@@ -174,6 +190,35 @@ class TestAudioLevelCalculation:
 
 class TestErrorHandling:
     """Тесты обработки ошибок."""
+
+    @patch('app.audio.tempfile.NamedTemporaryFile')
+    @patch('app.audio.sd.RawInputStream')
+    def test_stream_start_failure_rolls_back_every_resource(
+        self,
+        mock_stream,
+        mock_tempfile,
+        tmp_path,
+    ):
+        import sounddevice as sd
+
+        wav_path = tmp_path / "failed-start.wav"
+        wav_path.touch()
+        mock_file = MagicMock(name=str(wav_path))
+        mock_file.name = str(wav_path)
+        mock_tempfile.return_value = mock_file
+        stream = MagicMock()
+        stream.start.side_effect = sd.PortAudioError("Device disconnected")
+        mock_stream.return_value = stream
+        recorder = AudioRecorder()
+
+        with pytest.raises(RuntimeError, match="запустить устройство записи"):
+            recorder.start()
+
+        assert recorder.recording is False
+        assert recorder._writer_thread is None
+        assert recorder._tmp_path is None
+        assert not wav_path.exists()
+        stream.close.assert_called_once()
 
     @patch('app.audio.sd.RawInputStream')
     def test_start_with_invalid_device(self, mock_stream):

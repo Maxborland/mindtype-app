@@ -6,6 +6,7 @@ import re
 import logging
 import time
 import shutil
+import threading
 import numpy as np
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
@@ -116,6 +117,9 @@ class WhisperCppTranscriber:
         self.gpu_backend: str = self._detect_gpu_backend()
         self.threads: int = 4
         self._vad = None
+        self._process_lock = threading.Lock()
+        self._current_process: Optional[subprocess.Popen] = None
+        self._cancel_requested = threading.Event()
         # Preferred model download sources (CDN/mirrors). If empty, _download_model()
         # falls back to built-in defaults.
         self._download_sources: List[str] = []
@@ -123,6 +127,50 @@ class WhisperCppTranscriber:
         # Убеждаемся, что бинарник есть и готов к работе
         self._ensure_binary()
         logger.info(f"Инициализирован WhisperCppTranscriber. Платформа: {sys.platform}, Backend: {self.gpu_backend}, Бинарник: {self.binary_path}")
+
+    def prepare_operation(self) -> None:
+        """Reset cancellation only when no previous native process is running."""
+        with self._process_lock:
+            if self._current_process and self._current_process.poll() is None:
+                raise RuntimeError("Другая локальная транскрипция уже выполняется")
+            self._current_process = None
+            self._cancel_requested.clear()
+
+    def _register_process(self, process: subprocess.Popen) -> None:
+        with self._process_lock:
+            if self._current_process and self._current_process.poll() is None:
+                process.kill()
+                raise RuntimeError("Другая локальная транскрипция уже выполняется")
+            if self._cancel_requested.is_set():
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise InterruptedError("Транскрипция отменена")
+            self._current_process = process
+
+    def _release_process(self, process: Optional[subprocess.Popen]) -> None:
+        if process is None:
+            return
+        with self._process_lock:
+            if self._current_process is process:
+                self._current_process = None
+
+    def cancel_current(self, grace_timeout: float = 2.0) -> None:
+        """Terminate active whisper.cpp gracefully, then force it if needed."""
+        self._cancel_requested.set()
+        with self._process_lock:
+            process = self._current_process
+        if not process or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=grace_timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=grace_timeout)
 
     def set_download_sources(self, sources: List[str]) -> None:
         """Set ordered list of download sources for GGML whisper.cpp models."""
@@ -700,6 +748,7 @@ class WhisperCppTranscriber:
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
 
+        process: Optional[subprocess.Popen] = None
         try:
             # VAD фильтрация перед вызовом бинарника
             if vad_filter:
@@ -737,6 +786,7 @@ class WhisperCppTranscriber:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
+            self._register_process(process)
 
             import threading
             def track_progress(pipe, callback):
@@ -803,6 +853,7 @@ class WhisperCppTranscriber:
                         return clean_stdout.strip(), language, 1.0
                 raise RuntimeError(f"Не удалось распарсить результат: {e}")
         finally:
+            self._release_process(process)
             # Очистка временного файла
             if is_temp_wav and working_audio_path.exists():
                 try:
@@ -829,6 +880,7 @@ class WhisperCppTranscriber:
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
 
+        process: Optional[subprocess.Popen] = None
         try:
             # Генерируем уникальное имя для результата
             result_id = int(time.time())
@@ -848,6 +900,7 @@ class WhisperCppTranscriber:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
+            self._register_process(process)
 
             try:
                 # Timeout: 30 minutes max for transcription
@@ -928,6 +981,7 @@ class WhisperCppTranscriber:
                 logger.error(f"JSON error: {e}")
                 raise RuntimeError(f"Ошибка парсинга JSON: {e}")
         finally:
+            self._release_process(process)
             if is_temp_wav and working_audio_path.exists():
                 try:
                     os.remove(working_audio_path)
@@ -952,6 +1006,7 @@ class WhisperCppTranscriber:
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
 
+        process: Optional[subprocess.Popen] = None
         try:
             # VAD фильтрация
             if vad_filter:
@@ -976,6 +1031,7 @@ class WhisperCppTranscriber:
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
+            self._register_process(process)
 
             full_text = ""
             for line_bytes in process.stdout:
@@ -993,6 +1049,7 @@ class WhisperCppTranscriber:
                 process.wait()
                 logger.error("Транскрипция прервана: превышено время ожидания")
         finally:
+            self._release_process(process)
             if is_temp_wav and working_audio_path.exists():
                 try:
                     os.remove(working_audio_path)

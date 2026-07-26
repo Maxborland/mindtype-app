@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Callable
 
 from .key_validator import KeyValidator
 from .trial import TrialManager, TRIAL_DURATION_DAYS, TRIAL_TRANSCRIPTION_LIMIT_SECONDS
@@ -283,6 +283,12 @@ class LicenseManager:
                 self._license_file.unlink(missing_ok=True)
         except Exception:
             self._license_data = None
+            self._license_file.unlink(missing_ok=True)
+
+    def _clear_cached_license(self) -> None:
+        """Удалить локальное утверждение о лицензии."""
+        self._license_data = None
+        self._license_file.unlink(missing_ok=True)
 
     def _save_license(self) -> None:
         """Сохранить данные лицензии в кэш с подписью."""
@@ -503,7 +509,32 @@ class LicenseManager:
 
         key = KeyValidator.format_key(self._license_data.get("license_key", ""))
         result, _, _ = self.activate_online(key)
+        if result in {
+            ValidationResult.NOT_FOUND,
+            ValidationResult.DEACTIVATED,
+            ValidationResult.EXPIRED,
+        }:
+            self._clear_cached_license()
         return result
+
+    def revalidate_if_needed_async(
+        self,
+        callback: Optional[Callable[[Optional[ValidationResult]], None]] = None,
+    ) -> Optional[Future]:
+        """Запустить ревалидацию устаревшего cache без блокировки UI."""
+        if not self.needs_revalidation():
+            return None
+
+        future = _background_executor.submit(self.revalidate_if_needed)
+        if callback is not None:
+            def _notify(done: Future) -> None:
+                try:
+                    callback(done.result())
+                except Exception as exc:
+                    logger.warning("License revalidation callback failed: %s", exc)
+
+            future.add_done_callback(_notify)
+        return future
 
     def get_license_info(self) -> LicenseInfo:
         """
@@ -636,6 +667,20 @@ class LicenseManager:
         # Проверяем статус trial
         return info.is_active, info
 
+    def check_transcription_entitlement(
+        self,
+        required_seconds: float = 0,
+    ) -> tuple[bool, LicenseInfo]:
+        """Единый gate для диктовки и обработки файлов."""
+        has_access, info = self.check_access()
+        if not has_access:
+            return False, info
+        if info.is_trial and max(0.0, required_seconds) > (
+            info.trial_remaining_minutes * 60
+        ):
+            return False, info
+        return True, info
+
     def get_trial_remaining_days(self) -> int:
         """Получить оставшиеся дни trial."""
         return self._trial_manager.get_remaining_days()
@@ -664,5 +709,4 @@ def get_license_manager() -> LicenseManager:
     if _license_manager is None:
         _license_manager = LicenseManager()
     return _license_manager
-
 

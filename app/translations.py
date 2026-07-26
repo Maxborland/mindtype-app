@@ -309,6 +309,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "downloading_update": "Загрузка обновления...",
         "update_ready": "Обновление готово к установке",
         "update_error": "Ошибка обновления",
+        "automatic_update_disabled": "Автоматическое обновление временно отключено. Установите новую версию вручную из официального источника.",
         "current_version": "Текущая версия",
 
         # Новые ключи для покупки и поддержки
@@ -420,6 +421,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "diarization_backend_openrouter": "OpenRouter (LLM)",
         "diarization_backend_local": "Локальная (офлайн)",
         "diarization_backend_tooltip": "Как определять спикеров в записи.\nАвто — через OpenRouter, если задан API ключ, иначе локально.\nOpenRouter (LLM) — модель размечает спикеров по структуре диалога, умеет узнавать имена; при ошибке — откат на локальную.\nЛокальная — офлайн по голосу (MFCC), без затрат.",
+        "data_route_disclosure": "Маршрут данных: аудио — {audio}; диаризация — {diarization}; саммари — {summary}.",
+        "dictation_data_route": "Маршрут диктовки: аудио — {audio}.",
+        "route_local": "локально",
+        "route_off": "выключена",
 
         # Голосовой ассистент
         "assistant": "Ассистент",
@@ -719,6 +724,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "downloading_update": "Downloading update...",
         "update_ready": "Update ready to install",
         "update_error": "Update error",
+        "automatic_update_disabled": "Automatic updates are temporarily disabled. Install the new version manually from the official source.",
         "current_version": "Current version",
 
         # New keys for purchase and support
@@ -831,6 +837,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "diarization_backend_openrouter": "OpenRouter (LLM)",
         "diarization_backend_local": "Local (offline)",
         "diarization_backend_tooltip": "How to detect speakers in the recording.\nAuto — via OpenRouter when an API key is set, otherwise locally.\nOpenRouter (LLM) — the model labels speakers by dialogue structure and can recognize names; falls back to local on errors.\nLocal — offline by voice (MFCC), no cost.",
+        "data_route_disclosure": "Data route: audio — {audio}; diarization — {diarization}; summary — {summary}.",
+        "dictation_data_route": "Dictation route: audio — {audio}.",
+        "route_local": "local",
+        "route_off": "off",
 
         # Setup Wizard
         "setup_welcome_title": "Welcome to MindType",

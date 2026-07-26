@@ -55,6 +55,12 @@ class TranscribeWorker(QThread):
     def cancel(self) -> None:
         """Отменить транскрипцию."""
         self._cancelled = True
+        cancel_current = getattr(self.transcriber, "cancel_current", None)
+        if callable(cancel_current):
+            try:
+                cancel_current()
+            except Exception:
+                pass
 
     def is_cancelled(self) -> bool:
         """Проверить, отменена ли транскрипция."""
@@ -71,6 +77,10 @@ class TranscribeWorker(QThread):
             if self._cancelled:
                 self.cancelled.emit()
                 return
+
+            prepare_operation = getattr(self.transcriber, "prepare_operation", None)
+            if callable(prepare_operation):
+                prepare_operation()
 
             self.status_update.emit("loading_model")
             self.transcriber.load_model(
@@ -101,6 +111,9 @@ class TranscribeWorker(QThread):
                 detected_lang = lang or ""
                 detected_prob = prob
                 self.progress.emit(partial, detected_lang, prob)
+            if self._cancelled:
+                self.cancelled.emit()
+                return
             self.finished.emit(last_text, detected_lang, detected_prob, "")
         except Exception as exc:
             if self._cancelled:
@@ -217,22 +230,39 @@ class FileTranscriptionWorker(QThread):
         def on_completed(task):
             # Генерируем отчёт если успешно
             if task.status == FileStatus.COMPLETED and task.result:
+                if getattr(self.queue, "cancel_requested", False):
+                    task.status = FileStatus.CANCELLED
+                    task.progress = 0
+                    self.task_completed.emit(task)
+                    return
                 try:
                     task.status = FileStatus.GENERATING
                     task.progress = 95
                     self.task_progress.emit(task)
 
-                    self._report_generator.generate(
+                    created_files = self._report_generator.generate(
                         task.result,
                         self.output_dir,
                         self.output_format,
                     )
 
-                    task.status = FileStatus.COMPLETED
-                    task.progress = 100
+                    if getattr(self.queue, "cancel_requested", False):
+                        for path in created_files.values():
+                            path.unlink(missing_ok=True)
+                        task.output_files = {}
+                        task.status = FileStatus.CANCELLED
+                        task.progress = 0
+                    else:
+                        task.output_files = created_files
+                        task.status = FileStatus.COMPLETED
+                        task.progress = 100
                 except Exception as e:
-                    task.status = FileStatus.ERROR
-                    task.error_message = str(e)
+                    if getattr(self.queue, "cancel_requested", False):
+                        task.status = FileStatus.CANCELLED
+                        task.progress = 0
+                    else:
+                        task.status = FileStatus.ERROR
+                        task.error_message = str(e)
 
             self.task_completed.emit(task)
 
@@ -247,4 +277,3 @@ class FileTranscriptionWorker(QThread):
             self.msleep(100)
 
         self.all_completed.emit()
-

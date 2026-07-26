@@ -79,6 +79,11 @@ def get_breadcrumbs(count: int = 20) -> List[str]:
     return _breadcrumb_manager.get_recent(count)
 
 
+def clear_breadcrumbs() -> None:
+    """Очистить breadcrumbs, например после отправки или в тестовой изоляции."""
+    _breadcrumb_manager.clear()
+
+
 def get_crashes_dir() -> Path:
     """Получить директорию для хранения crash-репортов."""
     if sys.platform == "win32":

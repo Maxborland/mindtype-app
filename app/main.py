@@ -7,6 +7,7 @@
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +58,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush,
 
 from .audio import AudioRecorder
 from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
+from .cloud_jobs import CloudJobStore, FileCloudJobTracker
 from .accelerator import has_npu, detect_available_providers
 from .file_transcriber import (
     FileTranscriptionQueue,
@@ -68,6 +70,7 @@ from .file_transcriber import (
     SummaryOptions,
     PostProcessOptions,
 )
+from .media_io import get_file_duration
 from .hotkeys import HotkeyListener, HotkeyRecorder
 from .inserter import insert_text, focus_manager
 from .licensing import LicenseManager, LicenseStatus
@@ -76,8 +79,13 @@ from .ui.setup_wizard import SetupWizard
 from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, CreditsHistoryDialog, CreditsHistoryWorker
 from .overlay import OverlayWidget
 from .report_generator import ReportGenerator
-from .transcriber import Transcriber
+from .transcriber import (
+    Transcriber,
+    available_transcriber_backends,
+    select_available_backend,
+)
 from .dictation_state import DictationState
+from .data_routes import resolve_processing_route
 from .translations import (
     get_text,
     UI_LANGUAGES,
@@ -553,8 +561,27 @@ class MainWindow(QMainWindow):
         self.resize(1060, 600)
 
         self.config = ConfigManager()
+        try:
+            self._cloud_job_tracker: Optional[FileCloudJobTracker] = (
+                FileCloudJobTracker(
+                    CloudJobStore(
+                        self.config.config_dir / "cloud_jobs.sqlite3"
+                    )
+                )
+            )
+        except Exception:
+            logger.exception("Could not initialize durable cloud job store")
+            self._cloud_job_tracker = None
         self.audio = AudioRecorder()
-        backend = self.config.config.get("transcriber_backend", "auto")
+        saved_backend = self.config.config.get("transcriber_backend", "whisper_cpp")
+        backend = select_available_backend(saved_backend)
+        if backend != saved_backend:
+            logger.warning(
+                "Configured transcription backend %s is unavailable; using %s",
+                saved_backend,
+                backend,
+            )
+            self.config.update(transcriber_backend=backend)
         self._transcriber_backend = backend
         self.transcriber = self._build_transcriber(backend)
         self.hotkey_listener: Optional[HotkeyListener] = None
@@ -602,12 +629,19 @@ class MainWindow(QMainWindow):
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
         self._recording_hotkey = False  # отдельная забота: идёт перепривязка хоткея в настройках
         self._really_quit = False  # Флаг для полного выхода
+        self._preserve_cloud_jobs_on_shutdown = False
 
         # Текущий язык интерфейса
         self._ui_lang = self.config.config.get("ui_language", "ru")
 
         # Система лицензирования
         self.license_manager = LicenseManager()
+        self.license_manager.revalidate_if_needed_async()
+        self._license_revalidation_timer = QTimer(self)
+        self._license_revalidation_timer.timeout.connect(
+            self.license_manager.revalidate_if_needed_async
+        )
+        self._license_revalidation_timer.start(60 * 60 * 1000)
 
         # Инициализация UI элементов ассистента (будут созданы позже в _build_ui)
         self.assistant_enable_check = None
@@ -656,6 +690,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._load_initial_state()
+        self._restore_retryable_cloud_tasks()
         self._init_hotkey()
         self._setup_focus_manager()
 
@@ -811,20 +846,10 @@ class MainWindow(QMainWindow):
         if use_cloud:
             self._init_mindtype_cloud()
 
-        # Update default state of AI Summary checkbox (safe defaults).
+        # Cloud work requires a fresh explicit opt-in in this session.
         if hasattr(self, "enable_summary_checkbox") and self.enable_summary_checkbox:
-            llm_provider = cfg.get("llm_provider", "openrouter")
-            enable_summary_default = False
-            if llm_provider == "mindtype_cloud":
-                try:
-                    enable_summary_default = bool(self.license_manager.get_license_info().is_active)
-                except Exception:
-                    enable_summary_default = False
-            elif llm_provider == "ollama":
-                enable_summary_default = False
-            else:
-                enable_summary_default = bool(cfg.get(f"{llm_provider}_api_key", ""))
-            self.enable_summary_checkbox.setChecked(enable_summary_default)
+            self.enable_summary_checkbox.setChecked(False)
+            self._update_data_route_disclosure()
 
         logger.info("Configuration applied from setup wizard")
 
@@ -1547,6 +1572,11 @@ class MainWindow(QMainWindow):
         self._trans_lang_row = rec_section.form.add_row(self._t("transcription_language"), self.trans_lang_box)
         self.trans_lang_label = self._trans_lang_row.label
 
+        self.dictation_route_label = QLabel()
+        self.dictation_route_label.setWordWrap(True)
+        rec_section.form.add_widget(self.dictation_route_label)
+        self._update_data_route_disclosure()
+
         tab_layout.addWidget(rec_section)
 
         # === Секция: Статус лицензии ===
@@ -1748,9 +1778,12 @@ class MainWindow(QMainWindow):
 
         # Бэкенд транскрипции
         self.backend_box = QComboBox()
+        available_backends = set(available_transcriber_backends())
         self.backend_box.addItem(self._t("backend_whispercpp"), "whisper_cpp")
-        self.backend_box.addItem(self._t("backend_faster_whisper"), "faster_whisper")
-        self.backend_box.addItem(self._t("backend_onnx"), "onnx")
+        if "faster_whisper" in available_backends:
+            self.backend_box.addItem(self._t("backend_faster_whisper"), "faster_whisper")
+        if "onnx" in available_backends:
+            self.backend_box.addItem(self._t("backend_onnx"), "onnx")
         self.backend_box.addItem(self._t("backend_openrouter"), "openrouter")
         self._backend_row = perf_section.form.add_row(self._t("whisper_backend"), self.backend_box)
         self.backend_label = self._backend_row.label
@@ -2188,21 +2221,9 @@ class MainWindow(QMainWindow):
 
         # Включить суммаризацию (checkbox напрямую)
         self.enable_summary_checkbox = QCheckBox(self._t("enable_summary"))
-        # Default should be safe: enable only when provider is configured.
+        # Every session starts without summarization until the user opts in.
         cfg = self.config.config
-        llm_provider = cfg.get("llm_provider", "openrouter")
-        enable_summary_default = False
-        if llm_provider == "mindtype_cloud":
-            try:
-                enable_summary_default = bool(self.license_manager.get_license_info().is_active)
-            except Exception:
-                enable_summary_default = False
-        elif llm_provider == "ollama":
-            # Ollama may not be running; leave off by default.
-            enable_summary_default = False
-        else:
-            enable_summary_default = bool(cfg.get(f"{llm_provider}_api_key", ""))
-        self.enable_summary_checkbox.setChecked(enable_summary_default)
+        self.enable_summary_checkbox.setChecked(False)
         self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
         layout.addWidget(self.enable_summary_checkbox)
 
@@ -2250,6 +2271,17 @@ class MainWindow(QMainWindow):
         diar_row.addWidget(self.diarization_backend_combo)
         diar_row.addStretch()
         layout.addLayout(diar_row)
+
+        self.data_route_label = QLabel()
+        self.data_route_label.setWordWrap(True)
+        layout.addWidget(self.data_route_label)
+        self.enable_summary_checkbox.toggled.connect(
+            self._update_data_route_disclosure
+        )
+        self.diarization_backend_combo.currentIndexChanged.connect(
+            self._update_data_route_disclosure
+        )
+        self._update_data_route_disclosure()
 
         self.output_folder_edit = QLineEdit()
         self.output_folder_edit.setReadOnly(True)
@@ -2888,6 +2920,7 @@ class MainWindow(QMainWindow):
         # AI саммари
         self.enable_summary_checkbox.setText(self._t("enable_summary"))
         self.enable_summary_checkbox.setToolTip(self._t("enable_summary_tooltip"))
+        self._update_data_route_disclosure()
         self.customize_prompts_btn.setText(self._t("customize_prompts"))
         if hasattr(self, "manage_presets_btn"):
             self.manage_presets_btn.setText(self._t("manage_presets"))
@@ -3085,10 +3118,9 @@ class MainWindow(QMainWindow):
         from .crash_reporter import add_breadcrumb
         add_breadcrumb("Hotkey pressed - starting recording")
 
-        # Проверяем лицензию перед записью
-        info = self.license_manager.get_license_info()
-        if info.status == LicenseStatus.TRIAL_EXPIRED:
-            # Показываем блокирующий диалог
+        # Один entitlement gate используется и для диктовки, и для файлов.
+        has_access, info = self.license_manager.check_transcription_entitlement()
+        if not has_access:
             self._show_trial_expired_dialog()
             return
 
@@ -3116,6 +3148,17 @@ class MainWindow(QMainWindow):
         """Начать запись с показом overlay."""
         if self.audio.recording:
             return
+        info = self.license_manager.get_license_info()
+        quota_seconds = (
+            max(0.0, info.trial_remaining_minutes * 60)
+            if info.is_trial
+            else None
+        )
+        started_at = time.monotonic()
+        operation_token = self._dictation.begin_recording(
+            started_at=started_at,
+            max_duration_seconds=quota_seconds,
+        )
         try:
             device_id = self._selected_device_id()
 
@@ -3123,42 +3166,74 @@ class MainWindow(QMainWindow):
                 self.waveform_signal.emit(levels)
 
             self.audio.start(device=device_id, level_callback=on_level)
-            self._dictation.recording_start_time = datetime.now()  # Запоминаем время начала
             self.overlay.show_recording()
             self._update_tray_icon(recording=True)
+            if quota_seconds is not None:
+                QTimer.singleShot(
+                    max(1, int(quota_seconds * 1000)),
+                    lambda token=operation_token: self._stop_at_trial_quota(token),
+                )
         except Exception as exc:
+            self._dictation.request_cancel(operation_token)
+            self._dictation.mark_cancelled(operation_token)
             self._add_journal_entry("error", "error", text=str(exc), is_translatable=True)
             self.overlay.show_error(self._t("error"))
+
+    def _stop_at_trial_quota(self, operation_token: int) -> None:
+        """Остановить только ту запись, для которой истёк trial budget."""
+        if self._dictation.recording_quota_reached(
+            operation_token,
+            now=time.monotonic(),
+        ) and self.audio.recording:
+            self._stop_recording_with_auto_insert()
 
     def _stop_recording_with_auto_insert(self) -> None:
         """Остановить запись и включить автовставку."""
         if not self.audio.recording:
             return
 
-        self._dictation.begin_transcription(auto_insert=True)  # Начинаем транскрипцию
-        path = self.audio.stop()
+        operation_token = self._dictation.operation_token
+        if not self._dictation.begin_transcription(
+            operation_token,
+            auto_insert=True,
+        ):
+            return
+
+        try:
+            path = self.audio.stop()
+        except Exception as exc:
+            self._dictation.finish_transcription(
+                operation_token,
+                succeeded=False,
+            )
+            self._add_journal_entry("error", "error", text=str(exc), is_translatable=True)
+            self.overlay.show_error(self._t("error"))
+            return
 
         # Учитываем время записи для trial
-        if self._dictation.recording_start_time:
-            duration = (datetime.now() - self._dictation.recording_start_time).total_seconds()
+        if self._dictation.recording_started_at is not None:
+            duration = time.monotonic() - self._dictation.recording_started_at
             self.license_manager.add_transcription_time(duration)
-            self._dictation.recording_start_time = None
+            self._dictation.recording_started_at = None
 
         self.overlay.show_processing()
 
         if not path:
             self._add_journal_entry("error", "error", text="no_audio", is_translatable=True)
             self.overlay.show_error(self._t("error"))
-            self._dictation.cancel()  # ничего не запущено: сбрасываем и transcribing, и auto_insert
+            self._dictation.finish_transcription(
+                operation_token,
+                succeeded=False,
+            )
             return
 
-        self._run_transcription(path)
+        self._run_transcription(path, operation_token)
 
     def _update_waveform(self, levels: List[float]) -> None:
         """Обновить waveform в overlay (Qt thread)."""
         self.overlay.update_waveform(levels)
 
-    def _run_transcription(self, audio_path: Path) -> None:
+    def _run_transcription(self, audio_path: Path, operation_token: int) -> None:
         cfg = self.config.config
         worker = TranscribeWorker(
             self.transcriber,
@@ -3173,31 +3248,79 @@ class MainWindow(QMainWindow):
             vad_filter=bool(cfg.get("vad_filter", True)),
             models_dir=self.models_dir,
         )
-        worker.progress.connect(self._on_transcribe_progress)
-        worker.status_update.connect(self._on_transcribe_status)
-        worker.finished.connect(self._on_transcribed)
+        worker.progress.connect(
+            lambda text, lang, prob: self._on_transcribe_progress(
+                operation_token,
+                text,
+                lang,
+                prob,
+            )
+        )
+        worker.status_update.connect(
+            lambda status: self._on_transcribe_status(operation_token, status)
+        )
+        worker.finished.connect(
+            lambda text, lang, prob, err: self._on_transcribed(
+                operation_token,
+                text,
+                lang,
+                prob,
+                err,
+            )
+        )
+        worker.cancelled.connect(
+            lambda: self._on_transcription_cancelled(operation_token)
+        )
         worker.finished.connect(lambda *_: audio_path.unlink(missing_ok=True))
+        worker.cancelled.connect(lambda: audio_path.unlink(missing_ok=True))
         self._transcribe_thread = worker
         worker.start()
 
-    def _on_transcribe_status(self, status: str) -> None:
+    def _on_transcribe_status(self, operation_token: int, status: str) -> None:
         # status приходит как ключ перевода (loading_model, transcribing)
+        if (
+            operation_token != self._dictation.operation_token
+            or not self._dictation.transcribing
+        ):
+            return
         self._add_journal_entry("pending", status, is_translatable=True)
 
-    def _on_transcribe_progress(self, text: str, lang: str, prob: float) -> None:
+    def _on_transcribe_progress(
+        self,
+        operation_token: int,
+        text: str,
+        lang: str,
+        prob: float,
+    ) -> None:
+        if (
+            operation_token != self._dictation.operation_token
+            or not self._dictation.transcribing
+        ):
+            return
         pass  # Прогресс отображается в overlay
 
-    def _on_transcribed(self, text: str, lang: str, prob: float, err: str) -> None:
+    def _on_transcribed(
+        self,
+        operation_token: int,
+        text: str,
+        lang: str,
+        prob: float,
+        err: str,
+    ) -> None:
         from .crash_reporter import add_breadcrumb
         add_breadcrumb(f"Transcription completed: {'error' if err else 'success'}")
 
+        if not self._dictation.finish_transcription(
+            operation_token,
+            succeeded=not err,
+        ):
+            return
+
         self._update_tray_icon(recording=False)
-        self._dictation.finish_transcription()  # Транскрипция завершена
 
         if err:
             self._add_journal_entry("error", "error", text=err, is_translatable=True)
             self.overlay.show_error(self._t("error"))
-            self._dictation.auto_insert_pending = False
             return
 
         self.last_text = text
@@ -3214,15 +3337,19 @@ class MainWindow(QMainWindow):
         )
 
         if self._dictation.auto_insert_pending and text:
-            self._dictation.auto_insert_pending = False
-            QTimer.singleShot(150, lambda: self._do_auto_insert(text))
+            QTimer.singleShot(
+                150,
+                lambda: self._do_auto_insert(operation_token, text),
+            )
         else:
             self.overlay.show_success()
 
-    def _do_auto_insert(self, text: str) -> None:
+    def _do_auto_insert(self, operation_token: int, text: str) -> None:
         """Автовставка после транскрипции с восстановлением фокуса."""
         if not text:
             self.overlay.show_success()
+            return
+        if not self._dictation.claim_auto_insert(operation_token):
             return
 
         ok = insert_text(text)
@@ -3238,16 +3365,27 @@ class MainWindow(QMainWindow):
         if not self._dictation.transcribing:
             return
 
+        operation_token = self._dictation.operation_token
+        if not self._dictation.request_cancel(operation_token):
+            return
+
         # Отменяем worker
         if self._transcribe_thread and self._transcribe_thread.isRunning():
             self._transcribe_thread.cancel()
 
-        self._dictation.cancel()
+        self._dictation.mark_cancelled(operation_token)
         self._update_tray_icon(recording=False)
 
         # Показываем сообщение об отмене
         self._add_journal_entry("pending", "cancelled", is_translatable=True)
         self.overlay.hide_overlay()
+
+    def _on_transcription_cancelled(self, operation_token: int) -> None:
+        """Finalize cancellation only for the operation that emitted it."""
+        if operation_token != self._dictation.operation_token:
+            return
+        self._dictation.request_cancel(operation_token)
+        self._dictation.mark_cancelled(operation_token)
 
     def _add_journal_entry(self, status: str, title_key: str, text: str = "", extra_key: str = "", is_translatable: bool = True) -> None:
         """Добавить запись в журнал."""
@@ -3396,22 +3534,18 @@ class MainWindow(QMainWindow):
             self.update_status_label.style().polish(self.update_status_label)
             self.update_status_label.setVisible(True)
 
-            # Показываем кнопку обновления
-            self.check_update_btn.setText(self._t("update_now"))
-            self.check_update_btn.clicked.disconnect()
-            self.check_update_btn.clicked.connect(self._download_update)
-
             self._add_journal_entry("success", "update_available",
                                    extra_key=f"v{info.version}", is_translatable=True)
 
-            # Показываем диалог с информацией
+            details = self._t("update_version").replace("{version}", info.version)
             if info.release_notes:
-                QMessageBox.information(
-                    self,
-                    self._t("update_available"),
-                    f"{self._t('update_version').replace('{version}', info.version)}\n\n"
-                    f"{info.release_notes}"
-                )
+                details += f"\n\n{info.release_notes}"
+            details += f"\n\n{self._t('automatic_update_disabled')}"
+            QMessageBox.information(
+                self,
+                self._t("update_available"),
+                details,
+            )
         else:
             self.update_status_label.setText(self._t("no_updates"))
             self.update_status_label.setObjectName("updateStatusNeutral")
@@ -3577,6 +3711,7 @@ class MainWindow(QMainWindow):
         # Очищаем список моделей
         self.model_combo.clear()
         self.model_combo.addItem(self._t("select_model"), "")
+        self._update_data_route_disclosure()
 
     def _update_provider_fields(self) -> None:
         """Обновить видимость полей в зависимости от провайдера (источник правды — реестр)."""
@@ -3784,6 +3919,7 @@ class MainWindow(QMainWindow):
         if backend == self._transcriber_backend:
             self.config.update(transcriber_backend=backend)
             self._update_transcribe_ui_visibility()
+            self._update_data_route_disclosure()
             return
         # Строим новый ДО коммита конфига — при сбое конструкции состояние не разъезжается.
         try:
@@ -3808,6 +3944,40 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._update_transcribe_ui_visibility()
+        self._update_data_route_disclosure()
+
+    def _update_data_route_disclosure(self, *_args) -> None:
+        """Показать эффективный маршрут данных до запуска обработки."""
+        audio_destination = (
+            "OpenRouter"
+            if self.config.config.get("transcriber_backend") == "openrouter"
+            else self._t("route_local")
+        )
+        if hasattr(self, "dictation_route_label"):
+            self.dictation_route_label.setText(
+                self._t("dictation_data_route").format(
+                    audio=audio_destination,
+                )
+            )
+        if not hasattr(self, "data_route_label"):
+            return
+        route = resolve_processing_route(
+            self.config.config,
+            summary_enabled=self.enable_summary_checkbox.isChecked(),
+            diarization_backend=self.diarization_backend_combo.currentData(),
+        )
+        def display(value: str) -> str:
+            return {
+                "Local": self._t("route_local"),
+                "Off": self._t("route_off"),
+            }.get(value, value)
+        self.data_route_label.setText(
+            self._t("data_route_disclosure").format(
+                audio=display(route.audio),
+                diarization=display(route.diarization),
+                summary=display(route.summary),
+            )
+        )
 
     def _update_transcribe_ui_visibility(self) -> None:
         """Показать STT-пикер для OpenRouter и спрятать whisper-специфичные элементы."""
@@ -3882,10 +4052,19 @@ class MainWindow(QMainWindow):
     def _on_clear_queue(self) -> None:
         """Очистить очередь файлов."""
         # Оставляем только файлы в процессе обработки
+        retained_statuses = (
+            FileStatus.EXTRACTING,
+            FileStatus.TRANSCRIBING,
+            FileStatus.PROCESSING,
+            FileStatus.SUMMARIZING,
+            FileStatus.GENERATING,
+        )
+        for task in self._file_tasks:
+            if task.status not in retained_statuses:
+                self._discard_cloud_task(task)
         self._file_tasks = [
             t for t in self._file_tasks
-            if t.status in (FileStatus.EXTRACTING, FileStatus.TRANSCRIBING, 
-                            FileStatus.SUMMARIZING, FileStatus.GENERATING)
+            if t.status in retained_statuses
         ]
         self._rebuild_file_queue_ui()
 
@@ -3944,6 +4123,23 @@ class MainWindow(QMainWindow):
 
         pending_tasks = [t for t in self._file_tasks if t.status == FileStatus.PENDING]
         if not pending_tasks:
+            return
+
+        estimated_seconds = 0.0
+        for task in pending_tasks:
+            try:
+                estimated_seconds += max(0.0, get_file_duration(task.file_path))
+            except Exception as exc:
+                logger.warning(
+                    "Could not estimate duration for %s: %s",
+                    task.file_path,
+                    exc,
+                )
+        has_access, _ = self.license_manager.check_transcription_entitlement(
+            required_seconds=estimated_seconds,
+        )
+        if not has_access:
+            self._show_trial_expired_dialog()
             return
 
         add_breadcrumb(f"Starting file processing: {len(pending_tasks)} files")
@@ -4006,6 +4202,40 @@ class MainWindow(QMainWindow):
         enable_summary = self.enable_summary_checkbox.isChecked()
         if enable_summary and llm_provider == "mindtype_cloud":
             if not self._check_cloud_credits_before_processing():
+                return
+
+        processing_route = resolve_processing_route(
+            cfg,
+            summary_enabled=enable_summary,
+            diarization_backend=cfg.get(
+                "postprocessing_diarization_backend",
+                "auto",
+            ),
+        )
+        if processing_route.uses_cloud:
+            if self._cloud_job_tracker is None:
+                QMessageBox.critical(
+                    self,
+                    self._t("error"),
+                    "Cloud processing is unavailable because its durable job "
+                    "store could not be opened.",
+                )
+                return
+            route_snapshot = {
+                "audio": processing_route.audio,
+                "diarization": processing_route.diarization,
+                "summary": processing_route.summary,
+            }
+            try:
+                for task in pending_tasks:
+                    self._cloud_job_tracker.register(
+                        task,
+                        route=route_snapshot,
+                    )
+                    self._cloud_job_tracker.begin(task)
+            except Exception as exc:
+                logger.exception("Could not persist cloud processing jobs")
+                QMessageBox.critical(self, self._t("error"), str(exc))
                 return
 
         self._file_queue = FileTranscriptionQueue(
@@ -4088,6 +4318,11 @@ class MainWindow(QMainWindow):
 
     def _on_file_task_progress(self, task: FileTask) -> None:
         """Обновление прогресса задачи."""
+        if self._cloud_job_tracker and task.cloud_job_id:
+            try:
+                self._cloud_job_tracker.sync(task)
+            except Exception:
+                logger.exception("Could not persist cloud task progress")
         key = self._task_key(task.file_path)
         widget = self._file_widgets.get(key)
         if widget:
@@ -4095,12 +4330,29 @@ class MainWindow(QMainWindow):
 
     def _on_file_task_completed(self, task: FileTask) -> None:
         """Задача завершена."""
+        if (
+            self._cloud_job_tracker
+            and task.cloud_job_id
+            and not (
+                self._preserve_cloud_jobs_on_shutdown
+                and task.status is FileStatus.CANCELLED
+            )
+        ):
+            try:
+                self._cloud_job_tracker.sync(task)
+            except Exception:
+                logger.exception("Could not persist cloud task completion")
         key = self._task_key(task.file_path)
         widget = self._file_widgets.get(key)
         if widget:
             widget.update_status()
 
         if task.status == FileStatus.COMPLETED:
+            if (
+                task.result is not None
+                and task.claim_trial_time_charge()
+            ):
+                self.license_manager.add_transcription_time(task.result.duration)
             self._last_completed_task = task
             # Если обрабатываем один файл — открываем отчёт автоматически
             if getattr(self, "_file_processing_batch_size", 0) == 1:
@@ -4137,19 +4389,18 @@ class MainWindow(QMainWindow):
     def _auto_open_transcription(self, task: FileTask) -> None:
         """Авто-открытие сгенерированного отчёта (HTML/PDF) для одного файла."""
         try:
-            base_name = task.file_path.stem + "_transcription"
-            html_path = self._output_dir / f"{base_name}.html"
-            pdf_path = self._output_dir / f"{base_name}.pdf"
+            html_path = task.output_files.get("html")
+            pdf_path = task.output_files.get("pdf")
 
             fmt = getattr(self, "_file_output_format", "html")
 
             # При "both" открываем HTML (быстрее предпросмотр); при "pdf" — PDF если есть, иначе HTML.
             if fmt == "pdf":
-                target = pdf_path if pdf_path.exists() else html_path
+                target = pdf_path if pdf_path and pdf_path.exists() else html_path
             elif fmt == "both":
-                target = html_path if html_path.exists() else (pdf_path if pdf_path.exists() else html_path)
+                target = html_path if html_path and html_path.exists() else pdf_path
             else:
-                target = html_path if html_path.exists() else pdf_path
+                target = html_path if html_path and html_path.exists() else pdf_path
 
             if target and target.exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
@@ -4173,6 +4424,7 @@ class MainWindow(QMainWindow):
 
     def _on_remove_file_task(self, task: FileTask) -> None:
         """Удалить задачу из очереди."""
+        self._discard_cloud_task(task)
         key = self._task_key(task.file_path)
         widget = self._file_widgets.pop(key, None)
         if widget:
@@ -4181,6 +4433,39 @@ class MainWindow(QMainWindow):
         if task in self._file_tasks:
             self._file_tasks.remove(task)
 
+        self._update_file_queue_ui()
+
+    def _discard_cloud_task(self, task: FileTask) -> None:
+        """Не восстанавливать задачу, которую пользователь удалил из очереди."""
+        if not self._cloud_job_tracker or not task.cloud_job_id:
+            return
+        task.status = FileStatus.CANCELLED
+        try:
+            self._cloud_job_tracker.sync(task)
+        except Exception:
+            logger.exception("Could not cancel durable cloud task")
+
+    def _restore_retryable_cloud_tasks(self) -> None:
+        """Вернуть незавершённые cloud-файлы в UI без автоматического списания."""
+        if self._cloud_job_tracker is None:
+            return
+        try:
+            restored = self._cloud_job_tracker.restore_retryable_tasks()
+        except Exception:
+            logger.exception("Could not recover durable cloud tasks")
+            return
+
+        existing = {
+            self._task_key(task.file_path)
+            for task in self._file_tasks
+        }
+        for task in restored:
+            key = self._task_key(task.file_path)
+            if key in existing:
+                continue
+            self._file_tasks.append(task)
+            self._add_file_widget(task)
+            existing.add(key)
         self._update_file_queue_ui()
 
     def _on_open_file_result(self, task: FileTask) -> None:
@@ -4217,10 +4502,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Закрытие приложения или сворачивание в трей."""
-        # Останавливаем обработку файлов если запущена
-        if self._file_queue and self._file_queue.is_running:
-            self._file_queue.cancel()
-
         # Если трей доступен и не нажат Exit - сворачиваем в трей
         if self.tray_icon and not self._really_quit:
             event.ignore()
@@ -4230,6 +4511,12 @@ class MainWindow(QMainWindow):
                 self._journal_window.hide()
             self.hide()
             return
+
+        # Полный выход прерывает локальный worker, но cloud ledger остаётся
+        # in-flight: следующий запуск переведёт его в RETRYABLE.
+        self._preserve_cloud_jobs_on_shutdown = True
+        if self._file_queue and self._file_queue.is_running:
+            self._file_queue.cancel()
 
         # Полное закрытие — останавливаем все фоновые потоки и ресурсы
         self._cleanup_all()

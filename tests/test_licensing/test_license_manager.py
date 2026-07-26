@@ -22,6 +22,7 @@ from app.licensing.license_manager import (
     _sign_data,
     _verify_signature,
 )
+from app.licensing.trial import TRIAL_TRANSCRIPTION_LIMIT_SECONDS
 
 
 @pytest.fixture
@@ -134,6 +135,18 @@ class TestLicenseManagerInit:
         info = license_manager.get_license_info()
         # Должен быть trial статус (не начат)
         assert info.status == LicenseStatus.TRIAL
+
+    def test_malformed_license_cache_is_deleted(self, temp_license_dir):
+        """Повреждённый cache не должен переживать fail-closed загрузку."""
+        license_file = temp_license_dir / "license.dat"
+        license_file.write_text("{not-json", encoding="utf-8")
+
+        with patch('app.licensing.license_manager._get_data_dir', return_value=temp_license_dir):
+            with patch('app.licensing.trial._get_data_dir', return_value=temp_license_dir):
+                manager = LicenseManager()
+
+        assert manager._license_data is None
+        assert not license_file.exists()
 
 
 class TestLicenseManagerGetInfo:
@@ -342,6 +355,52 @@ class TestLicenseManagerRevalidation:
 
         assert license_manager.needs_revalidation() is True
 
+    @pytest.mark.parametrize(
+        "result",
+        [
+            ValidationResult.NOT_FOUND,
+            ValidationResult.DEACTIVATED,
+            ValidationResult.EXPIRED,
+        ],
+    )
+    def test_authoritative_negative_clears_cached_license(
+        self, license_manager, result
+    ):
+        license_manager._license_data = {
+            "license_key": "ABCDEFGHJKMNPQRS",
+            "validated_at": (datetime.now() - timedelta(days=8)).isoformat(),
+        }
+        license_manager._save_license()
+
+        with patch.object(
+            license_manager,
+            "activate_online",
+            return_value=(result, result.value, None),
+        ):
+            actual = license_manager.revalidate_if_needed()
+
+        assert actual == result
+        assert license_manager._license_data is None
+        assert not license_manager._license_file.exists()
+
+    def test_network_failure_keeps_cached_license(self, license_manager):
+        license_manager._license_data = {
+            "license_key": "ABCDEFGHJKMNPQRS",
+            "validated_at": (datetime.now() - timedelta(days=8)).isoformat(),
+        }
+        license_manager._save_license()
+
+        with patch.object(
+            license_manager,
+            "activate_online",
+            return_value=(ValidationResult.NETWORK_ERROR, "network_error", None),
+        ):
+            actual = license_manager.revalidate_if_needed()
+
+        assert actual == ValidationResult.NETWORK_ERROR
+        assert license_manager._license_data is not None
+        assert license_manager._license_file.exists()
+
 
 class TestLicenseManagerCheckAccess:
     """Тесты для метода check_access()."""
@@ -375,6 +434,30 @@ class TestLicenseManagerCheckAccess:
 
         assert has_access is True
         assert info.status == LicenseStatus.VALID
+
+    def test_transcription_entitlement_rejects_batch_over_trial_quota(
+        self, license_manager
+    ):
+        license_manager.check_access()
+
+        has_access, info = license_manager.check_transcription_entitlement(
+            required_seconds=TRIAL_TRANSCRIPTION_LIMIT_SECONDS + 1
+        )
+
+        assert has_access is False
+        assert info.status == LicenseStatus.TRIAL
+
+    def test_transcription_entitlement_accepts_batch_within_trial_quota(
+        self, license_manager
+    ):
+        license_manager.check_access()
+
+        has_access, info = license_manager.check_transcription_entitlement(
+            required_seconds=1
+        )
+
+        assert has_access is True
+        assert info.status == LicenseStatus.TRIAL
 
 
 class TestLicenseManagerTrialTime:
@@ -447,4 +530,3 @@ class TestLicenseInfo:
 
         info = LicenseInfo(status=LicenseStatus.TRIAL)
         assert info.is_full_license is False
-

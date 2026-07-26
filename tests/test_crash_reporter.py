@@ -43,17 +43,21 @@ class TestGenerateCrashReport:
             exc_type, exc_value, exc_tb = sys.exc_info()
             report = generate_crash_report(exc_type, exc_value, exc_tb)
 
-        assert "СИСТЕМНАЯ ИНФОРМАЦИЯ" in report
+        assert "SYSTEM INFORMATION" in report
         assert "app_version" in report
         assert "platform" in report
         assert "python_version" in report
 
     def test_generate_report_contains_breadcrumbs(self):
         """Репорт должен содержать breadcrumbs если они есть."""
-        from app.crash_reporter import generate_crash_report, add_breadcrumb, _breadcrumbs
+        from app.crash_reporter import (
+            add_breadcrumb,
+            clear_breadcrumbs,
+            generate_crash_report,
+        )
 
         # Очищаем breadcrumbs
-        _breadcrumbs.clear()
+        clear_breadcrumbs()
 
         # Добавляем breadcrumbs
         add_breadcrumb("User clicked button")
@@ -65,12 +69,12 @@ class TestGenerateCrashReport:
             exc_type, exc_value, exc_tb = sys.exc_info()
             report = generate_crash_report(exc_type, exc_value, exc_tb)
 
-        assert "ПОСЛЕДНИЕ ДЕЙСТВИЯ" in report
+        assert "RECENT ACTIONS" in report
         assert "User clicked button" in report
         assert "Started recording" in report
 
         # Очищаем после теста
-        _breadcrumbs.clear()
+        clear_breadcrumbs()
 
 
 class TestSaveCrashReport:
@@ -153,39 +157,44 @@ class TestBreadcrumbs:
 
     def test_add_breadcrumb(self):
         """add_breadcrumb должен добавлять записи."""
-        from app.crash_reporter import add_breadcrumb, _breadcrumbs
+        from app.crash_reporter import add_breadcrumb, clear_breadcrumbs, get_breadcrumbs
 
-        _breadcrumbs.clear()
+        clear_breadcrumbs()
 
         add_breadcrumb("Test action 1")
         add_breadcrumb("Test action 2")
 
-        assert len(_breadcrumbs) == 2
-        assert "Test action 1" in _breadcrumbs[0]
-        assert "Test action 2" in _breadcrumbs[1]
+        breadcrumbs = get_breadcrumbs()
+        assert len(breadcrumbs) == 2
+        assert "Test action 1" in breadcrumbs[0]
+        assert "Test action 2" in breadcrumbs[1]
 
-        _breadcrumbs.clear()
+        clear_breadcrumbs()
 
     def test_breadcrumbs_limit(self):
         """Breadcrumbs должны ограничиваться максимальным количеством."""
-        import app.crash_reporter as cr
-
-        # Очищаем через модуль напрямую
-        cr._breadcrumbs = []
+        from app.crash_reporter import (
+            MAX_BREADCRUMBS,
+            add_breadcrumb,
+            clear_breadcrumbs,
+            get_breadcrumbs,
+        )
 
         # Добавляем больше чем лимит
-        for i in range(cr._max_breadcrumbs + 10):
-            cr.add_breadcrumb(f"Action {i}")
+        clear_breadcrumbs()
+        for i in range(MAX_BREADCRUMBS + 10):
+            add_breadcrumb(f"Action {i}")
 
         # Лимит применяется после добавления
-        assert len(cr._breadcrumbs) == cr._max_breadcrumbs
+        breadcrumbs = get_breadcrumbs(MAX_BREADCRUMBS + 10)
+        assert len(breadcrumbs) == MAX_BREADCRUMBS
 
         # Проверяем что сохранились последние элементы
-        assert "Action 59" in cr._breadcrumbs[-1]  # Последний добавленный
-        assert "Action 10" in cr._breadcrumbs[0]   # Первый после обрезки
+        assert f"Action {MAX_BREADCRUMBS + 9}" in breadcrumbs[-1]
+        assert "Action 10" in breadcrumbs[0]
 
         # Очищаем после теста
-        cr._breadcrumbs = []
+        clear_breadcrumbs()
 
 
 class TestCrashHandler:
@@ -320,11 +329,15 @@ class TestSendCrashReportToServer:
 
     def test_send_crash_report_includes_breadcrumbs(self):
         """Crash-репорт должен включать breadcrumbs."""
-        from app.crash_reporter import send_crash_report_to_server, add_breadcrumb, _breadcrumbs
+        from app.crash_reporter import (
+            add_breadcrumb,
+            clear_breadcrumbs,
+            send_crash_report_to_server,
+        )
         import json
 
         # Очищаем и добавляем breadcrumbs
-        _breadcrumbs.clear()
+        clear_breadcrumbs()
         add_breadcrumb("Action 1")
         add_breadcrumb("Action 2")
 
@@ -350,7 +363,7 @@ class TestSendCrashReportToServer:
             assert "Action 1" in sent_data["breadcrumbs"][0]
             assert "Action 2" in sent_data["breadcrumbs"][1]
 
-        _breadcrumbs.clear()
+        clear_breadcrumbs()
 
     def test_send_crash_report_sanitizes_data(self):
         """Crash-репорт должен санитизировать чувствительные данные."""

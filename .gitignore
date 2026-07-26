@@ -119,6 +119,7 @@ pytest-tmp/
 
 # Build artifacts
 *.spec
+!/mindtype.spec
 file_version_info.txt
 nul
 build/mindtype/

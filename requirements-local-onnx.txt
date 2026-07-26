@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Optional local ONNX transcription pack.
+onnxruntime-openvino>=1.17.0; sys_platform == 'win32'
+onnxruntime>=1.17.0; sys_platform != 'win32'
+optimum[onnxruntime]>=2.1.0,<2.3.0
+transformers>=4.56.0,<4.58.0
