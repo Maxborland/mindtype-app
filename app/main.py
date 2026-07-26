@@ -684,7 +684,9 @@ class MainWindow(QMainWindow):
         self.assistant_enable_check = None
 
         # Система обновлений
-        self.updater = Updater()
+        self.updater = Updater(
+            rollout_device_id=self.license_manager.get_device_id(),
+        )
         self._update_check_worker: Optional[UpdateCheckWorker] = None
         self._update_download_worker: Optional[UpdateDownloadWorker] = None
 

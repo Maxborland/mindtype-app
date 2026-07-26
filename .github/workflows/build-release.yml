@@ -67,18 +67,28 @@ jobs:
             -r requirements/dev.lock
           python -m pip check
 
-      - name: Embed and verify release entitlement trust root
+      - name: Embed and verify release trust roots
         shell: pwsh
         env:
           MINDTYPE_LICENSE_PUBLIC_KEY: ${{ vars.MINDTYPE_LICENSE_PUBLIC_KEY }}
+          MINDTYPE_UPDATE_PUBLIC_KEY: ${{ vars.MINDTYPE_UPDATE_PUBLIC_KEY }}
+          MINDTYPE_UPDATE_AUTHENTICODE_SIGNER: ${{ vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER }}
         run: |
           $IsTag = "${{ github.ref_type }}" -eq "tag"
-          $HasTrustRoot = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_LICENSE_PUBLIC_KEY)
-          if (-not $HasTrustRoot) {
-            if ($IsTag) {
-              throw "Tagged releases require MINDTYPE_LICENSE_PUBLIC_KEY"
-            }
-            Write-Host "Manual dev build has no production entitlement trust root."
+          $HasLicenseRoot = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_LICENSE_PUBLIC_KEY)
+          $HasUpdateRoot = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_UPDATE_PUBLIC_KEY)
+          $HasUpdateSigner = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_UPDATE_AUTHENTICODE_SIGNER)
+          if ($IsTag -and -not $HasLicenseRoot) {
+            throw "Tagged releases require MINDTYPE_LICENSE_PUBLIC_KEY"
+          }
+          if ($IsTag -and -not $HasUpdateRoot) {
+            throw "Tagged releases require MINDTYPE_UPDATE_PUBLIC_KEY"
+          }
+          if ($IsTag -and -not $HasUpdateSigner) {
+            throw "Tagged releases require MINDTYPE_UPDATE_AUTHENTICODE_SIGNER"
+          }
+          if (-not ($HasLicenseRoot -and $HasUpdateRoot -and $HasUpdateSigner)) {
+            Write-Host "Manual dev build has no complete production trust roots."
             exit 0
           }
           python scripts/embed_release_trust_root.py

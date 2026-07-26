@@ -19,6 +19,14 @@ ASSIGNMENT = re.compile(
     r'^LICENSE_ED25519_PUBLIC_KEY = "(?P<key>[^"]*)"$',
     re.MULTILINE,
 )
+UPDATE_ASSIGNMENT = re.compile(
+    r'^UPDATE_ED25519_PUBLIC_KEY = "(?P<key>[^"]*)"$',
+    re.MULTILINE,
+)
+PUBLISHER_ASSIGNMENT = re.compile(
+    r'^UPDATE_AUTHENTICODE_SIGNER = "(?P<value>[^"]*)"$',
+    re.MULTILINE,
+)
 
 
 def validate_public_key(value: str) -> str:
@@ -72,6 +80,71 @@ def embed_public_key(value: str, target: Path = DEFAULT_TARGET) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _replace_assignment(
+    content: str,
+    pattern: re.Pattern[str],
+    *,
+    name: str,
+    value: str,
+) -> str:
+    if pattern.search(content) is None:
+        raise ValueError(f"{name} assignment not found")
+    return pattern.sub(
+        f"{name} = {json.dumps(value)}",
+        content,
+        count=1,
+    )
+
+
+def embed_update_trust_root(
+    public_key: str,
+    publisher: str,
+    target: Path = DEFAULT_TARGET,
+) -> None:
+    key = validate_public_key(public_key)
+    signer = publisher.strip()
+    if not signer or "\r" in signer or "\n" in signer:
+        raise ValueError("MINDTYPE_UPDATE_AUTHENTICODE_SIGNER is required")
+    current = target.read_text(encoding="utf-8")
+    rendered = _replace_assignment(
+        current,
+        UPDATE_ASSIGNMENT,
+        name="UPDATE_ED25519_PUBLIC_KEY",
+        value=key,
+    )
+    rendered = _replace_assignment(
+        rendered,
+        PUBLISHER_ASSIGNMENT,
+        name="UPDATE_AUTHENTICODE_SIGNER",
+        value=signer,
+    )
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_update_trust_root(
+    target: Path = DEFAULT_TARGET,
+) -> tuple[str, str]:
+    content = target.read_text(encoding="utf-8")
+    key_match = UPDATE_ASSIGNMENT.search(content)
+    publisher_match = PUBLISHER_ASSIGNMENT.search(content)
+    if key_match is None or publisher_match is None:
+        raise ValueError(f"update trust-root assignments not found in {target}")
+    return key_match.group("key"), publisher_match.group("value")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
@@ -79,9 +152,18 @@ def main() -> int:
     args = parser.parse_args()
     if args.check:
         validate_public_key(read_embedded_public_key(args.target))
+        update_key, publisher = read_update_trust_root(args.target)
+        validate_public_key(update_key)
+        if not publisher.strip():
+            raise ValueError("embedded update publisher is missing")
         return 0
     embed_public_key(
         os.environ.get("MINDTYPE_LICENSE_PUBLIC_KEY", ""),
+        args.target,
+    )
+    embed_update_trust_root(
+        os.environ.get("MINDTYPE_UPDATE_PUBLIC_KEY", ""),
+        os.environ.get("MINDTYPE_UPDATE_AUTHENTICODE_SIGNER", ""),
         args.target,
     )
     return 0

@@ -9,11 +9,67 @@
 
 import json
 import sys
+import base64
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
 import urllib.error
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+
+UPDATE_SIGNER = "CN=MindType"
+
+
+def signed_update_payload(version="1.2.0", release_notes="New features"):
+    private_key = Ed25519PrivateKey.generate()
+    public = private_key.public_key().public_bytes(
+        Encoding.Raw,
+        PublicFormat.Raw,
+    )
+    public_text = base64.urlsafe_b64encode(public).rstrip(b"=").decode("ascii")
+    manifest = {
+        "schema_version": "1.0",
+        "channel": "stable",
+        "version": version,
+        "platform": "windows",
+        "architecture": "x86_64",
+        "minimum_supported_version": "0.9.0",
+        "url": (
+            f"https://releases.mindtype.space/"
+            f"MindType-{version}-Setup.exe"
+        ),
+        "sha256": "a" * 64,
+        "size": 53_000_000,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "rollout_percentage": 100,
+        "authenticode_signer": UPDATE_SIGNER,
+        "release_notes": release_notes,
+    }
+    canonical = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        private_key.sign(canonical)
+    ).rstrip(b"=").decode("ascii")
+    return {"manifest": manifest, "signature": signature}, public_text
+
+
+def trusted_updater(**kwargs):
+    from app.updater import Updater
+
+    _payload, public_key = signed_update_payload()
+    return Updater(
+        update_public_key=public_key,
+        expected_signer=UPDATE_SIGNER,
+        rollout_device_id="test-device",
+        **kwargs,
+    )
 
 
 class TestUpdaterVersionComparison:
@@ -65,14 +121,17 @@ class TestUpdaterCheckForUpdates:
 
         mock_response = MagicMock()
         mock_response.status = 200
-        mock_response.read.return_value = json.dumps({
-            "version": "1.2.0",
-            "release_notes": "New features"
-        }).encode('utf-8')
+        payload, public_key = signed_update_payload()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        updater = Updater(current_version="1.0.0")
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
 
         with patch('urllib.request.urlopen', return_value=mock_response):
             info = updater.check_for_updates()
@@ -87,6 +146,11 @@ class TestUpdaterCheckForUpdates:
 
         call_count = [0]
 
+        payload, public_key = signed_update_payload(
+            version="1.1.0",
+            release_notes="Fallback release",
+        )
+
         def mock_urlopen(request, timeout=None):
             call_count[0] += 1
             url = request.full_url if hasattr(request, 'full_url') else str(request)
@@ -98,15 +162,19 @@ class TestUpdaterCheckForUpdates:
             # Второй вызов (fallback) - успех
             mock_response = MagicMock()
             mock_response.status = 200
-            mock_response.read.return_value = json.dumps({
-                "version": "1.1.0",
-                "release_notes": "Fallback release"
-            }).encode('utf-8')
+            mock_response.read.return_value = json.dumps(payload).encode(
+                "utf-8"
+            )
             mock_response.__enter__ = MagicMock(return_value=mock_response)
             mock_response.__exit__ = MagicMock(return_value=False)
             return mock_response
 
-        updater = Updater(current_version="1.0.0")
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
 
         with patch('urllib.request.urlopen', side_effect=mock_urlopen):
             info = updater.check_for_updates()
@@ -120,7 +188,7 @@ class TestUpdaterCheckForUpdates:
         """Ошибка когда все источники недоступны."""
         from app.updater import Updater
 
-        updater = Updater(current_version="1.0.0")
+        updater = trusted_updater(current_version="1.0.0")
 
         with patch('urllib.request.urlopen') as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError("Network error")
@@ -136,14 +204,20 @@ class TestUpdaterCheckForUpdates:
 
         mock_response = MagicMock()
         mock_response.status = 200
-        mock_response.read.return_value = json.dumps({
-            "version": "1.0.0",
-            "release_notes": "Current version"
-        }).encode('utf-8')
+        payload, public_key = signed_update_payload(
+            version="1.0.0",
+            release_notes="Current version",
+        )
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        updater = Updater(current_version="1.0.0")
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
 
         with patch('urllib.request.urlopen', return_value=mock_response):
             info = updater.check_for_updates()
@@ -151,6 +225,45 @@ class TestUpdaterCheckForUpdates:
         assert info.available is False
         assert info.version == "1.0.0"
         assert info.error is None
+
+    def test_missing_embedded_trust_root_does_not_touch_network(self):
+        from app.updater import Updater
+
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key="",
+            expected_signer="",
+        )
+
+        with patch("urllib.request.urlopen") as urlopen:
+            info = updater.check_for_updates()
+
+        assert info.available is False
+        assert "доверенного ключа" in info.error
+        urlopen.assert_not_called()
+
+    def test_tampered_manifest_is_not_shown_as_update(self):
+        from app.updater import Updater
+
+        payload, public_key = signed_update_payload()
+        payload["manifest"]["release_notes"] = "Install malware"
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            info = updater.check_for_updates()
+
+        assert info.available is False
+        assert "Недоверенный manifest" in info.error
 
 
 class TestUpdaterDownloadValidation:

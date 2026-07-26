@@ -2,10 +2,22 @@ import os
 import sys
 import json
 import logging
+import platform
+import struct
 import urllib.request
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, Callable, List
+from typing import Optional, Dict, Any, Tuple, Callable, List, Iterable
 from enum import Enum, auto
+from .release_trust_root import (
+    UPDATE_AUTHENTICODE_SIGNER,
+    UPDATE_ED25519_PUBLIC_KEY,
+)
+from .update_manifest import (
+    UpdateManifestError,
+    VerifiedUpdateManifest,
+    device_is_in_rollout,
+    verify_update_manifest,
+)
 from .version import __version__, __channel__
 
 logger = logging.getLogger("mindtype.updater")
@@ -23,6 +35,12 @@ FALLBACK_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/ve
 
 # Список URL для проверки (в порядке приоритета)
 VERSION_URLS: List[str] = [PRIMARY_VERSION_URL, FALLBACK_VERSION_URL]
+UPDATE_DOWNLOAD_HOSTS = {
+    "mindtype.space",
+    "releases.mindtype.space",
+    "github.com",
+    "objects.githubusercontent.com",
+}
 
 # Artifact download and execution stay disabled until the update channel has a
 # signed manifest, mandatory hashes, redirect checks, and platform signatures.
@@ -51,11 +69,41 @@ class Updater:
     """
     Класс для управления процессом обновления приложения.
     """
-    def __init__(self, current_version: str = __version__, channel: str = __channel__):
+    def __init__(
+        self,
+        current_version: str = __version__,
+        channel: str = __channel__,
+        *,
+        update_public_key: str = UPDATE_ED25519_PUBLIC_KEY,
+        expected_signer: str = UPDATE_AUTHENTICODE_SIGNER,
+        rollout_device_id: str = "",
+        allowed_download_hosts: Iterable[str] = UPDATE_DOWNLOAD_HOSTS,
+    ):
         self.current_version = current_version
         self.channel = channel
         self.latest_info: Optional[Dict[str, Any]] = None
+        self.verified_manifest: Optional[VerifiedUpdateManifest] = None
         self._temp_path: Optional[Path] = None
+        self._update_public_key = update_public_key
+        self._expected_signer = expected_signer
+        self._rollout_device_id = rollout_device_id
+        self._allowed_download_hosts = set(allowed_download_hosts)
+
+    @staticmethod
+    def _architecture() -> str:
+        machine = (
+            platform.machine()
+            or os.environ.get("PROCESSOR_ARCHITEW6432")
+            or os.environ.get("PROCESSOR_ARCHITECTURE")
+            or ""
+        ).casefold()
+        if machine in {"amd64", "x86_64"}:
+            return "x86_64"
+        if machine in {"arm64", "aarch64"}:
+            return "arm64"
+        if not machine and struct.calcsize("P") == 8:
+            return "x86_64"
+        return machine
 
     def check_for_updates(self) -> UpdateInfo:
         """
@@ -64,6 +112,12 @@ class Updater:
         """
         info = UpdateInfo()
         last_error = None
+        if not self._update_public_key or not self._expected_signer:
+            info.error = (
+                "Проверка обновлений недоступна: в сборке нет "
+                "доверенного ключа обновлений."
+            )
+            return info
 
         for base_url in VERSION_URLS:
             try:
@@ -89,21 +143,60 @@ class Updater:
                         logger.warning(f"{base_url}: {last_error}")
                         continue
 
-                    data = json.loads(response.read().decode('utf-8'))
-                    self.latest_info = data
+                    envelope = json.loads(response.read().decode('utf-8'))
+                    manifest = verify_update_manifest(
+                        envelope,
+                        public_key=self._update_public_key,
+                        expected_channel=self.channel,
+                        expected_platform="windows",
+                        expected_architecture=self._architecture(),
+                        expected_signer=self._expected_signer,
+                        allowed_hosts=self._allowed_download_hosts,
+                    )
+                    self.verified_manifest = manifest
+                    self.latest_info = {
+                        "version": manifest.version,
+                        "minimum_supported_version": (
+                            manifest.minimum_supported_version
+                        ),
+                        "release_notes": manifest.release_notes,
+                        "rollout_percentage": manifest.rollout_percentage,
+                        "platforms": {
+                            "windows": {
+                                "url": manifest.url,
+                                "sha256": manifest.sha256,
+                                "size": manifest.size,
+                                "authenticode_signer": (
+                                    manifest.authenticode_signer
+                                ),
+                            }
+                        },
+                    }
 
-                    latest_version = data.get("version")
-                    if not latest_version:
-                        last_error = "Неверный формат version.json"
-                        logger.warning(f"{base_url}: {last_error}")
-                        continue
-
+                    latest_version = manifest.version
                     info.version = latest_version
-                    info.release_notes = data.get("release_notes", "")
+                    info.release_notes = manifest.release_notes
 
                     if self._is_newer(latest_version, self.current_version):
-                        info.available = True
-                        logger.info(f"Найдено обновление: {self.current_version} -> {latest_version}")
+                        info.available = device_is_in_rollout(
+                            device_id=(
+                                self._rollout_device_id
+                                or "anonymous-local-device"
+                            ),
+                            version=latest_version,
+                            percentage=manifest.rollout_percentage,
+                        )
+                        if info.available:
+                            logger.info(
+                                "Найдено обновление: %s -> %s",
+                                self.current_version,
+                                latest_version,
+                            )
+                        else:
+                            logger.info(
+                                "Обновление %s пока вне rollout устройства",
+                                latest_version,
+                            )
                     else:
                         info.available = False
                         logger.info(f"Установлена актуальная версия: {self.current_version}")
@@ -121,6 +214,10 @@ class Updater:
                 continue
             except json.JSONDecodeError as e:
                 last_error = f"Ошибка парсинга JSON: {e}"
+                logger.warning(f"{base_url}: {last_error}")
+                continue
+            except UpdateManifestError as e:
+                last_error = f"Недоверенный manifest обновления: {e}"
                 logger.warning(f"{base_url}: {last_error}")
                 continue
             except Exception as e:

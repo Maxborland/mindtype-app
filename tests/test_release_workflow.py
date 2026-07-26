@@ -55,6 +55,18 @@ def test_tag_release_requires_embedded_entitlement_trust_root():
     assert "scripts/embed_release_trust_root.py --check" in text
 
 
+def test_tag_release_requires_update_trust_root_and_signer_identity():
+    text = CANONICAL.read_text(encoding="utf-8")
+
+    assert "vars.MINDTYPE_UPDATE_PUBLIC_KEY" in text
+    assert "vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER" in text
+    assert 'throw "Tagged releases require MINDTYPE_UPDATE_PUBLIC_KEY"' in text
+    assert (
+        'throw "Tagged releases require '
+        'MINDTYPE_UPDATE_AUTHENTICODE_SIGNER"'
+    ) in text
+
+
 def test_uninstall_preserves_user_data():
     installer = (ROOT / "installer" / "windows.iss").read_text(
         encoding="utf-8"
