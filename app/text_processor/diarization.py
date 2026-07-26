@@ -14,6 +14,7 @@ os.environ["NUMBA_DISABLE_JIT"] = "0"  # JIT включён, но без CUDA
 os.environ["NUMBA_CUDA_DRIVER"] = ""  # Отключаем CUDA драйвер
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -52,6 +53,15 @@ class SpeakerSegment:
     start: float
     end: float
     text: str = ""
+
+    def __post_init__(self) -> None:
+        start = float(self.start)
+        end = float(self.end)
+        if not math.isfinite(start) or not math.isfinite(end):
+            raise ValueError("Таймкоды сегмента должны быть конечными числами")
+        start, end = sorted((max(0.0, start), max(0.0, end)))
+        self.start = start
+        self.end = end
 
 
 @dataclass
@@ -231,16 +241,29 @@ class SpeakerDiarizer:
         Использует MFCC features для создания "голосовых отпечатков"
         и агломеративную кластеризацию для группировки по спикерам.
         """
+        requested_min = (
+            self.config.diarization_min_speakers
+            if min_speakers is None
+            else int(min_speakers)
+        )
+        requested_max = (
+            self.config.diarization_max_speakers
+            if max_speakers is None
+            else int(max_speakers)
+        )
+        if requested_min < 1 or requested_max < 1:
+            raise ValueError("Количество спикеров должно быть положительным")
+        if requested_min > requested_max:
+            raise ValueError("min_speakers не может быть больше max_speakers")
+        if requested_min > 10:
+            raise ValueError("Локальная диаризация поддерживает не более 10 спикеров")
+
         if not self.is_available:
             logger.warning("Диаризация недоступна")
-            return DiarizationResult(
-                segments=[SpeakerSegment(speaker="SPEAKER_00", start=0.0, end=0.0)],
-                num_speakers=1,
-            )
+            return DiarizationResult()
 
         try:
             import librosa
-            from sklearn.cluster import AgglomerativeClustering
             from sklearn.preprocessing import StandardScaler
 
             if progress_callback:
@@ -269,9 +292,14 @@ class SpeakerDiarizer:
             # Это отсекает и тишину, и «переходные» окна на границе
             # речь/тишина, чьи смешанные признаки образуют ложных спикеров.
             frame_samples = max(1, int(0.05 * sr))
-            n_frames = len(wav) // frame_samples
+            n_frames = math.ceil(len(wav) / frame_samples) if len(wav) else 0
+            padded_wav = (
+                np.pad(wav, (0, n_frames * frame_samples - len(wav)))
+                if n_frames
+                else wav
+            )
             frame_rms = np.sqrt(np.mean(
-                wav[:n_frames * frame_samples].reshape(n_frames, frame_samples) ** 2,
+                padded_wav.reshape(n_frames, frame_samples) ** 2,
                 axis=1,
             )) if n_frames > 0 else np.array([])
 
@@ -283,23 +311,30 @@ class SpeakerDiarizer:
 
             def window_voiced_fraction(sample_start: int, sample_end: int) -> float:
                 f0 = sample_start // frame_samples
-                f1 = max(f0 + 1, sample_end // frame_samples)
+                f1 = max(f0 + 1, math.ceil(sample_end / frame_samples))
                 window = voiced_frames[f0:f1]
                 return float(np.mean(window)) if window.size else 0.0
 
-            window_bounds = list(range(0, len(wav) - segment_samples + 1, hop_samples))
+            window_bounds = self._window_starts(
+                len(wav), segment_samples, hop_samples
+            )
 
             # Извлекаем MFCC для каждого озвученного сегмента
             segments_data = []
             features = []
 
             for i in window_bounds:
-                if window_voiced_fraction(i, i + segment_samples) < 0.6:
+                actual_end = min(len(wav), i + segment_samples)
+                if window_voiced_fraction(i, actual_end) < 0.6:
                     continue  # Тишина или граница речь/тишина — пропускаем
 
-                segment_wav = wav[i:i + segment_samples]
+                segment_wav = wav[i:actual_end]
+                if len(segment_wav) < segment_samples:
+                    segment_wav = np.pad(
+                        segment_wav, (0, segment_samples - len(segment_wav))
+                    )
                 start_time = i / sr
-                end_time = (i + segment_samples) / sr
+                end_time = actual_end / sr
 
                 # Извлекаем MFCC (20 коэффициентов)
                 mfcc = librosa.feature.mfcc(y=segment_wav, sr=sr, n_mfcc=20)
@@ -329,10 +364,7 @@ class SpeakerDiarizer:
 
             if not features:
                 logger.warning("Не удалось извлечь признаки")
-                return DiarizationResult(
-                    segments=[SpeakerSegment(speaker="SPEAKER_00", start=0.0, end=duration)],
-                    num_speakers=1,
-                )
+                return DiarizationResult()
 
             if progress_callback:
                 progress_callback("Кластеризация спикеров...", 70, 100)
@@ -344,61 +376,20 @@ class SpeakerDiarizer:
             scaler = StandardScaler()
             features_normalized = scaler.fit_transform(features_array)
 
-            # Кластеризация с автоопределением оптимального количества спикеров
-            if len(features) < 2:
-                labels = np.zeros(len(features), dtype=int)
-            else:
-                from sklearn.metrics import silhouette_score
-
-                # Ограничиваем максимальное количество спикеров разумным пределом
-                max_spk_limit = 10
-                max_spk = min(max_speakers or self.config.diarization_max_speakers, len(features), max_spk_limit)
-                min_spk = max(1, min_speakers or self.config.diarization_min_speakers)
-
-                if max_spk < 2:
-                    labels = np.zeros(len(features), dtype=int)
-                    best_n = 1
-                    best_score = 0.0
-                else:
-                    # Перебираем количество кластеров от 2 до max и выбираем лучший по silhouette
-                    best_labels = np.zeros(len(features), dtype=int)
-                    best_score = -1
-                    best_n = 1
-
-                    for n in range(2, max_spk + 1):
-                        try:
-                            clustering = AgglomerativeClustering(
-                                n_clusters=n,
-                                metric="euclidean",
-                                linkage="ward",
-                            )
-                            trial_labels = clustering.fit_predict(features_normalized)
-                            score = silhouette_score(features_normalized, trial_labels)
-
-                            logger.debug(f"n_clusters={n}, silhouette={score:.3f}")
-
-                            # Silhouette > 0.15 считается "разумным" разделением для MFCC
-                            if score > best_score:
-                                best_score = score
-                                best_labels = trial_labels
-                                best_n = n
-                        except Exception as e:
-                            logger.debug(f"Ошибка при n={n}: {e}")
-                            continue
-
-                    # Если лучший силуэт слишком низкий, вероятно спикер один
-                    if best_score < 0.12:
-                        logger.info(f"Силуэт {best_score:.3f} слишком низкий, считаем что спикер один.")
-                        labels = np.zeros(len(features), dtype=int)
-                        best_n = 1
-                    else:
-                        labels = best_labels
-
-                logger.info(f"Оптимальное количество кластеров: {best_n} (silhouette={best_score:.3f})")
+            max_spk = min(requested_max, len(features), 10)
+            min_spk = min(requested_min, max_spk)
+            raw_labels = self._cluster_features(
+                features_normalized,
+                min_speakers=min_spk,
+                max_speakers=max_spk,
+            )
 
             # Сглаживаем метки: одиночные «выбросы» между окнами одного спикера
             # почти всегда ошибка кластеризации, а не реальная смена говорящего.
-            labels = self._smooth_labels(labels)
+            labels = self._smooth_labels(raw_labels)
+            if len(set(labels.tolist())) < min_spk:
+                labels = raw_labels
+            labels = self._canonicalize_labels(labels)
 
             num_speakers = len(set(labels))
             logger.info(f"Найдено спикеров: {num_speakers}")
@@ -430,10 +421,101 @@ class SpeakerDiarizer:
 
         except Exception as e:
             logger.error(f"Ошибка диаризации: {e}")
-            return DiarizationResult(
-                segments=[SpeakerSegment(speaker="SPEAKER_00", start=0.0, end=0.0)],
-                num_speakers=1,
+            return DiarizationResult()
+
+    @staticmethod
+    def _window_starts(
+        total_samples: int, segment_samples: int, hop_samples: int
+    ) -> List[int]:
+        if total_samples <= 0:
+            return []
+        if segment_samples <= 0 or hop_samples <= 0:
+            raise ValueError("Размеры окна и шага должны быть положительными")
+        if total_samples <= segment_samples:
+            return [0]
+        starts = list(
+            range(0, total_samples - segment_samples + 1, hop_samples)
+        )
+        tail_start = total_samples - segment_samples
+        if not starts or starts[-1] != tail_start:
+            starts.append(tail_start)
+        return starts
+
+    @staticmethod
+    def _fit_clusters(
+        features: np.ndarray,
+        n_clusters: int,
+        *,
+        clustering_type=None,
+    ) -> np.ndarray:
+        if clustering_type is None:
+            from sklearn.cluster import AgglomerativeClustering
+            clustering_type = AgglomerativeClustering
+        try:
+            clustering = clustering_type(
+                n_clusters=n_clusters,
+                metric="euclidean",
+                linkage="ward",
             )
+        except TypeError:
+            clustering = clustering_type(
+                n_clusters=n_clusters,
+                affinity="euclidean",
+                linkage="ward",
+            )
+        return np.asarray(clustering.fit_predict(features), dtype=int)
+
+    @classmethod
+    def _cluster_features(
+        cls,
+        features: np.ndarray,
+        *,
+        min_speakers: int,
+        max_speakers: int,
+    ) -> np.ndarray:
+        count = len(features)
+        if count == 0:
+            return np.array([], dtype=int)
+        effective_max = min(max(1, int(max_speakers)), count, 10)
+        effective_min = min(max(1, int(min_speakers)), effective_max)
+        if effective_max == 1:
+            return np.zeros(count, dtype=int)
+        if effective_min == effective_max:
+            return cls._fit_clusters(features, effective_min)
+
+        from sklearn.metrics import silhouette_score
+
+        best_labels: Optional[np.ndarray] = None
+        best_score = float("-inf")
+        upper_scored = min(effective_max, count - 1)
+        for clusters in range(max(2, effective_min), upper_scored + 1):
+            try:
+                trial = cls._fit_clusters(features, clusters)
+                score = float(silhouette_score(features, trial))
+                logger.debug(
+                    "n_clusters=%s, silhouette=%.3f", clusters, score
+                )
+                if score > best_score:
+                    best_score = score
+                    best_labels = trial
+            except (TypeError, ValueError) as exc:
+                logger.debug("Ошибка при n=%s: %s", clusters, exc)
+
+        if effective_min == 1 and (best_labels is None or best_score < 0.12):
+            return np.zeros(count, dtype=int)
+        if best_labels is not None:
+            return best_labels
+        return cls._fit_clusters(features, effective_min)
+
+    @staticmethod
+    def _canonicalize_labels(labels: np.ndarray) -> np.ndarray:
+        mapping: Dict[int, int] = {}
+        canonical: List[int] = []
+        for value in np.asarray(labels, dtype=int).tolist():
+            if value not in mapping:
+                mapping[value] = len(mapping)
+            canonical.append(mapping[value])
+        return np.asarray(canonical, dtype=int)
 
     @staticmethod
     def _smooth_labels(labels: np.ndarray, kernel: int = 3) -> np.ndarray:
@@ -464,15 +546,24 @@ class SpeakerDiarizer:
     ) -> List[SpeakerSegment]:
         """Объединить соседние сегменты одного спикера."""
         if not segments:
-            return segments
+            return []
 
-        merged = [segments[0]]
-        for seg in segments[1:]:
+        ordered = sorted(segments, key=lambda segment: (segment.start, segment.end))
+        first = ordered[0]
+        merged = [SpeakerSegment(first.speaker, first.start, first.end, first.text)]
+        for seg in ordered[1:]:
             last = merged[-1]
-            if seg.speaker == last.speaker and seg.start - last.end < gap_threshold:
-                last.end = seg.end
+            if (
+                seg.speaker == last.speaker
+                and seg.start - last.end <= gap_threshold
+            ):
+                last.end = max(last.end, seg.end)
+                if seg.text:
+                    last.text = " ".join(part for part in (last.text, seg.text) if part)
             else:
-                merged.append(seg)
+                merged.append(
+                    SpeakerSegment(seg.speaker, seg.start, seg.end, seg.text)
+                )
         return merged
 
     def merge_short_speakers(
@@ -480,6 +571,7 @@ class SpeakerDiarizer:
         result: DiarizationResult,
         min_duration_ratio: float = 0.05,  # Спикеры < 5% времени будут слиты
         min_segments: int = 2,  # Или < 2 сегментов
+        min_speakers: Optional[int] = None,
     ) -> DiarizationResult:
         """
         Объединить "мелких" спикеров с доминирующими.
@@ -503,21 +595,27 @@ class SpeakerDiarizer:
 
         # Определяем кого сливать
         mapping = {}
-        valid_speakers = []
+        required_speakers = max(
+            1,
+            self.config.diarization_min_speakers
+            if min_speakers is None
+            else int(min_speakers),
+        )
 
         # Сначала находим валидных спикеров (оставляем хотя бы одного, самого длительного)
         sorted_speakers = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+        protected = {
+            speaker for speaker, _duration in sorted_speakers[:required_speakers]
+        }
         main_speaker = sorted_speakers[0][0]
-        valid_speakers.append(main_speaker)
-
-        for spk, duration in sorted_speakers[1:]:
+        for spk, duration in sorted_speakers:
+            if spk in protected:
+                continue
             ratio = duration / total_duration
             count = seg_counts.get(spk, 0)
 
-            if ratio < min_duration_ratio or count < min_segments:
+            if ratio < min_duration_ratio and count < min_segments:
                 mapping[spk] = main_speaker  # Сливаем с самым активным
-            else:
-                valid_speakers.append(spk)
 
         if not mapping:
             return result
@@ -539,7 +637,11 @@ class SpeakerDiarizer:
         return DiarizationResult(
             segments=merged,
             num_speakers=len(set(s.speaker for s in merged)),
-            speaker_names=result.speaker_names
+            speaker_names={
+                speaker: name
+                for speaker, name in result.speaker_names.items()
+                if speaker in {segment.speaker for segment in merged}
+            },
         )
 
     def align_with_transcription(
@@ -553,8 +655,18 @@ class SpeakerDiarizer:
 
         new_segments = []
         for trans_seg in transcription_segments:
-            trans_start = trans_seg.get("start", 0)
-            trans_end = trans_seg.get("end", 0)
+            try:
+                raw_start = float(trans_seg.get("start", 0))
+                raw_end = float(trans_seg.get("end", 0))
+            except (TypeError, ValueError):
+                logger.warning("Пропущен transcript segment с невалидными таймкодами")
+                continue
+            if not math.isfinite(raw_start) or not math.isfinite(raw_end):
+                logger.warning("Пропущен transcript segment с невалидными таймкодами")
+                continue
+            trans_start, trans_end = sorted(
+                (max(0.0, raw_start), max(0.0, raw_end))
+            )
             trans_text = trans_seg.get("text", "").strip()
 
             if not trans_text:
@@ -597,7 +709,7 @@ class SpeakerDiarizer:
 
         sentences = re.split(r'(?<=[.!?])\s+', text)
         num_segments = len(diarization_result.segments)
-        sentences_per_segment = max(1, len(sentences) // num_segments)
+        sentence_groups = np.array_split(np.asarray(sentences, dtype=object), num_segments)
 
         for i, seg in enumerate(diarization_result.segments):
             speaker_name = diarization_result.speaker_names.get(seg.speaker, seg.speaker)
@@ -605,9 +717,7 @@ class SpeakerDiarizer:
                 lines.append(f"\n{speaker_name}:")
                 current_speaker = seg.speaker
 
-            start_idx = i * sentences_per_segment
-            end_idx = start_idx + sentences_per_segment
-            segment_sentences = sentences[start_idx:end_idx]
+            segment_sentences = sentence_groups[i].tolist()
 
             if segment_sentences:
                 lines.append(" ".join(segment_sentences))

@@ -175,3 +175,73 @@ def test_failed_audio_conversion_is_not_sent_as_fake_wav(
 
     with pytest.raises(RuntimeError, match="преобразовать аудио"):
         transcriber._convert_to_wav(source)
+
+
+def test_vad_regions_are_transcribed_with_timestamp_offsets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from app.transcriber_cpp import WhisperCppTranscriber
+    from app.vad import SpeechRegion
+
+    model = tmp_path / "ggml-small.bin"
+    server = tmp_path / "whisper-server.exe"
+    audio = tmp_path / "audio.wav"
+    model.write_bytes(b"model")
+    server.write_bytes(b"server")
+    audio.write_bytes(b"audio")
+
+    class FakeSegmenter:
+        def regions(self, _path, **_kwargs):
+            return [SpeechRegion(1_000, 2_000), SpeechRegion(3_000, 4_000)]
+
+        def write_region(self, _source, target, _region):
+            target.write_bytes(b"region")
+
+    monkeypatch.setattr(
+        "app.transcriber_cpp.WebRtcVadSegmenter", FakeSegmenter
+    )
+    runtime = MagicMock()
+    runtime.infer.side_effect = [
+        {
+            "text": "первая",
+            "language": "ru",
+            "segments": [
+                {
+                    "start": 0.1,
+                    "end": 0.9,
+                    "text": "первая",
+                    "words": [{"word": "первая", "start": 0.1, "end": 0.9}],
+                }
+            ],
+        },
+        {
+            "text": "вторая",
+            "language": "ru",
+            "segments": [
+                {"start": 0.2, "end": 0.8, "text": "вторая", "words": []}
+            ],
+        },
+    ]
+    transcriber = WhisperCppTranscriber.__new__(WhisperCppTranscriber)
+    transcriber.model_path = model
+    transcriber.server_path = server
+    transcriber.threads = 4
+    transcriber.device = "auto"
+    transcriber.gpu_backend = "vulkan"
+    transcriber._server_runtime = runtime
+
+    segments, language, _confidence = transcriber.transcribe_with_timestamps(
+        audio,
+        language="auto",
+        beam_size=5,
+        vad_filter=True,
+        word_timestamps=True,
+    )
+
+    assert language == "ru"
+    assert [(item["start"], item["end"], item["text"]) for item in segments] == [
+        (1.1, 1.9, "первая"),
+        (3.2, 3.8, "вторая"),
+    ]
+    assert segments[0]["words"][0]["start"] == 1.1
+    assert segments[0]["words"][0]["end"] == 1.9

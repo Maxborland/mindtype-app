@@ -75,6 +75,7 @@ def test_onnx_dependencies_use_a_compatible_transformers_range():
     assert "onnxruntime" not in base
     assert "openwakeword" not in base
     assert "soundcard" in base
+    assert "webrtcvad-wheels" in base
     assert "transformers>=4.56.0,<4.58.0" in onnx
     assert "optimum[onnxruntime]>=2.1.0,<2.3.0" in onnx
     assert "openwakeword>=0.6.0" in assistant
@@ -144,3 +145,8 @@ def test_base_pyinstaller_excludes_optional_ml_runtimes():
 
     assert 'GetModule("UIAutomationCore.dll")' in spec
     assert '"comtypes.gen.UIAutomationClient"' in spec
+    assert '"webrtcvad"' in spec
+    assert '"_webrtcvad"' in spec
+    assert 'ROOT / "hooks"' in spec
+    assert (ROOT / "hooks" / "hook-webrtcvad.py").is_file()
+    assert '"app" / "assets"' not in spec

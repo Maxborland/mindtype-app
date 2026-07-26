@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 from .accelerator import get_best_provider, get_provider_options
+from .vad import WebRtcVadSegmenter
 from .whisper_server import WhisperServerConfig, WhisperServerRuntime
 
 # Настройка локального логгера
@@ -1124,6 +1125,81 @@ class WhisperCppTranscriber:
                 except OSError:
                     pass
 
+    def _server_inference_regions(
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        beam_size: int,
+        word_timestamps: bool,
+        vad_filter: bool,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> List[Tuple[int, Dict[str, Any]]]:
+        if not vad_filter:
+            return [
+                (
+                    0,
+                    self._server_inference(
+                        audio_path,
+                        language=language,
+                        beam_size=beam_size,
+                        word_timestamps=word_timestamps,
+                        progress_callback=progress_callback,
+                    ),
+                )
+            ]
+
+        import tempfile
+
+        is_temp_wav = False
+        working_audio_path = audio_path
+        if audio_path.suffix.lower() != ".wav":
+            working_audio_path = self._convert_to_wav(audio_path)
+            is_temp_wav = working_audio_path != audio_path
+        try:
+            segmenter = WebRtcVadSegmenter()
+            cancel_event = getattr(self, "_cancel_requested", None)
+            regions = segmenter.regions(
+                working_audio_path,
+                cancel_requested=(
+                    cancel_event.is_set if cancel_event is not None else None
+                ),
+            )
+            if not regions:
+                if progress_callback:
+                    progress_callback("transcribing", 100, 100)
+                return []
+            results: List[Tuple[int, Dict[str, Any]]] = []
+            with tempfile.TemporaryDirectory(prefix="mindtype-vad-") as temp_dir:
+                region_path = Path(temp_dir) / "region.wav"
+                for index, region in enumerate(regions):
+                    if progress_callback:
+                        progress_callback(
+                            "transcribing",
+                            int(index * 100 / len(regions)),
+                            100,
+                        )
+                    segmenter.write_region(
+                        working_audio_path, region_path, region
+                    )
+                    data = self._server_runtime.infer(
+                        self._server_config(),
+                        region_path,
+                        language=language,
+                        beam_size=beam_size,
+                        word_timestamps=word_timestamps,
+                    )
+                    results.append((region.start_ms, data))
+            if progress_callback:
+                progress_callback("transcribing", 100, 100)
+            return results
+        finally:
+            if is_temp_wav and working_audio_path.exists():
+                try:
+                    working_audio_path.unlink()
+                except OSError:
+                    pass
+
     @staticmethod
     def _result_probability(data: Dict[str, Any]) -> float:
         language_probability = data.get("language_probability")
@@ -1152,25 +1228,36 @@ class WhisperCppTranscriber:
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> Tuple[str, Optional[str], float]:
         """Transcribe through the persistent local whisper-server."""
-        if vad_filter:
-            logger.info(
-                "VAD segmentation is not enabled: the bundled ONNX speech gate "
-                "is not a whisper.cpp VAD model"
-            )
-        data = self._server_inference(
+        results = self._server_inference_regions(
             audio_path,
             language=language,
             beam_size=beam_size,
             word_timestamps=False,
+            vad_filter=vad_filter,
             progress_callback=progress_callback,
         )
-        detected_language = data.get("language")
+        if not results:
+            return "", None if language == "auto" else language, 1.0
+        detected_language = next(
+            (
+                data.get("language")
+                for _offset, data in results
+                if isinstance(data.get("language"), str)
+                and data.get("language")
+            ),
+            None,
+        )
         if not isinstance(detected_language, str) or not detected_language:
             detected_language = None if language == "auto" else language
         return (
-            str(data["text"]).strip(),
+            " ".join(
+                str(data["text"]).strip()
+                for _offset, data in results
+                if str(data["text"]).strip()
+            ),
             detected_language,
-            self._result_probability(data),
+            sum(self._result_probability(data) for _offset, data in results)
+            / len(results),
         )
 
     def transcribe_with_timestamps(
@@ -1182,32 +1269,54 @@ class WhisperCppTranscriber:
         word_timestamps: bool = False,
     ) -> Tuple[List[Dict[str, Any]], Optional[str], float]:
         """Return validated server segments without replacing their raw text."""
-        if vad_filter:
-            logger.info(
-                "VAD segmentation is not enabled: the bundled ONNX speech gate "
-                "is not a whisper.cpp VAD model"
-            )
-        data = self._server_inference(
+        results = self._server_inference_regions(
             audio_path,
             language=language,
             beam_size=beam_size,
             word_timestamps=word_timestamps,
+            vad_filter=vad_filter,
         )
         segments: List[Dict[str, Any]] = []
-        for source in data["segments"]:
-            start_s, end_s = self._extract_segment_times(source)
-            segment: Dict[str, Any] = {
-                "start": start_s,
-                "end": end_s,
-                "text": str(source.get("text", "")).strip(),
-            }
-            if word_timestamps and isinstance(source.get("words"), list):
-                segment["words"] = source["words"]
-            segments.append(segment)
-        detected_language = data.get("language")
+        for offset_ms, data in results:
+            offset_s = offset_ms / 1000.0
+            for source in data["segments"]:
+                start_s, end_s = self._extract_segment_times(source)
+                segment: Dict[str, Any] = {
+                    "start": offset_s + start_s,
+                    "end": offset_s + end_s,
+                    "text": str(source.get("text", "")).strip(),
+                }
+                if word_timestamps and isinstance(source.get("words"), list):
+                    words = []
+                    for source_word in source["words"]:
+                        if not isinstance(source_word, dict):
+                            continue
+                        word = dict(source_word)
+                        for key in ("start", "end"):
+                            value = word.get(key)
+                            if isinstance(value, (int, float)):
+                                word[key] = offset_s + float(value)
+                        words.append(word)
+                    segment["words"] = words
+                segments.append(segment)
+        detected_language = next(
+            (
+                data.get("language")
+                for _offset, data in results
+                if isinstance(data.get("language"), str)
+                and data.get("language")
+            ),
+            None,
+        )
         if not isinstance(detected_language, str) or not detected_language:
             detected_language = None if language == "auto" else language
-        return segments, detected_language, self._result_probability(data)
+        confidence = (
+            sum(self._result_probability(data) for _offset, data in results)
+            / len(results)
+            if results
+            else 1.0
+        )
+        return segments, detected_language, confidence
 
     def transcribe_stream(
         self,

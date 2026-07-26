@@ -11,7 +11,6 @@ ROOT = Path(SPECPATH)
 
 datas = []
 for source, destination in [
-    (ROOT / "app" / "assets", "app/assets"),
     (ROOT / "app" / "ui" / "fonts", "app/ui/fonts"),
     (ROOT / "assets", "assets"),
 ]:
@@ -49,6 +48,8 @@ hiddenimports = [
     "pynput.keyboard._win32",
     "pynput.mouse._win32",
     "sounddevice",
+    "webrtcvad",
+    "_webrtcvad",
     "PyQt6.QtPdf",
     "PyQt6.QtSvg",
     "comtypes.gen.UIAutomationClient",
@@ -60,7 +61,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[str(ROOT / "hooks")],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
