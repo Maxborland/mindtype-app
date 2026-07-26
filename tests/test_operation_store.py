@@ -242,6 +242,50 @@ def test_restart_recovery_preserves_source_and_exposes_manual_retry(
     ]
 
 
+def test_restart_does_not_adopt_result_for_a_different_source(
+    tmp_path: Path,
+) -> None:
+    from app.operation_models import OperationKind, OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.result_schema import write_canonical_result
+    from tests.test_result_schema import canonical_result
+
+    operation_dir = tmp_path / "operation-source-mismatch"
+    operation_dir.mkdir()
+    source = operation_dir / "source.wav"
+    source.write_bytes(b"audio")
+    store = OperationStore(tmp_path / "operations.sqlite3")
+    store.create(
+        operation_id="operation-source-mismatch",
+        kind=OperationKind.FILE,
+        source_asset_path=source,
+        source_sha256="a" * 64,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        stage=OperationStage.PERSIST,
+    )
+    store.transition(
+        "operation-source-mismatch",
+        OperationStatus.RUNNING,
+        stage=OperationStage.TRANSCRIBE,
+        new_attempt=True,
+    )
+    payload = canonical_result("operation-source-mismatch")
+    payload["source"]["sha256"] = "b" * 64
+    write_canonical_result(
+        operation_dir / "result.json",
+        payload,
+        expected_operation_id="operation-source-mismatch",
+    )
+
+    recovered = store.recover_incomplete()
+
+    assert [item.operation_id for item in recovered] == [
+        "operation-source-mismatch"
+    ]
+    assert recovered[0].status is OperationStatus.RETRYABLE
+    assert recovered[0].canonical_result_path is None
+
+
 def test_retry_route_can_be_replaced_before_user_starts_new_attempt(
     tmp_path: Path,
 ) -> None:

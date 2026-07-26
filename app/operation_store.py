@@ -373,10 +373,22 @@ class OperationStore:
             ).fetchall()
             for row in rows:
                 current = self._from_row(row)
+                result_path = current.source_asset_path.parent / "result.json"
+                recovered_result = replace(
+                    current,
+                    canonical_result_path=result_path,
+                )
                 if current.status is OperationStatus.CANCEL_REQUESTED:
                     target_status = OperationStatus.CANCELLED
                     error_code = current.last_error_code
                     deadline = current.retention_deadline
+                elif (
+                    current.status is OperationStatus.RUNNING
+                    and self._is_valid_completion_result(recovered_result)
+                ):
+                    target_status = OperationStatus.COMPLETED
+                    error_code = None
+                    deadline = None
                 elif current.source_asset_path.is_file():
                     target_status = OperationStatus.RETRYABLE
                     error_code = current.last_error_code or "INTERRUPTED"
@@ -399,7 +411,9 @@ class OperationStore:
                         last_error_code = ?,
                         updated_at = ?,
                         completed_at = ?,
-                        retention_deadline = ?
+                        retention_deadline = ?,
+                        canonical_result_path = ?,
+                        progress = ?
                     WHERE operation_id = ?
                     """,
                     (
@@ -408,6 +422,20 @@ class OperationStore:
                         now.isoformat(),
                         terminal_at,
                         deadline.isoformat() if deadline else None,
+                        (
+                            str(result_path.resolve())
+                            if target_status is OperationStatus.COMPLETED
+                            else (
+                                str(current.canonical_result_path)
+                                if current.canonical_result_path
+                                else None
+                            )
+                        ),
+                        (
+                            100
+                            if target_status is OperationStatus.COMPLETED
+                            else current.progress
+                        ),
                         current.operation_id,
                     ),
                 )
@@ -422,6 +450,18 @@ class OperationStore:
                 ORDER BY created_at
                 """,
                 (OperationStatus.RETRYABLE.value,),
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def list_running(self) -> list[OperationRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM operations
+                WHERE status = ?
+                ORDER BY created_at
+                """,
+                (OperationStatus.RUNNING.value,),
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
@@ -555,10 +595,31 @@ class OperationStore:
                 payload,
                 expected_operation_id=operation.operation_id,
             )
+            source = payload.get("source")
+            result_sha256 = (
+                source.get("sha256")
+                if isinstance(source, Mapping)
+                else None
+            )
+            if (
+                operation.source_sha256 is not None
+                and result_sha256 != operation.source_sha256
+            ):
+                raise CanonicalResultError(
+                    "canonical result belongs to a different source asset"
+                )
         except (OSError, json.JSONDecodeError, CanonicalResultError) as exc:
             raise IncompleteOperationError(
                 "canonical result is invalid or belongs to another operation"
             ) from exc
+
+    @classmethod
+    def _is_valid_completion_result(cls, operation: OperationRecord) -> bool:
+        try:
+            cls._validate_completion_result(operation)
+        except IncompleteOperationError:
+            return False
+        return True
 
     def guarded_transition(
         self,

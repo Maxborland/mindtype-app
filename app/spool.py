@@ -132,27 +132,22 @@ class SpoolManager:
         if final_path.exists():
             raise FileExistsError(final_path)
 
-        hardlinked = False
+        free_bytes = shutil.disk_usage(operation_dir).free
+        if free_bytes < size:
+            raise InsufficientSpoolSpace(
+                f"spool requires {size} bytes but only {free_bytes} are free"
+            )
         try:
-            os.link(source, part_path)
-            hardlinked = True
-        except OSError:
-            free_bytes = shutil.disk_usage(operation_dir).free
-            if free_bytes < size:
-                raise InsufficientSpoolSpace(
-                    f"spool requires {size} bytes but only {free_bytes} are free"
-                )
-            try:
-                with source.open("rb") as input_file, part_path.open("xb") as output:
-                    shutil.copyfileobj(input_file, output, length=1024 * 1024)
-                    output.flush()
-                    os.fsync(output.fileno())
-            except Exception:
-                part_path.unlink(missing_ok=True)
-                raise
+            with source.open("rb") as input_file, part_path.open("xb") as output:
+                shutil.copyfileobj(input_file, output, length=1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+        except Exception:
+            part_path.unlink(missing_ok=True)
+            raise
 
         os.replace(part_path, final_path)
-        return self._describe(final_path, hardlinked=hardlinked)
+        return self._describe(final_path)
 
     def write_operation_metadata(
         self,

@@ -474,8 +474,19 @@ class OperationCoordinator:
         """Expose interrupted file work as pending UI tasks without starting it."""
         from .transcription_models import FileStatus, FileTask
 
-        self.cleanup_expired(now=utc_now())
+        running_before_recovery = self.store.list_running()
         self.store.recover_incomplete()
+        for previous in running_before_recovery:
+            recovered = self.store.get(previous.operation_id)
+            if (
+                recovered is not None
+                and recovered.status is OperationStatus.COMPLETED
+            ):
+                self.spool.write_operation_metadata(
+                    recovered.operation_id,
+                    retention_deadline=None,
+                )
+        self.cleanup_expired(now=utc_now())
         restored = []
         for operation in self.store.list_retryable():
             if operation.kind is not OperationKind.FILE:

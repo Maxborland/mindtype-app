@@ -36,6 +36,21 @@ def test_imported_source_is_spooled_without_mutating_original(tmp_path: Path) ->
     assert asset.sha256 == hashlib.sha256(b"original-audio").hexdigest()
 
 
+def test_imported_source_is_an_independent_copy(tmp_path: Path) -> None:
+    from app.spool import SpoolManager
+
+    original = tmp_path / "mutable.wav"
+    original.write_bytes(b"first-version")
+    spool = SpoolManager(tmp_path / "spool")
+
+    asset = spool.import_source("operation-copy", original)
+    original.write_bytes(b"second-version")
+
+    assert asset.hardlinked is False
+    assert asset.path.read_bytes() == b"first-version"
+    assert asset.sha256 == hashlib.sha256(b"first-version").hexdigest()
+
+
 def test_track_import_uses_controlled_name_and_ack_cleanup_removes_audio(
     tmp_path: Path,
 ) -> None:

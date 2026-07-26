@@ -585,6 +585,76 @@ def test_restart_restores_file_task_from_spool_without_starting_retry(
     assert persisted.attempt_count == started.attempt_count
 
 
+def test_restart_adopts_result_saved_before_database_transition(
+    tmp_path: Path,
+) -> None:
+    from datetime import timedelta
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import (
+        OperationStage,
+        OperationStatus,
+        utc_now,
+    )
+    from app.operation_store import OperationStore
+    from app.result_schema import write_canonical_result
+    from app.spool import SpoolManager
+    from tests.test_result_schema import canonical_result
+
+    original = tmp_path / "saved-before-crash.wav"
+    original.write_bytes(b"audio")
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="result-before-transition",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    expired = utc_now() - timedelta(seconds=1)
+    coordinator.store.transition(
+        operation.operation_id,
+        OperationStatus.RUNNING,
+        retention_deadline=expired,
+    )
+    coordinator.spool.write_operation_metadata(
+        operation.operation_id,
+        retention_deadline=expired,
+        display_name=original.name,
+    )
+    payload = canonical_result(operation.operation_id)
+    payload["source"]["sha256"] = operation.source_sha256
+    result_path = spool_root / operation.operation_id / "result.json"
+    write_canonical_result(
+        result_path,
+        payload,
+        expected_operation_id=operation.operation_id,
+    )
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    restored = reopened.restore_retryable_file_tasks()
+    recovered = reopened.store.get(operation.operation_id)
+
+    assert restored == []
+    assert recovered.status is OperationStatus.COMPLETED
+    assert recovered.canonical_result_path == result_path.resolve()
+    assert recovered.progress == 100
+    assert recovered.retention_deadline is None
+    assert reopened.spool.read_operation_metadata(
+        operation.operation_id
+    )["retention_deadline"] is None
+
+
 def test_file_task_progress_and_error_are_persisted_without_source_loss(
     tmp_path: Path,
 ) -> None:
