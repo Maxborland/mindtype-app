@@ -43,6 +43,7 @@ hiddenimports = [
     "app.llm.ollama",
     "app.llm.openai",
     "app.llm.openrouter",
+    "app.providers.mindtype_cloud",
     "app.platform.windows",
     "keyboard",
     "pynput.keyboard._win32",
