@@ -206,6 +206,92 @@ def test_license_manager_migrates_legacy_cache_to_signed_lease(
     assert manager._lease_marker_file.exists()
 
 
+def test_online_lease_keeps_legacy_cloud_credential_until_session_cutover(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.key_validator import KeyValidator, generate_license_key
+    from app.licensing.license_manager import (
+        LicenseManager,
+        ValidationResult,
+    )
+
+    data_dir = tmp_path / "MindType"
+    key = generate_license_key()
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        response = {
+            "valid": True,
+            "entitlementLease": _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+            ),
+            "plan": "personal",
+        }
+        with patch.object(
+            manager,
+            "_make_api_request",
+            return_value=(response, None),
+        ):
+            result, _message, _data = manager.activate_online(key)
+        restarted = LicenseManager(lease_verifier=verifier)
+
+    assert result is ValidationResult.SUCCESS
+    assert restarted.get_license_info().license_key == KeyValidator.format_key(
+        key
+    )
+    assert restarted._license_file.is_file()
+    assert restarted._lease_file.is_file()
+
+
+def test_lease_revalidation_is_due_before_offline_expiry(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.license_manager import LicenseManager
+
+    data_dir = tmp_path / "MindType"
+    now = datetime.now(timezone.utc)
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now - timedelta(days=6, minutes=1),
+                expires_at=now + timedelta(hours=23, minutes=59),
+            )
+        )
+        manager._license_data = {
+            "license_key": "ABCDEFGHJKMNPQRS",
+            "validated_at": (now - timedelta(days=6, minutes=1))
+            .replace(tzinfo=None)
+            .isoformat(),
+        }
+
+    assert manager.needs_revalidation() is True
+
+
 def test_expired_seen_lease_does_not_start_a_new_local_trial(
     tmp_path,
     signing_key: Ed25519PrivateKey,

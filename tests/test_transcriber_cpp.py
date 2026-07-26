@@ -5,9 +5,24 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
+import wave
 from unittest.mock import MagicMock
 
 import pytest
+
+
+def _write_pcm16_wav(
+    path: Path,
+    *,
+    channels: int = 1,
+    sample_rate: int = 16_000,
+    frames: int = 160,
+) -> None:
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(channels)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(b"\0" * frames * channels * 2)
 
 
 def test_cancel_current_process_terminates_then_kills_after_grace_timeout():
@@ -188,7 +203,7 @@ def test_vad_regions_are_transcribed_with_timestamp_offsets(
     audio = tmp_path / "audio.wav"
     model.write_bytes(b"model")
     server.write_bytes(b"server")
-    audio.write_bytes(b"audio")
+    _write_pcm16_wav(audio)
 
     class FakeSegmenter:
         def regions(self, _path, **_kwargs):
@@ -245,3 +260,49 @@ def test_vad_regions_are_transcribed_with_timestamp_offsets(
     ]
     assert segments[0]["words"][0]["start"] == 1.1
     assert segments[0]["words"][0]["end"] == 1.9
+
+
+def test_vad_normalizes_wav_using_actual_format_not_extension(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.transcriber_cpp import WhisperCppTranscriber
+
+    source = tmp_path / "stereo-44k.wav"
+    _write_pcm16_wav(source, channels=2, sample_rate=44_100)
+    seen_paths = []
+
+    class FakeSegmenter:
+        def regions(self, path, **_kwargs):
+            seen_paths.append(path)
+            with wave.open(str(path), "rb") as normalized:
+                assert normalized.getnchannels() == 1
+                assert normalized.getsampwidth() == 2
+                assert normalized.getframerate() == 16_000
+            return []
+
+    monkeypatch.setattr(
+        "app.transcriber_cpp.WebRtcVadSegmenter",
+        FakeSegmenter,
+    )
+    monkeypatch.setattr(
+        "app.audio_io.load_16k_mono",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("base WAV normalization must not require librosa")
+        ),
+    )
+    transcriber = WhisperCppTranscriber.__new__(WhisperCppTranscriber)
+
+    result = transcriber._server_inference_regions(
+        source,
+        language="ru",
+        beam_size=5,
+        word_timestamps=False,
+        vad_filter=True,
+    )
+
+    assert result == []
+    assert len(seen_paths) == 1
+    assert seen_paths[0] != source
+    assert source.is_file()
+    assert not seen_paths[0].exists()

@@ -307,8 +307,6 @@ class LicenseManager:
                 return
             try:
                 self._lease_claims = self._lease_store.load()
-                self._license_data = None
-                return
             except (LeaseValidationError, OSError, UnicodeError) as exc:
                 self._license_data = None
                 self._lease_error_code = getattr(
@@ -317,7 +315,7 @@ class LicenseManager:
                     "ENTITLEMENT_CACHE_INVALID",
                 )
                 return
-        if self._lease_marker_file.exists():
+        if self._lease_marker_file.exists() and self._lease_claims is None:
             self._license_data = None
             self._lease_error_code = "ENTITLEMENT_REQUIRED"
             return
@@ -527,6 +525,24 @@ class LicenseManager:
                         exc.code.lower(),
                         None,
                     )
+                # Compatibility until the access/refresh session is wired into
+                # every existing cloud consumer. The signed lease remains the
+                # entitlement authority; this cache only supplies the legacy
+                # bearer credential and a revalidation route for one release.
+                self._license_data = {
+                    "license_key": normalized_key,
+                    "device_id": self._device_id,
+                    "plan": response.get("plan", "personal"),
+                    "email": response.get("email"),
+                    "validated_at": datetime.now().isoformat(),
+                    "expires_at": response.get("expiresAt"),
+                    "activated_devices": response.get(
+                        "activatedDevices",
+                        1,
+                    ),
+                    "max_devices": response.get("maxDevices", 1),
+                }
+                self._save_license()
                 return (
                     ValidationResult.SUCCESS,
                     response.get("message", "activation_success"),
@@ -601,7 +617,22 @@ class LicenseManager:
             except ImportError:
                 interval = 604800  # 7 дней по умолчанию
 
-            return datetime.now() > validated_at + timedelta(seconds=interval)
+            deadline = validated_at + timedelta(seconds=interval)
+            if self._lease_claims is not None:
+                refresh_before_expiry = (
+                    self._lease_claims.expires_at - timedelta(days=1)
+                )
+                if validated_at.tzinfo is None:
+                    refresh_before_expiry = refresh_before_expiry.replace(
+                        tzinfo=None
+                    )
+                deadline = min(deadline, refresh_before_expiry)
+            current = (
+                datetime.now(deadline.tzinfo)
+                if deadline.tzinfo is not None
+                else datetime.now()
+            )
+            return current >= deadline
         except Exception:
             return True
 
@@ -657,14 +688,23 @@ class LicenseManager:
         self._refresh_entitlement_lease()
         if self._lease_claims is not None:
             claims = self._lease_claims
+            legacy = self._license_data or {}
+            legacy_key = legacy.get("license_key")
             max_devices = claims.limits.get("max_devices", 1)
             if isinstance(max_devices, bool) or not isinstance(max_devices, int):
                 max_devices = 1
             return LicenseInfo(
                 status=LicenseStatus.VALID,
+                license_key=(
+                    KeyValidator.format_key(legacy_key)
+                    if legacy_key
+                    else None
+                ),
                 activation_date=claims.issued_at,
                 plan=claims.plan,
+                email=legacy.get("email"),
                 expires_at=claims.expires_at,
+                activated_devices=legacy.get("activated_devices", 1),
                 max_devices=max_devices,
             )
         if self._lease_error_code is not None:

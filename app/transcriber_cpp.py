@@ -7,12 +7,13 @@ import logging
 import time
 import shutil
 import threading
+import wave
 import numpy as np
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 from .accelerator import get_best_provider, get_provider_options
-from .vad import WebRtcVadSegmenter
+from .vad import SUPPORTED_SAMPLE_RATES, WebRtcVadSegmenter
 from .whisper_server import WhisperServerConfig, WhisperServerRuntime
 
 # Настройка локального логгера
@@ -753,6 +754,21 @@ class WhisperCppTranscriber:
                 f"Не удалось преобразовать аудио в WAV для whisper-server: {e}"
             ) from e
 
+    @staticmethod
+    def _is_vad_ready_wav(audio_path: Path) -> bool:
+        """Inspect WAV encoding instead of trusting only its extension."""
+        if audio_path.suffix.lower() != ".wav":
+            return False
+        try:
+            with wave.open(str(audio_path), "rb") as source:
+                return (
+                    source.getframerate() in SUPPORTED_SAMPLE_RATES
+                    and source.getnchannels() == 1
+                    and source.getsampwidth() == 2
+                )
+        except (OSError, EOFError, ValueError, wave.Error):
+            return False
+
     def _transcribe_cli_legacy(
         self,
         audio_path: Path,
@@ -1153,7 +1169,7 @@ class WhisperCppTranscriber:
 
         is_temp_wav = False
         working_audio_path = audio_path
-        if audio_path.suffix.lower() != ".wav":
+        if not self._is_vad_ready_wav(audio_path):
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
         try:
