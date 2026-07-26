@@ -5,6 +5,7 @@
 # This software is the confidential and proprietary information of the Author.
 
 import logging
+import json
 import os
 import sys
 import time
@@ -87,7 +88,8 @@ from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusW
 from .ui.setup_wizard import SetupWizard
 from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, CreditsHistoryDialog, CreditsHistoryWorker
 from .overlay import OverlayWidget
-from .report_generator import ReportGenerator
+from .exporters import CanonicalExporter
+from .accessibility import configure_accessibility
 from .transcriber import (
     Transcriber,
     available_transcriber_backends,
@@ -495,7 +497,14 @@ class AppTitleBar(QFrame):
             btn = QPushButton(glyph)
             btn.setObjectName(name)
             btn.setFixedSize(18, 16)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            accessible_names = {
+                "winMin": "Minimize window",
+                "winMax": "Maximize or restore window",
+                "winClose": "Close window",
+            }
+            btn.setAccessibleName(accessible_names[name])
+            btn.setToolTip(accessible_names[name])
+            btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             btn.clicked.connect(slot)
             lay.addWidget(btn)
             if name == "winMax":
@@ -715,6 +724,7 @@ class MainWindow(QMainWindow):
         self._output_dir = Path.home() / "Documents" / "MindType Transcriptions"
 
         self._build_ui()
+        configure_accessibility(self)
         self._connect_signals()
         self._load_initial_state()
         self._restore_retryable_cloud_tasks()
@@ -1564,6 +1574,11 @@ class MainWindow(QMainWindow):
         self._journal_window = self._build_journal_window()
 
         self.setCentralWidget(central)
+        self._status_bar = self.statusBar()
+        self._status_bar.setObjectName("accessibilityStatus")
+        self._status_bar.setAccessibleName("MindType status")
+        self._status_bar.setSizeGripEnabled(False)
+        self._status_bar.showMessage(self._t("ready"))
 
     def _build_basic_tab(self) -> QWidget:
         """Построить вкладку основных настроек."""
@@ -2024,6 +2039,9 @@ class MainWindow(QMainWindow):
         opacity_layout.addWidget(self.overlay_preview_btn)
         self._opacity_row = overlay_section.form.add_row(self._t("opacity"), opacity_widget)
         self.opacity_label = self._opacity_row.label
+
+        self.reduced_motion_toggle = QCheckBox(self._t("reduced_motion"))
+        overlay_section.form.add_widget(self.reduced_motion_toggle)
 
         _left_col.addWidget(overlay_section)
 
@@ -2632,6 +2650,9 @@ class MainWindow(QMainWindow):
         self.overlay_gain_slider.valueChanged.connect(self._on_overlay_gain_change)
         self.overlay_opacity_slider.valueChanged.connect(self._on_overlay_opacity_change)
         self.overlay_preview_btn.clicked.connect(self._test_overlay)
+        self.reduced_motion_toggle.toggled.connect(
+            self._on_reduced_motion_change
+        )
 
         # Сигналы уровня микрофона
         self.mic_level_signal.connect(self._update_mic_level)
@@ -2728,6 +2749,9 @@ class MainWindow(QMainWindow):
 
         opacity = int(cfg.get("overlay_opacity", 230))
         self.overlay_opacity_slider.setValue(opacity)
+        self.reduced_motion_toggle.setChecked(
+            bool(cfg.get("reduced_motion", False))
+        )
 
         self.config.update(models_dir=str(self.models_dir))
 
@@ -2945,6 +2969,10 @@ class MainWindow(QMainWindow):
         self.config.update(overlay_opacity=value)
         self.overlay.set_bg_opacity(value)
 
+    def _on_reduced_motion_change(self, enabled: bool) -> None:
+        self.config.update(reduced_motion=enabled)
+        self.overlay.set_reduced_motion(enabled)
+
     def _test_overlay(self) -> None:
         """Показать превью overlay для теста настроек."""
         self.overlay.show_recording()
@@ -3016,6 +3044,7 @@ class MainWindow(QMainWindow):
         self.wave_gain_label.setText(self._t("wave_gain"))
         self.opacity_label.setText(self._t("opacity"))
         self.overlay_preview_btn.setText(self._t("preview"))
+        self.reduced_motion_toggle.setText(self._t("reduced_motion"))
 
         # Обновляем позиции в комбобоксе
         current_pos = self.overlay_position_box.currentData()
@@ -3114,6 +3143,8 @@ class MainWindow(QMainWindow):
 
         # Поддержка
         self.support_label.setText(self._t("contact_support"))
+        self._apply_overlay_accessible_texts()
+        configure_accessibility(self)
 
     def _setup_focus_manager(self) -> None:
         """Настроить менеджер фокуса с handle нашего окна."""
@@ -3228,6 +3259,22 @@ class MainWindow(QMainWindow):
         self.overlay.set_margin(int(cfg.get("overlay_margin", 20)))
         self.overlay.set_wave_gain(float(cfg.get("overlay_wave_gain", 1.5)))
         self.overlay.set_bg_opacity(int(cfg.get("overlay_opacity", 230)))
+        self.overlay.set_reduced_motion(bool(cfg.get("reduced_motion", False)))
+        self._apply_overlay_accessible_texts()
+
+    def _apply_overlay_accessible_texts(self) -> None:
+        self.overlay.set_accessible_texts(
+            recording=self._t("recording"),
+            processing=self._t("transcribing"),
+            success=self._t("success"),
+            error=self._t("error"),
+        )
+
+    def _announce_status(self, message: str) -> None:
+        if not message:
+            return
+        self._status_bar.setAccessibleDescription(message)
+        self._status_bar.showMessage(message)
 
     def _init_hotkey(self) -> None:
         combo = self.config.config.get("hotkey", "ctrl+alt+v")
@@ -3372,6 +3419,7 @@ class MainWindow(QMainWindow):
                 level_callback=on_level,
             )
             self.overlay.show_recording()
+            self._announce_status(self._t("recording"))
             self._update_tray_icon(recording=True)
             if quota_seconds is not None:
                 QTimer.singleShot(
@@ -3427,6 +3475,7 @@ class MainWindow(QMainWindow):
             self._dictation.recording_started_at = None
 
         self.overlay.show_processing()
+        self._announce_status(self._t("transcribing"))
 
         if not capture.tracks:
             self._add_journal_entry("error", "error", text="no_audio", is_translatable=True)
@@ -3770,6 +3819,13 @@ class MainWindow(QMainWindow):
     def _add_journal_entry(self, status: str, title_key: str, text: str = "", extra_key: str = "", is_translatable: bool = True) -> None:
         """Добавить запись в журнал."""
         self.journal.add_entry(status, title_key, text, extra_key, is_translatable)
+        title = self._t(title_key) if is_translatable else title_key
+        detail = self._t(text) if is_translatable and text else text
+        self._announce_status(
+            f"{title}: {detail}" if detail and detail != text else (
+                f"{title}: {text}" if text else title
+            )
+        )
 
     def _toggle_download(self) -> None:
         """Toggle between starting and canceling download."""
@@ -4754,9 +4810,40 @@ class MainWindow(QMainWindow):
                     if operation.canonical_result_path is None:
                         raise RuntimeError("Canonical file result was not saved")
                     task.output_files["json"] = operation.canonical_result_path
-                    self._operation_coordinator.acknowledge_result(
-                        operation.operation_id
-                    )
+                    try:
+                        canonical_payload = json.loads(
+                            operation.canonical_result_path.read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        exported = CanonicalExporter().export_bundle(
+                            canonical_payload,
+                            self._output_dir,
+                        )
+                        task.output_files.update(
+                            {
+                                format_.value: path
+                                for format_, path in exported.items()
+                            }
+                        )
+                    except Exception as export_exc:
+                        logger.exception(
+                            "Canonical result was saved, but projections failed"
+                        )
+                        task.warning = (
+                            f"{task.warning}\n" if task.warning else ""
+                        ) + f"Export failed: {export_exc}"
+                    try:
+                        self._operation_coordinator.acknowledge_result(
+                            operation.operation_id
+                        )
+                    except Exception as acknowledgement_exc:
+                        logger.exception(
+                            "Canonical result was saved, but source cleanup failed"
+                        )
+                        task.warning = (
+                            f"{task.warning}\n" if task.warning else ""
+                        ) + f"Local cleanup failed: {acknowledgement_exc}"
             except Exception as exc:
                 logger.exception("Could not persist durable file completion")
                 task.status = FileStatus.ERROR

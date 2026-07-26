@@ -36,6 +36,13 @@ class OverlayWidget(QWidget):
         self._margin = 20
         self._bg_opacity = 255
         self._gain = 3.0
+        self._reduced_motion = False
+        self._accessible_texts = {
+            "recording": "Recording",
+            "processing": "Processing",
+            "success": "Completed",
+            "error": "Error",
+        }
 
         # Текущий уровень звука (0.0 - 1.0)
         self._current_level = 0.0
@@ -107,6 +114,41 @@ class OverlayWidget(QWidget):
         self._update_bg_cache()
         self.update()
 
+    def set_accessible_texts(
+        self,
+        *,
+        recording: str,
+        processing: str,
+        success: str,
+        error: str,
+    ) -> None:
+        self._accessible_texts = {
+            "recording": recording,
+            "processing": processing,
+            "success": success,
+            "error": error,
+        }
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        self._reduced_motion = bool(enabled)
+        self._fade_animation.setDuration(0 if self._reduced_motion else 100)
+        if self._reduced_motion:
+            self._anim_timer.stop()
+        elif not self._anim_timer.isActive():
+            self._anim_timer.start(100)
+
+    def _set_accessible_status(
+        self,
+        state: str,
+        description: str = "",
+    ) -> None:
+        # Some state-machine unit tests intentionally bypass QWidget.__init__.
+        instance_state = object.__getattribute__(self, "__dict__")
+        if "_accessible_texts" not in instance_state:
+            return
+        self.setAccessibleName(self._accessible_texts[state])
+        self.setAccessibleDescription(description)
+
     def get_position(self) -> str:
         return self._corner
 
@@ -177,6 +219,7 @@ class OverlayWidget(QWidget):
         self._state = OverlayState.RECORDING
         self._levels = [0.0] * 16
         self._target_levels = [0.0] * 16
+        self._set_accessible_status("recording")
         self._update_position()
         self._show_animated()
 
@@ -184,16 +227,22 @@ class OverlayWidget(QWidget):
         self._hide_timer.stop()
         self._state = OverlayState.PROCESSING
         self._pulse_phase = 0.0
+        self._set_accessible_status("processing")
         # Делаем окно кликабельным во время обработки
         self.setWindowFlags(self._base_flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.show()  # Нужно показать снова после изменения флагов
+        if object.__getattribute__(self, "__dict__").get(
+            "_reduced_motion", False
+        ):
+            self._opacity_effect.setOpacity(1.0)
         self.update()
 
     def show_success(self, auto_hide_ms: int = 1000) -> None:
         self._state = OverlayState.SUCCESS
         self._flash_alpha = 1.0
+        self._set_accessible_status("success")
         self.update()
         if auto_hide_ms > 0:
             self._hide_timer.start(auto_hide_ms)
@@ -201,6 +250,7 @@ class OverlayWidget(QWidget):
     def show_error(self, message: str = "Ошибка", auto_hide_ms: int = 1200) -> None:
         self._state = OverlayState.ERROR
         self._flash_alpha = 1.0
+        self._set_accessible_status("error", message)
         self.update()
         if auto_hide_ms > 0:
             self._hide_timer.start(auto_hide_ms)
@@ -211,6 +261,12 @@ class OverlayWidget(QWidget):
         self.setWindowFlags(self._base_flags | Qt.WindowType.WindowTransparentForInput)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        if self._reduced_motion:
+            self._hide_timer.stop()
+            self._opacity_effect.setOpacity(0.0)
+            self.hide()
+            self._state = OverlayState.HIDDEN
+            return
         # Отключаем предыдущие подключения перед новым
         try:
             self._fade_animation.finished.disconnect(self._on_hidden)
@@ -232,6 +288,9 @@ class OverlayWidget(QWidget):
     def _show_animated(self) -> None:
         self.show()
         self._fade_animation.stop()
+        if self._reduced_motion:
+            self._opacity_effect.setOpacity(1.0)
+            return
         self._fade_animation.setStartValue(self._opacity_effect.opacity())
         self._fade_animation.setEndValue(1.0)
         self._fade_animation.start()

@@ -138,6 +138,7 @@ def _default_config() -> Dict[str, Any]:
         "overlay_margin": 20,                # Отступ от края экрана
         "overlay_wave_gain": 1.5,            # Усиление волн (1.0 - 10.0)
         "overlay_opacity": 230,              # Прозрачность фона (0-255)
+        "reduced_motion": False,             # Отключить непрерывные анимации overlay
         # Саммаризация (мульти-провайдер)
         "llm_provider": "openrouter",        # openai, anthropic, gemini, ollama, openrouter
         "llm_reasoning_enabled": True,       # Включить reasoning mode
