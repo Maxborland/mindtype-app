@@ -46,6 +46,6 @@ issuance, but no grace period after expiry.
 
 ## Current slice
 
-AC1-AC7 and the desktop half of AC9 are implemented. AC8 belongs to the signed
-release-chain workstream. AC10 and issuance through `/api/license/session`
-require the `mindtype.space` backend repository and session client.
+AC1-AC9 are implemented on the desktop and release-workflow side. AC10 and
+issuance through `/api/license/session` require the `mindtype.space` backend
+repository and session client.

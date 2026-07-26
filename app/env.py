@@ -124,9 +124,9 @@ UPDATE_AUTO_DOWNLOAD: bool = _get_env_bool("MINDTYPE_UPDATE_AUTO_DOWNLOAD", Fals
 # Интервал ревалидации лицензии (секунды, по умолчанию 7 дней)
 LICENSE_REVALIDATION_INTERVAL: int = _get_env_int("MINDTYPE_LICENSE_REVALIDATION", 604800)
 
-# The release pipeline replaces this with the offline entitlement public key.
-# Runtime environment variables must never replace a frozen build's trust root.
-_PRODUCTION_LICENSE_ED25519_PUBLIC_KEY = ""
+from .release_trust_root import (
+    LICENSE_ED25519_PUBLIC_KEY as _PRODUCTION_LICENSE_ED25519_PUBLIC_KEY,
+)
 
 
 def _get_license_ed25519_public_key() -> str:

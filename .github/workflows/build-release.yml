@@ -63,6 +63,23 @@ jobs:
           python -m pip install pyinstaller
           python -m pip check
 
+      - name: Embed and verify release entitlement trust root
+        shell: pwsh
+        env:
+          MINDTYPE_LICENSE_PUBLIC_KEY: ${{ vars.MINDTYPE_LICENSE_PUBLIC_KEY }}
+        run: |
+          $IsTag = "${{ github.ref_type }}" -eq "tag"
+          $HasTrustRoot = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_LICENSE_PUBLIC_KEY)
+          if (-not $HasTrustRoot) {
+            if ($IsTag) {
+              throw "Tagged releases require MINDTYPE_LICENSE_PUBLIC_KEY"
+            }
+            Write-Host "Manual dev build has no production entitlement trust root."
+            exit 0
+          }
+          python scripts/embed_release_trust_root.py
+          python scripts/embed_release_trust_root.py --check
+
       - name: Run regression gate
         shell: pwsh
         env:

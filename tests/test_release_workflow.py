@@ -47,6 +47,14 @@ def test_tag_release_requires_signing_and_publishes_checksum():
     assert ".sha256" in text
 
 
+def test_tag_release_requires_embedded_entitlement_trust_root():
+    text = CANONICAL.read_text(encoding="utf-8")
+
+    assert "vars.MINDTYPE_LICENSE_PUBLIC_KEY" in text
+    assert 'throw "Tagged releases require MINDTYPE_LICENSE_PUBLIC_KEY"' in text
+    assert "scripts/embed_release_trust_root.py --check" in text
+
+
 def test_uninstall_preserves_user_data():
     installer = (ROOT / "installer" / "windows.iss").read_text(
         encoding="utf-8"
