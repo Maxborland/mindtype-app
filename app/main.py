@@ -59,6 +59,10 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush,
 from .audio import AudioRecorder
 from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
 from .cloud_jobs import CloudJobStore, FileCloudJobTracker
+from .operation_coordinator import OperationCoordinator
+from .operation_models import OperationStage, OperationStatus
+from .operation_store import OperationStore
+from .spool import SpoolManager
 from .accelerator import has_npu, detect_available_providers
 from .file_transcriber import (
     FileTranscriptionQueue,
@@ -561,6 +565,17 @@ class MainWindow(QMainWindow):
         self.resize(1060, 600)
 
         self.config = ConfigManager()
+        self._operation_coordinator: Optional[OperationCoordinator] = None
+        try:
+            operation_store = OperationStore(
+                self.config.config_dir / "cloud_jobs.sqlite3"
+            )
+            self._operation_coordinator = OperationCoordinator(
+                store=operation_store,
+                spool=SpoolManager(self.config.config_dir / "spool"),
+            )
+        except Exception:
+            logger.exception("Could not initialize durable operation coordinator")
         try:
             self._cloud_job_tracker: Optional[FileCloudJobTracker] = (
                 FileCloudJobTracker(
@@ -627,6 +642,8 @@ class MainWindow(QMainWindow):
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
+        self._dictation_operation_ids: dict[int, str] = {}
+        self._dictation_durations_ms: dict[int, int] = {}
         self._recording_hotkey = False  # отдельная забота: идёт перепривязка хоткея в настройках
         self._really_quit = False  # Флаг для полного выхода
         self._preserve_cloud_jobs_on_shutdown = False
@@ -3210,10 +3227,13 @@ class MainWindow(QMainWindow):
             self.overlay.show_error(self._t("error"))
             return
 
+        duration_seconds = 0.0
         # Учитываем время записи для trial
         if self._dictation.recording_started_at is not None:
-            duration = time.monotonic() - self._dictation.recording_started_at
-            self.license_manager.add_transcription_time(duration)
+            duration_seconds = (
+                time.monotonic() - self._dictation.recording_started_at
+            )
+            self.license_manager.add_transcription_time(duration_seconds)
             self._dictation.recording_started_at = None
 
         self.overlay.show_processing()
@@ -3227,7 +3247,64 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._run_transcription(path, operation_token)
+        if self._operation_coordinator is None:
+            self._dictation.finish_transcription(
+                operation_token,
+                succeeded=False,
+            )
+            self._add_journal_entry(
+                "error",
+                "error",
+                text="Durable operation storage is unavailable. Audio was preserved.",
+                is_translatable=False,
+            )
+            self.overlay.show_error(self._t("error"))
+            return
+
+        cfg = self.config.config
+        backend = cfg.get("transcriber_backend", "whisper_cpp")
+        provider = "openrouter" if backend == "openrouter" else "local"
+        model = (
+            cfg.get("openrouter_transcribe_model") or "auto"
+            if provider == "openrouter"
+            else cfg.get("model_size", "large-v3")
+        )
+        route = {
+            "transcription": {
+                "provider": provider,
+                "model": str(model),
+            }
+        }
+        try:
+            operation = self._operation_coordinator.adopt_recorded_dictation(
+                path,
+                route=route,
+            )
+            self._operation_coordinator.begin_attempt(
+                operation.operation_id,
+                stage=OperationStage.TRANSCRIBE,
+            )
+        except Exception as exc:
+            logger.exception("Could not persist dictation before transcription")
+            self._dictation.finish_transcription(
+                operation_token,
+                succeeded=False,
+            )
+            self._add_journal_entry(
+                "error",
+                "error",
+                text=str(exc),
+                is_translatable=False,
+            )
+            self.overlay.show_error(self._t("error"))
+            return
+
+        self._dictation_operation_ids[operation_token] = operation.operation_id
+        self._dictation_durations_ms[operation_token] = max(
+            0,
+            int(duration_seconds * 1000),
+        )
+        self._run_transcription(operation.source_asset_path, operation_token)
 
     def _update_waveform(self, levels: List[float]) -> None:
         """Обновить waveform в overlay (Qt thread)."""
@@ -3271,8 +3348,9 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(
             lambda: self._on_transcription_cancelled(operation_token)
         )
-        worker.finished.connect(lambda *_: audio_path.unlink(missing_ok=True))
-        worker.cancelled.connect(lambda: audio_path.unlink(missing_ok=True))
+        if operation_token not in self._dictation_operation_ids:
+            worker.finished.connect(lambda *_: audio_path.unlink(missing_ok=True))
+            worker.cancelled.connect(lambda: audio_path.unlink(missing_ok=True))
         self._transcribe_thread = worker
         worker.start()
 
@@ -3310,11 +3388,43 @@ class MainWindow(QMainWindow):
         from .crash_reporter import add_breadcrumb
         add_breadcrumb(f"Transcription completed: {'error' if err else 'success'}")
 
+        if (
+            operation_token != self._dictation.operation_token
+            or not self._dictation.transcribing
+        ):
+            return
+
+        operation_id = self._dictation_operation_ids.get(operation_token)
+        if operation_id and self._operation_coordinator:
+            try:
+                if err:
+                    self._operation_coordinator.mark_retryable(
+                        operation_id,
+                        error_code="TRANSCRIPTION_FAILED",
+                    )
+                else:
+                    self._operation_coordinator.complete_dictation(
+                        operation_id,
+                        text=text,
+                        language=lang,
+                        confidence=max(0.0, min(1.0, float(prob))),
+                        duration_ms=self._dictation_durations_ms.get(
+                            operation_token,
+                            0,
+                        ),
+                    )
+                    self._operation_coordinator.acknowledge_result(operation_id)
+            except Exception as exc:
+                logger.exception("Could not persist canonical dictation result")
+                err = str(exc)
+
         if not self._dictation.finish_transcription(
             operation_token,
             succeeded=not err,
         ):
             return
+        self._dictation_operation_ids.pop(operation_token, None)
+        self._dictation_durations_ms.pop(operation_token, None)
 
         self._update_tray_icon(recording=False)
 
@@ -3369,16 +3479,52 @@ class MainWindow(QMainWindow):
         if not self._dictation.request_cancel(operation_token):
             return
 
+        operation_id = self._dictation_operation_ids.get(operation_token)
+        if operation_id and self._operation_coordinator:
+            try:
+                self._operation_coordinator.request_cancel(operation_id)
+            except Exception:
+                logger.exception("Could not persist dictation cancellation request")
+
         # Отменяем worker
         if self._transcribe_thread and self._transcribe_thread.isRunning():
             self._transcribe_thread.cancel()
 
         self._dictation.mark_cancelled(operation_token)
+        if operation_id and self._operation_coordinator:
+            QTimer.singleShot(
+                5_000,
+                lambda token=operation_token, identifier=operation_id: (
+                    self._finalize_dictation_cancel_timeout(token, identifier)
+                ),
+            )
         self._update_tray_icon(recording=False)
 
         # Показываем сообщение об отмене
         self._add_journal_entry("pending", "cancelled", is_translatable=True)
         self.overlay.hide_overlay()
+
+    def _finalize_dictation_cancel_timeout(
+        self,
+        operation_token: int,
+        operation_id: str,
+    ) -> None:
+        """Make cancellation terminal if the worker emits no ACK in five seconds."""
+        if not self._operation_coordinator:
+            return
+        try:
+            operation = self._operation_coordinator.store.get(operation_id)
+            if (
+                operation is not None
+                and operation.status is OperationStatus.CANCEL_REQUESTED
+            ):
+                self._operation_coordinator.finish_cancel(operation_id)
+        except Exception:
+            logger.exception("Could not finalize timed-out dictation cancellation")
+            return
+        if self._dictation_operation_ids.get(operation_token) == operation_id:
+            self._dictation_operation_ids.pop(operation_token, None)
+            self._dictation_durations_ms.pop(operation_token, None)
 
     def _on_transcription_cancelled(self, operation_token: int) -> None:
         """Finalize cancellation only for the operation that emitted it."""
@@ -3386,6 +3532,21 @@ class MainWindow(QMainWindow):
             return
         self._dictation.request_cancel(operation_token)
         self._dictation.mark_cancelled(operation_token)
+        operation_id = self._dictation_operation_ids.pop(operation_token, None)
+        self._dictation_durations_ms.pop(operation_token, None)
+        if operation_id and self._operation_coordinator:
+            try:
+                operation = self._operation_coordinator.store.get(operation_id)
+                if operation and operation.status is OperationStatus.RUNNING:
+                    self._operation_coordinator.request_cancel(operation_id)
+                    operation = self._operation_coordinator.store.get(operation_id)
+                if (
+                    operation
+                    and operation.status is OperationStatus.CANCEL_REQUESTED
+                ):
+                    self._operation_coordinator.finish_cancel(operation_id)
+            except Exception:
+                logger.exception("Could not persist worker cancellation")
 
     def _add_journal_entry(self, status: str, title_key: str, text: str = "", extra_key: str = "", is_translatable: bool = True) -> None:
         """Добавить запись в журнал."""

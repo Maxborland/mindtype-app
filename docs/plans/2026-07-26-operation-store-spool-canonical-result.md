@@ -48,6 +48,13 @@ atomically saved.
 - **AC8:** The existing `FileCloudJobTracker` remains usable for one
   compatibility release while migrated v2 operations are available for the new
   coordinator.
+- **AC9:** The current push-to-talk flow adopts the finalized recorder WAV into
+  the durable spool before starting `TranscribeWorker`. A successful callback
+  saves canonical JSON before history or insertion and removes the spool source
+  only after that save succeeds.
+- **AC10:** A dictation transcription error becomes `RETRYABLE` and keeps its
+  source. Cancellation moves through `CANCEL_REQUESTED` to `CANCELLED`; a late
+  successful callback cannot save a result or insert text.
 
 ## Failure behavior and assumptions
 
@@ -88,3 +95,6 @@ atomically saved.
 - AC7 → atomic result round-trip; completion before result rejected; mismatched
   operation result rejected.
 - AC8 → existing `tests/test_cloud_jobs.py` remains green.
+- AC9 → recorded-file adoption and canonical dictation completion; main-window
+  wiring verification plus the full desktop regression suite.
+- AC10 → coordinator cancellation test and existing stale-token worker tests.

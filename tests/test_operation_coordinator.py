@@ -122,3 +122,53 @@ def test_cancellation_ignores_late_success_and_finishes_once(
     assert not (
         tmp_path / "spool" / "operation-cancel" / "result.json"
     ).exists()
+
+
+def test_recorded_dictation_is_adopted_and_completed_before_source_cleanup(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    recorder_file = tmp_path / "recorder-temp.wav"
+    recorder_file.write_bytes(b"dictation-audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    route = {
+        "transcription": {"provider": "local", "model": "tiny"},
+    }
+
+    adopted = coordinator.adopt_recorded_dictation(
+        recorder_file,
+        route=route,
+        operation_id="dictation-adopted",
+    )
+    coordinator.begin_attempt(
+        adopted.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    completed = coordinator.complete_dictation(
+        adopted.operation_id,
+        text="Проверка диктовки",
+        language="ru",
+        confidence=0.91,
+        duration_ms=2_500,
+    )
+
+    assert not recorder_file.exists()
+    assert completed.status is OperationStatus.COMPLETED
+    assert completed.source_asset_path.exists()
+    payload = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+    assert payload["transcript"]["segments"][0]["text"] == "Проверка диктовки"
+
+    coordinator.acknowledge_result(adopted.operation_id)
+    assert not completed.source_asset_path.exists()
+    assert completed.canonical_result_path.is_file()

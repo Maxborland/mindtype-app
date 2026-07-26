@@ -16,7 +16,7 @@ from .operation_models import (
 )
 from .operation_store import OperationStore
 from .result_schema import write_canonical_result
-from .spool import SpoolManager
+from .spool import SpoolAsset, SpoolManager
 
 
 class StaleOperationCallback(RuntimeError):
@@ -39,14 +39,29 @@ class OperationCoordinator:
     ) -> OperationRecord:
         identifier = operation_id or str(uuid.uuid4())
         asset = self.spool.import_source(identifier, source_path)
+        return self._register_asset(
+            identifier,
+            kind=OperationKind.FILE,
+            asset=asset,
+            route=route,
+        )
+
+    def _register_asset(
+        self,
+        operation_id: str,
+        *,
+        kind: OperationKind,
+        asset: SpoolAsset,
+        route: Mapping[str, Any],
+    ) -> OperationRecord:
         deadline = utc_now() + timedelta(days=7)
         self.spool.write_operation_metadata(
-            identifier,
+            operation_id,
             retention_deadline=deadline,
         )
         created = self.store.create(
-            operation_id=identifier,
-            kind=OperationKind.FILE,
+            operation_id=operation_id,
+            kind=kind,
             source_asset_path=asset.path,
             source_sha256=asset.sha256,
             route=route,
@@ -73,24 +88,32 @@ class OperationCoordinator:
         route: Mapping[str, Any],
     ) -> OperationRecord:
         asset = self.spool.finalize_recording(operation_id)
-        deadline = utc_now() + timedelta(days=7)
-        self.spool.write_operation_metadata(
+        return self._register_asset(
             operation_id,
-            retention_deadline=deadline,
-        )
-        created = self.store.create(
-            operation_id=operation_id,
             kind=OperationKind.DICTATION,
-            source_asset_path=asset.path,
-            source_sha256=asset.sha256,
+            asset=asset,
             route=route,
-            stage=OperationStage.PERSIST,
         )
-        return self.store.transition(
-            created.operation_id,
-            OperationStatus.CREATED,
-            retention_deadline=deadline,
+
+    def adopt_recorded_dictation(
+        self,
+        recorder_path: Path,
+        *,
+        route: Mapping[str, Any],
+        operation_id: Optional[str] = None,
+    ) -> OperationRecord:
+        """Copy/link a closed recorder WAV into the spool, then retire the temp."""
+        identifier = operation_id or str(uuid.uuid4())
+        source = Path(recorder_path)
+        asset = self.spool.import_source(identifier, source)
+        operation = self._register_asset(
+            identifier,
+            kind=OperationKind.DICTATION,
+            asset=asset,
+            route=route,
         )
+        source.unlink(missing_ok=True)
+        return operation
 
     def begin_attempt(
         self,
@@ -143,6 +166,54 @@ class OperationCoordinator:
         )
         return completed
 
+    def complete_dictation(
+        self,
+        operation_id: str,
+        *,
+        text: str,
+        language: str,
+        confidence: float,
+        duration_ms: int,
+    ) -> OperationRecord:
+        operation = self.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        payload = {
+            "schema_version": "1.0",
+            "operation_id": operation_id,
+            "source": {
+                "display_name": "dictation.wav",
+                "duration_ms": duration_ms,
+                "sha256": operation.source_sha256,
+                "channels": [],
+            },
+            "route": operation.route,
+            "transcript": {
+                "language": language or "und",
+                "confidence": confidence,
+                "segments": [
+                    {
+                        "segment_id": "segment-0001",
+                        "start_ms": 0,
+                        "end_ms": duration_ms,
+                        "text": text,
+                        "speaker_id": None,
+                        "words": [],
+                        "confidence": confidence,
+                        "postprocessed": False,
+                    }
+                ],
+            },
+            "speakers": [],
+            "summary": None,
+            "warnings": [],
+            "provenance": {
+                "server_job_ids": list(operation.server_job_ids.values()),
+                "created_at": utc_now().isoformat(),
+            },
+        }
+        return self.save_canonical_result(operation_id, payload)
+
     def acknowledge_result(
         self,
         operation_id: str,
@@ -165,6 +236,18 @@ class OperationCoordinator:
         return self.store.transition(
             operation_id,
             OperationStatus.CANCEL_REQUESTED,
+        )
+
+    def mark_retryable(
+        self,
+        operation_id: str,
+        *,
+        error_code: str,
+    ) -> OperationRecord:
+        return self.store.transition(
+            operation_id,
+            OperationStatus.RETRYABLE,
+            last_error_code=error_code,
         )
 
     def finish_cancel(self, operation_id: str) -> OperationRecord:
