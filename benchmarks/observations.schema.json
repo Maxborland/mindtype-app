@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mindtype.space/schemas/ga-observations-1.0.json",
+  "title": "MindType Windows GA observations",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "cases"],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "case_id",
+          "category",
+          "duration_ms",
+          "reference",
+          "hypothesis"
+        ],
+        "properties": {
+          "case_id": {"type": "string", "minLength": 1},
+          "category": {
+            "enum": ["clean_ru", "noisy_ru", "ru_en", "code_path"]
+          },
+          "duration_ms": {"type": "integer", "minimum": 1},
+          "reference": {"type": "string", "minLength": 1},
+          "hypothesis": {"type": "string"},
+          "route": {"enum": ["cloud", "local", "openrouter"]},
+          "press_to_insert_ms": {"type": "integer", "minimum": 0},
+          "processing_ms": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value", "sample_count"],
+        "properties": {
+          "value": {"type": "number"},
+          "sample_count": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}
