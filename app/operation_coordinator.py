@@ -17,7 +17,7 @@ from .operation_models import (
     utc_now,
 )
 from .operation_store import OperationStore
-from .result_schema import write_canonical_result
+from .result_schema import CanonicalResultError, write_canonical_result
 from .spool import SpoolAsset, SpoolManager
 
 
@@ -286,6 +286,19 @@ class OperationCoordinator:
             )
         if operation.status is OperationStatus.COMPLETED:
             return operation
+        result_source = payload.get("source")
+        result_sha256 = (
+            result_source.get("sha256")
+            if isinstance(result_source, Mapping)
+            else None
+        )
+        if (
+            operation.source_sha256 is not None
+            and result_sha256 != operation.source_sha256
+        ):
+            raise CanonicalResultError(
+                "canonical result belongs to a different source asset"
+            )
         result_path = self.spool.operation_dir(operation_id) / "result.json"
         write_canonical_result(
             result_path,

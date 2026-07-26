@@ -5,6 +5,7 @@ from .mindtype_cloud import (
     CloudErrorCode,
     HTTPResponse,
     MindTypeCloudClient,
+    MindTypeCloudExecutor,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "CloudErrorCode",
     "HTTPResponse",
     "MindTypeCloudClient",
+    "MindTypeCloudExecutor",
 ]

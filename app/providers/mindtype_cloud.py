@@ -6,12 +6,23 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 from urllib.parse import quote, urlparse
 
-from ..result_schema import validate_canonical_result
+from ..operation_coordinator import (
+    OperationCoordinator,
+    StaleOperationCallback,
+)
+from ..operation_models import (
+    OperationRecord,
+    OperationStage,
+    OperationStatus,
+    utc_now,
+)
+from ..result_schema import CanonicalResultError, validate_canonical_result
 
 
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
@@ -513,14 +524,22 @@ class MindTypeCloudClient:
             options=options,
         )
 
-    def get_transcription_result(self, job_id: str) -> dict[str, Any]:
+    def get_transcription_result(
+        self,
+        job_id: str,
+        *,
+        expected_operation_id: Optional[str] = None,
+    ) -> dict[str, Any]:
         payload = self._request(
             "GET",
             f"/v1/transcriptions/{self._path_segment(job_id)}/result",
             retry_safe=True,
         )
         result = payload.get("result", payload)
-        return validate_canonical_result(result)
+        return validate_canonical_result(
+            result,
+            expected_operation_id=expected_operation_id,
+        )
 
     def resume_transcription(self, job_id: str) -> dict[str, Any]:
         return self._request(
@@ -614,11 +633,324 @@ class MindTypeCloudClient:
         return self._request("GET", "/v1/models", retry_safe=True)
 
 
+class MindTypeCloudExecutor:
+    """Advance one durable cloud transcription without hiding remote state."""
+
+    _ACTIVE_STATES = {
+        "awaiting_upload",
+        "queued",
+        "running",
+    }
+
+    def __init__(
+        self,
+        *,
+        client: MindTypeCloudClient,
+        coordinator: OperationCoordinator,
+    ) -> None:
+        self.client = client
+        self.coordinator = coordinator
+
+    @staticmethod
+    def _required_remote_id(
+        payload: Mapping[str, Any],
+        *,
+        resource: str,
+    ) -> str:
+        identifier = str(payload.get("id") or "")
+        if not identifier:
+            raise CloudAPIError(
+                CloudErrorCode.SCHEMA_UNSUPPORTED,
+                f"{resource} response is missing id",
+                retryable=False,
+            )
+        return identifier
+
+    def _remember_remote_id(
+        self,
+        operation_id: str,
+        *,
+        key: str,
+        remote_id: str,
+        stage: OperationStage,
+    ) -> OperationRecord:
+        operation = self.coordinator.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status in {
+            OperationStatus.CANCEL_REQUESTED,
+            OperationStatus.COMPLETED,
+            OperationStatus.FAILED,
+            OperationStatus.CANCELLED,
+        }:
+            raise StaleOperationCallback(
+                "remote identifier ignored for terminal operation"
+            )
+        identifiers = dict(operation.server_job_ids)
+        identifiers[key] = remote_id
+        return self.coordinator.store.transition(
+            operation_id,
+            operation.status,
+            stage=stage,
+            server_job_ids=identifiers,
+        )
+
+    def _retryable(
+        self,
+        operation_id: str,
+        *,
+        code: str,
+        retry_after_seconds: Optional[float] = None,
+    ) -> OperationRecord:
+        retry_after = (
+            utc_now() + timedelta(seconds=max(0.0, retry_after_seconds))
+            if retry_after_seconds is not None
+            else None
+        )
+        return self.coordinator.store.transition(
+            operation_id,
+            OperationStatus.RETRYABLE,
+            last_error_code=code,
+            retry_after=retry_after,
+        )
+
+    def _handle_job(
+        self,
+        operation_id: str,
+        job: Mapping[str, Any],
+    ) -> OperationRecord:
+        state = str(job.get("state") or "")
+        if state in self._ACTIVE_STATES:
+            operation = self.coordinator.store.get(operation_id)
+            if operation is None:
+                raise KeyError(operation_id)
+            return self.coordinator.store.transition(
+                operation_id,
+                OperationStatus.RUNNING,
+                stage=OperationStage.TRANSCRIBE,
+            )
+        if state == "awaiting_funds":
+            return self._retryable(
+                operation_id,
+                code=CloudErrorCode.INSUFFICIENT_CREDITS.value,
+            )
+        if state == "expired":
+            return self._retryable(
+                operation_id,
+                code=CloudErrorCode.RESULT_EXPIRED.value,
+            )
+        if state == "cancelling":
+            operation = self.coordinator.store.get(operation_id)
+            if operation is None:
+                raise KeyError(operation_id)
+            if operation.status is not OperationStatus.CANCEL_REQUESTED:
+                return self.coordinator.request_cancel(operation_id)
+            return operation
+        if state == "cancelled":
+            operation = self.coordinator.store.get(operation_id)
+            if operation is None:
+                raise KeyError(operation_id)
+            if operation.status is not OperationStatus.CANCEL_REQUESTED:
+                self.coordinator.request_cancel(operation_id)
+            return self.coordinator.finish_cancel(operation_id)
+        if state == "failed":
+            raw_error = job.get("error")
+            error = raw_error if isinstance(raw_error, Mapping) else {}
+            code = str(error.get("code") or "CLOUD_JOB_FAILED")
+            if bool(error.get("retryable", False)):
+                retry_after = error.get("retry_after_seconds")
+                try:
+                    seconds = (
+                        float(retry_after)
+                        if retry_after is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    seconds = None
+                return self._retryable(
+                    operation_id,
+                    code=code,
+                    retry_after_seconds=seconds,
+                )
+            return self.coordinator.store.transition(
+                operation_id,
+                OperationStatus.FAILED,
+                last_error_code=code,
+            )
+        if state != "succeeded":
+            raise CloudAPIError(
+                CloudErrorCode.SCHEMA_UNSUPPORTED,
+                f"unsupported cloud job state: {state or '<missing>'}",
+                retryable=False,
+            )
+
+        operation = self.coordinator.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        job_id = operation.server_job_ids.get("transcription")
+        if not job_id:
+            raise CloudAPIError(
+                CloudErrorCode.SCHEMA_UNSUPPORTED,
+                "succeeded job has no persisted transcription id",
+                retryable=False,
+            )
+        result = self.client.get_transcription_result(
+            job_id,
+            expected_operation_id=operation_id,
+        )
+        completed = self.coordinator.save_canonical_result(
+            operation_id,
+            result,
+        )
+        self.client.acknowledge_transcription(job_id)
+        self.coordinator.acknowledge_result(operation_id)
+        return completed
+
+    def advance_transcription(
+        self,
+        operation_id: str,
+        *,
+        options: Mapping[str, Any],
+    ) -> OperationRecord:
+        operation = self.coordinator.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status is OperationStatus.COMPLETED:
+            return self.acknowledge_completed(operation_id)
+        if operation.status in {
+            OperationStatus.FAILED,
+            OperationStatus.CANCELLED,
+        }:
+            return operation
+        if operation.status is OperationStatus.CANCEL_REQUESTED:
+            return self.cancel(operation_id)
+        if operation.status in {
+            OperationStatus.CREATED,
+            OperationStatus.RETRYABLE,
+        }:
+            stage = (
+                OperationStage.TRANSCRIBE
+                if operation.server_job_ids.get("transcription")
+                else OperationStage.UPLOAD
+            )
+            operation = self.coordinator.begin_attempt(
+                operation_id,
+                stage=stage,
+            )
+
+        try:
+            transcription_id = operation.server_job_ids.get(
+                "transcription"
+            )
+            if transcription_id:
+                job = self.client.get_transcription(transcription_id)
+                return self._handle_job(operation_id, job)
+
+            upload_id = operation.server_job_ids.get("upload")
+            if not upload_id:
+                upload = self.client.create_upload(
+                    operation.source_asset_path,
+                    operation_id=operation_id,
+                )
+                upload_id = self._required_remote_id(
+                    upload,
+                    resource="upload",
+                )
+                operation = self._remember_remote_id(
+                    operation_id,
+                    key="upload",
+                    remote_id=upload_id,
+                    stage=OperationStage.UPLOAD,
+                )
+
+            self.client.upload_file(
+                operation.source_asset_path,
+                operation_id=operation_id,
+                remote_upload_id=upload_id,
+            )
+            job = self.client.create_transcription(
+                upload_id=upload_id,
+                operation_id=operation_id,
+                options=options,
+            )
+            transcription_id = self._required_remote_id(
+                job,
+                resource="transcription",
+            )
+            self._remember_remote_id(
+                operation_id,
+                key="transcription",
+                remote_id=transcription_id,
+                stage=OperationStage.TRANSCRIBE,
+            )
+            return self._handle_job(operation_id, job)
+        except CloudAPIError as exc:
+            current = self.coordinator.store.get(operation_id)
+            if current is None:
+                raise KeyError(operation_id) from exc
+            if current.status is OperationStatus.COMPLETED:
+                raise
+            if (
+                exc.retryable
+                or exc.code is CloudErrorCode.INSUFFICIENT_CREDITS
+            ):
+                return self._retryable(
+                    operation_id,
+                    code=exc.code.value,
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+            return self.coordinator.store.transition(
+                operation_id,
+                OperationStatus.FAILED,
+                last_error_code=exc.code.value,
+            )
+        except CanonicalResultError:
+            return self.coordinator.store.transition(
+                operation_id,
+                OperationStatus.FAILED,
+                last_error_code=CloudErrorCode.SCHEMA_UNSUPPORTED.value,
+            )
+
+    def acknowledge_completed(
+        self,
+        operation_id: str,
+    ) -> OperationRecord:
+        operation = self.coordinator.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status is not OperationStatus.COMPLETED:
+            raise ValueError("only a completed operation can be acknowledged")
+        job_id = operation.server_job_ids.get("transcription")
+        if not job_id:
+            raise ValueError("completed cloud operation has no server job id")
+        self.client.acknowledge_transcription(job_id)
+        self.coordinator.acknowledge_result(operation_id)
+        return self.coordinator.store.get(operation_id) or operation
+
+    def cancel(self, operation_id: str) -> OperationRecord:
+        operation = self.coordinator.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status in {
+            OperationStatus.CANCELLED,
+            OperationStatus.FAILED,
+            OperationStatus.COMPLETED,
+        }:
+            return operation
+        if operation.status is not OperationStatus.CANCEL_REQUESTED:
+            operation = self.coordinator.request_cancel(operation_id)
+        job_id = operation.server_job_ids.get("transcription")
+        if job_id:
+            self.client.cancel_transcription(job_id)
+        return self.coordinator.finish_cancel(operation_id)
+
+
 __all__ = [
     "CloudAPIError",
     "CloudErrorCode",
     "HTTPResponse",
     "MindTypeCloudClient",
+    "MindTypeCloudExecutor",
     "TransportError",
     "UrlLibTransport",
 ]
