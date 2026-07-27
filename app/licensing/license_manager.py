@@ -273,6 +273,7 @@ class LicenseManager:
         self._license_data: Optional[dict] = None
         self._lease_claims: Optional[EntitlementClaims] = None
         self._lease_error_code: Optional[str] = None
+        self._deactivation_cleanup: list[Callable[[], None]] = []
         self._device_id = _get_device_id()
         self._device_name = _get_device_name()
         if lease_verifier is None:
@@ -350,6 +351,14 @@ class LicenseManager:
         else:
             self._lease_file.unlink(missing_ok=True)
         self._lease_marker_file.unlink(missing_ok=True)
+
+    def add_deactivation_cleanup(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """Register local cloud credentials that must follow deactivation."""
+        if callback not in self._deactivation_cleanup:
+            self._deactivation_cleanup.append(callback)
 
     def install_entitlement_lease(self, token: str) -> EntitlementClaims:
         """Verify and atomically adopt a server-issued offline lease."""
@@ -590,10 +599,14 @@ class LicenseManager:
             return False, error
 
         if response and response.get("success"):
-            # Удаляем локальный кэш
-            if self._license_file.exists():
-                self._license_file.unlink()
-            self._license_data = None
+            self._clear_cached_license()
+            for cleanup in tuple(self._deactivation_cleanup):
+                try:
+                    cleanup()
+                except Exception:
+                    logger.exception(
+                        "Cloud session credentials could not be fully cleared"
+                    )
             return True, "deactivation_success"
 
         return False, "deactivation_failed"
@@ -869,6 +882,8 @@ class LicenseManager:
         self._lease_error_code = "ENTITLEMENT_REQUIRED"
         if self._lease_store is not None:
             self._lease_store.clear()
+        else:
+            self._lease_file.unlink(missing_ok=True)
         self._license_file.unlink(missing_ok=True)
         self._lease_marker_file.parent.mkdir(parents=True, exist_ok=True)
         self._lease_marker_file.touch(exist_ok=True)

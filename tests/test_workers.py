@@ -3,7 +3,11 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from app.ui.workers import CloudDictationWorker, TranscribeWorker
+from app.ui.workers import (
+    CloudCancellationWorker,
+    CloudDictationWorker,
+    TranscribeWorker,
+)
 
 
 class CompletingTranscriber:
@@ -108,7 +112,12 @@ def test_cloud_dictation_worker_returns_saved_canonical_text(tmp_path):
 
 
 def test_cloud_cancel_only_calls_network_from_worker_thread():
+    from app.operation_models import OperationStatus
+
     executor = MagicMock()
+    executor.cancel.return_value = MagicMock(
+        status=OperationStatus.CANCELLED
+    )
     worker = CloudDictationWorker(
         executor,
         "operation-1",
@@ -126,3 +135,61 @@ def test_cloud_cancel_only_calls_network_from_worker_thread():
 
     executor.cancel.assert_called_once_with("operation-1")
     assert cancelled == [True]
+
+
+def test_cloud_cancel_failure_stays_pending():
+    executor = MagicMock()
+    executor.cancel.side_effect = TimeoutError("server unavailable")
+    worker = CloudDictationWorker(
+        executor,
+        "operation-1",
+        options={},
+        poll_interval_ms=0,
+    )
+    cancelled = []
+    pending = []
+    worker.cancelled.connect(lambda: cancelled.append(True))
+    worker.cancellation_pending.connect(pending.append)
+
+    worker.cancel()
+    worker.run()
+
+    assert cancelled == []
+    assert pending == ["server unavailable"]
+
+
+def test_recovery_cancellation_requires_terminal_server_confirmation():
+    from app.operation_models import OperationStatus
+
+    executor = MagicMock()
+    executor.cancel.return_value = MagicMock(
+        status=OperationStatus.CANCEL_REQUESTED
+    )
+    worker = CloudCancellationWorker(executor, "operation-1")
+    resolved = []
+    failed = []
+    worker.resolved.connect(resolved.append)
+    worker.failed.connect(lambda *args: failed.append(args))
+
+    worker.run()
+
+    assert resolved == []
+    assert failed == [
+        ("operation-1", "cloud cancellation was not confirmed")
+    ]
+
+
+def test_recovery_cancellation_emits_resolved_after_server_confirmation():
+    from app.operation_models import OperationStatus
+
+    executor = MagicMock()
+    executor.cancel.return_value = MagicMock(
+        status=OperationStatus.CANCELLED
+    )
+    worker = CloudCancellationWorker(executor, "operation-1")
+    resolved = []
+    worker.resolved.connect(resolved.append)
+
+    worker.run()
+
+    assert resolved == ["operation-1"]

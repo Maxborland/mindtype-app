@@ -304,12 +304,21 @@ class TestLicenseManagerDeactivation:
             json.dump(license_data, f)
 
         license_manager._load_license()
+        license_manager._lease_file.write_text("signed-lease")
+        license_manager._lease_marker_file.write_text("1")
+        cloud_session_cleanup = MagicMock()
+        license_manager.add_deactivation_cleanup(cloud_session_cleanup)
 
         with patch('urllib.request.urlopen', return_value=mock_urlopen_response({"success": True})):
             success, message = license_manager.deactivate_online()
 
         assert success is True
         assert license_manager._license_data is None
+        assert not license_manager._license_file.exists()
+        assert not license_manager._lease_file.exists()
+        assert not license_manager._lease_marker_file.exists()
+        assert license_manager.get_license_info().status is not LicenseStatus.VALID
+        cloud_session_cleanup.assert_called_once_with()
 
 
 class TestLicenseManagerRevalidation:

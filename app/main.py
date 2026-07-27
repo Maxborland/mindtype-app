@@ -147,6 +147,7 @@ from .ui.tokens import COLORS, SPACING, TYPOGRAPHY
 from .ui.icons import create_app_icon
 from .ui.components import apply_system7_titlebar
 from .ui.workers import (
+    CloudCancellationWorker,
     CloudDictationWorker,
     TranscribeWorker,
     ModelDownloadWorker,
@@ -671,6 +672,7 @@ class MainWindow(QMainWindow):
         else:
             self.models_dir = desired_models_dir
         self._transcribe_thread: Optional[QThread] = None
+        self._cancellation_workers: set[QThread] = set()
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
@@ -705,6 +707,9 @@ class MainWindow(QMainWindow):
                     lease_store=lease_store,
                     refresh_store=KeyringRefreshTokenStore(),
                     device_id=self.license_manager.get_device_id(),
+                )
+                self.license_manager.add_deactivation_cleanup(
+                    self._cloud_session_manager.clear
                 )
         except Exception:
             logger.exception("MindType Cloud session boundary is unavailable")
@@ -3794,6 +3799,13 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(
             lambda: self._on_transcription_cancelled(operation_token)
         )
+        if isinstance(worker, CloudDictationWorker):
+            worker.cancellation_pending.connect(
+                lambda error: self._on_transcription_cancellation_pending(
+                    operation_token,
+                    error,
+                )
+            )
         if operation_token not in self._dictation_operation_ids:
             worker.finished.connect(lambda *_: audio_path.unlink(missing_ok=True))
             worker.cancelled.connect(lambda: audio_path.unlink(missing_ok=True))
@@ -3947,47 +3959,17 @@ class MainWindow(QMainWindow):
             self._transcribe_thread.cancel()
 
         self._dictation.mark_cancelled(operation_token)
-        if operation_id and self._operation_coordinator:
-            QTimer.singleShot(
-                5_000,
-                lambda token=operation_token, identifier=operation_id: (
-                    self._finalize_dictation_cancel_timeout(token, identifier)
-                ),
-            )
         self._update_tray_icon(recording=False)
 
         # Показываем сообщение об отмене
         self._add_journal_entry("pending", "cancelled", is_translatable=True)
         self.overlay.hide_overlay()
 
-    def _finalize_dictation_cancel_timeout(
-        self,
-        operation_token: int,
-        operation_id: str,
-    ) -> None:
-        """Make cancellation terminal if the worker emits no ACK in five seconds."""
-        if not self._operation_coordinator:
-            return
-        try:
-            operation = self._operation_coordinator.store.get(operation_id)
-            if (
-                operation is not None
-                and operation.status is OperationStatus.CANCEL_REQUESTED
-            ):
-                self._operation_coordinator.finish_cancel(operation_id)
-        except Exception:
-            logger.exception("Could not finalize timed-out dictation cancellation")
-            return
-        if self._dictation_operation_ids.get(operation_token) == operation_id:
-            self._dictation_operation_ids.pop(operation_token, None)
-            self._dictation_durations_ms.pop(operation_token, None)
-
     def _on_transcription_cancelled(self, operation_token: int) -> None:
         """Finalize cancellation only for the operation that emitted it."""
-        if operation_token != self._dictation.operation_token:
-            return
-        self._dictation.request_cancel(operation_token)
-        self._dictation.mark_cancelled(operation_token)
+        if operation_token == self._dictation.operation_token:
+            self._dictation.request_cancel(operation_token)
+            self._dictation.mark_cancelled(operation_token)
         operation_id = self._dictation_operation_ids.pop(operation_token, None)
         self._dictation_durations_ms.pop(operation_token, None)
         if operation_id and self._operation_coordinator:
@@ -4003,6 +3985,31 @@ class MainWindow(QMainWindow):
                     self._operation_coordinator.finish_cancel(operation_id)
             except Exception:
                 logger.exception("Could not persist worker cancellation")
+
+    def _on_transcription_cancellation_pending(
+        self,
+        operation_token: int,
+        error: str,
+    ) -> None:
+        """Keep remote cancellation durable when the server did not confirm it."""
+        operation_id = self._dictation_operation_ids.pop(
+            operation_token,
+            None,
+        )
+        self._dictation_durations_ms.pop(operation_token, None)
+        self._add_journal_entry(
+            "error",
+            "Cloud cancellation is pending",
+            text=error,
+            is_translatable=False,
+        )
+        if operation_id:
+            QTimer.singleShot(
+                60_000,
+                lambda identifier=operation_id: (
+                    self._retry_pending_cancellation(identifier)
+                ),
+            )
 
     def _add_journal_entry(self, status: str, title_key: str, text: str = "", extra_key: str = "", is_translatable: bool = True) -> None:
         """Добавить запись в журнал."""
@@ -5272,7 +5279,72 @@ class MainWindow(QMainWindow):
                     text=str(operation.source_asset_path),
                     is_translatable=False,
                 )
+            for operation in durable_recovery.pending_cancellations:
+                self._retry_pending_cancellation(operation.operation_id)
         self._update_file_queue_ui()
+
+    def _retry_pending_cancellation(self, operation_id: str) -> None:
+        """Retry a durable cloud cancellation without blocking the GUI."""
+        if self._operation_coordinator is None:
+            return
+        operation = self._operation_coordinator.store.get(operation_id)
+        if (
+            operation is None
+            or operation.status is not OperationStatus.CANCEL_REQUESTED
+        ):
+            return
+        if not operation.server_job_ids:
+            self._operation_coordinator.finish_cancel(operation_id)
+            return
+        self._init_mindtype_cloud()
+        if self._cloud_executor is None:
+            self._add_journal_entry(
+                "error",
+                "Cloud cancellation is pending",
+                text=operation_id,
+                is_translatable=False,
+            )
+            return
+        worker = CloudCancellationWorker(
+            self._cloud_executor,
+            operation_id,
+        )
+        self._cancellation_workers.add(worker)
+        worker.resolved.connect(
+            lambda identifier: self._add_journal_entry(
+                "success",
+                "Cloud cancellation confirmed",
+                text=identifier,
+                is_translatable=False,
+            )
+        )
+        worker.failed.connect(
+            self._on_pending_cancellation_retry_failed
+        )
+        worker.finished.connect(
+            lambda current=worker: self._cancellation_workers.discard(
+                current
+            )
+        )
+        worker.start()
+
+    def _on_pending_cancellation_retry_failed(
+        self,
+        operation_id: str,
+        error: str,
+    ) -> None:
+        self._add_journal_entry(
+            "error",
+            "Cloud cancellation is pending",
+            text=f"{operation_id}: {error}",
+            is_translatable=False,
+        )
+        QTimer.singleShot(
+            60_000,
+            lambda identifier=operation_id: (
+                self._retry_pending_cancellation(identifier)
+            ),
+        )
 
     def _acknowledge_completed_operation(self, operation_id: str) -> None:
         """ACK remote artifacts before removing the durable local source."""
@@ -5399,6 +5471,7 @@ class MainWindow(QMainWindow):
             self._update_download_worker,
             getattr(self, '_credits_worker', None),
             getattr(self, '_history_worker', None),
+            *list(self._cancellation_workers),
         ]:
             if worker and worker.isRunning():
                 worker.quit()

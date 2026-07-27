@@ -692,6 +692,58 @@ def test_startup_recovery_exposes_retryable_dictation(
         operation.operation_id
     ]
     assert recovery.completed_pending_ack == ()
+    assert recovery.pending_cancellations == ()
+
+
+def test_startup_recovery_exposes_unconfirmed_cloud_cancellation(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    source = tmp_path / "dictation.wav"
+    source.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.create_file_operation(
+        source,
+        route={
+            "transcription": {
+                "provider": "mindtype_cloud",
+                "model": "auto",
+            }
+        },
+        operation_id="pending-cloud-cancel",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    coordinator.store.transition(
+        operation.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"transcription": "server-job-1"},
+    )
+    coordinator.request_cancel(operation.operation_id)
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    recovery = reopened.restore_startup()
+
+    assert [item.operation_id for item in recovery.pending_cancellations] == [
+        operation.operation_id
+    ]
+    recovered = reopened.store.get(operation.operation_id)
+    assert recovered is not None
+    assert recovered.status is OperationStatus.CANCEL_REQUESTED
 
 
 def test_file_task_progress_and_error_are_persisted_without_source_loss(

@@ -131,6 +131,7 @@ class CloudDictationWorker(QThread):
     status_update = pyqtSignal(str)
     finished = pyqtSignal(str, str, float, str)
     cancelled = pyqtSignal()
+    cancellation_pending = pyqtSignal(str)
 
     def __init__(
         self,
@@ -159,8 +160,13 @@ class CloudDictationWorker(QThread):
         try:
             while True:
                 if self._cancelled:
-                    self.executor.cancel(self.operation_id)
-                    self.cancelled.emit()
+                    operation = self.executor.cancel(self.operation_id)
+                    if operation.status is OperationStatus.CANCELLED:
+                        self.cancelled.emit()
+                    else:
+                        self.cancellation_pending.emit(
+                            "server cancellation is still pending"
+                        )
                     return
                 operation = self.executor.advance_transcription(
                     self.operation_id,
@@ -216,9 +222,34 @@ class CloudDictationWorker(QThread):
                 self.msleep(self.poll_interval_ms)
         except Exception as error:
             if self._cancelled:
-                self.cancelled.emit()
+                self.cancellation_pending.emit(str(error))
             else:
                 self.finished.emit("", "", 0.0, str(error))
+
+
+class CloudCancellationWorker(QThread):
+    """Retry one durable remote cancellation outside the GUI thread."""
+
+    resolved = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, executor, operation_id: str) -> None:
+        super().__init__()
+        self.executor = executor
+        self.operation_id = operation_id
+
+    def run(self) -> None:
+        try:
+            operation = self.executor.cancel(self.operation_id)
+            from ..operation_models import OperationStatus
+
+            if operation.status is not OperationStatus.CANCELLED:
+                raise RuntimeError(
+                    "cloud cancellation was not confirmed"
+                )
+            self.resolved.emit(self.operation_id)
+        except Exception as error:
+            self.failed.emit(self.operation_id, str(error))
 
 
 class ModelDownloadWorker(QThread):

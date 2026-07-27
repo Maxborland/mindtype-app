@@ -1329,11 +1329,35 @@ class MindTypeCloudExecutor:
             operation = self.coordinator.request_cancel(operation_id)
         summary_id = operation.server_job_ids.get("summary")
         transcription_id = operation.server_job_ids.get("transcription")
+        response: Mapping[str, Any]
         if summary_id:
-            self.client.cancel_summary(summary_id)
+            response = self.client.cancel_summary(summary_id)
         elif transcription_id:
-            self.client.cancel_transcription(transcription_id)
-        return self.coordinator.finish_cancel(operation_id)
+            response = self.client.cancel_transcription(transcription_id)
+        else:
+            return self.coordinator.finish_cancel(operation_id)
+        state = str(response.get("state") or "")
+        if state == "cancelled":
+            return self.coordinator.finish_cancel(operation_id)
+        if state in {
+            "awaiting_upload",
+            "awaiting_funds",
+            "queued",
+            "running",
+            "cancelling",
+        }:
+            return self.coordinator.store.get(operation_id) or operation
+        if state in {"succeeded", "failed", "expired"}:
+            return self.coordinator.store.transition(
+                operation_id,
+                OperationStatus.FAILED,
+                last_error_code=f"REMOTE_{state.upper()}",
+            )
+        raise CloudAPIError(
+            CloudErrorCode.SCHEMA_UNSUPPORTED,
+            "cancellation response has no supported state",
+            retryable=False,
+        )
 
 
 __all__ = [

@@ -119,7 +119,7 @@ def test_restart_with_missing_source_fails_closed_with_metadata(
     "stage_name",
     ["UPLOAD", "TRANSCRIBE", "DIARIZE", "SUMMARIZE", "EXPORT", "INSERT"],
 )
-def test_cancelled_stage_cannot_resurrect_after_restart(
+def test_unconfirmed_cancellation_cannot_resurrect_after_restart(
     tmp_path: Path,
     stage_name: str,
 ) -> None:
@@ -134,12 +134,12 @@ def test_cancelled_stage_cannot_resurrect_after_restart(
 
     restarted = _coordinator(tmp_path)
     restarted.store.recover_incomplete()
-    cancelled = restarted.store.get(operation_id)
+    cancellation = restarted.store.get(operation_id)
     payload = canonical_result(operation_id)
     payload["source"]["sha256"] = running.source_sha256
 
-    assert cancelled is not None
-    assert cancelled.status is OperationStatus.CANCELLED
+    assert cancellation is not None
+    assert cancellation.status is OperationStatus.CANCEL_REQUESTED
     with pytest.raises(StaleOperationCallback):
         restarted.save_canonical_result(operation_id, payload)
     assert not (

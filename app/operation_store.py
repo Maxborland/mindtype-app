@@ -393,7 +393,7 @@ class OperationStore:
                     canonical_result_path=result_path,
                 )
                 if current.status is OperationStatus.CANCEL_REQUESTED:
-                    target_status = OperationStatus.CANCELLED
+                    target_status = OperationStatus.CANCEL_REQUESTED
                     error_code = current.last_error_code
                     deadline = current.retention_deadline
                 elif (
@@ -464,6 +464,18 @@ class OperationStore:
                 ORDER BY created_at
                 """,
                 (OperationStatus.RETRYABLE.value,),
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def list_cancel_requested(self) -> list[OperationRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM operations
+                WHERE status = ?
+                ORDER BY created_at
+                """,
+                (OperationStatus.CANCEL_REQUESTED.value,),
             ).fetchall()
         return [self._from_row(row) for row in rows]
 

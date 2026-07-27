@@ -389,6 +389,37 @@ def test_cancel_uses_existing_job_and_finishes_only_after_response(
     assert client.calls == [("cancel_transcription", "job-1")]
 
 
+def test_cancel_stays_requested_while_server_is_cancelling(
+    tmp_path: Path,
+) -> None:
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+
+    coordinator, operation = operation_fixture(tmp_path)
+    running = coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    coordinator.store.transition(
+        running.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"transcription": "job-1"},
+    )
+    client = FakeCloudClient()
+    client.cancel_transcription = lambda job_id: {
+        "id": job_id,
+        "state": "cancelling",
+    }
+    executor = MindTypeCloudExecutor(
+        client=client,
+        coordinator=coordinator,
+    )
+
+    pending = executor.cancel(operation.operation_id)
+
+    assert pending.status is OperationStatus.CANCEL_REQUESTED
+
+
 def test_summary_remains_durable_between_transcription_and_final_ack(
     tmp_path: Path,
 ) -> None:

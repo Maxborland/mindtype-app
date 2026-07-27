@@ -31,6 +31,7 @@ class StartupRecovery:
     retryable_files: tuple[Any, ...]
     retryable_dictations: tuple[OperationRecord, ...]
     completed_pending_ack: tuple[OperationRecord, ...]
+    pending_cancellations: tuple[OperationRecord, ...]
 
 
 class OperationCoordinator:
@@ -581,6 +582,9 @@ class OperationCoordinator:
             retryable_files=tuple(retryable_files),
             retryable_dictations=tuple(retryable_dictations),
             completed_pending_ack=completed_pending_ack,
+            pending_cancellations=tuple(
+                self.store.list_cancel_requested()
+            ),
         )
 
     def restore_retryable_file_tasks(self) -> list[Any]:
