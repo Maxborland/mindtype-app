@@ -212,6 +212,71 @@ def test_audio_finalization_timer_does_not_stop_a_new_operation(
     window.audio_session.stop.assert_not_called()
 
 
+def test_failed_recording_start_retries_retained_loopback_cleanup(
+    monkeypatch,
+) -> None:
+    from app.audio_sources import AudioSourceKind, MultiTrackCapture
+    from app.dictation_state import DictationState
+    from app.main import MainWindow
+
+    callbacks = []
+    monkeypatch.setattr(
+        "app.main.QTimer.singleShot",
+        lambda delay, callback: callbacks.append((delay, callback)),
+    )
+
+    class RetainedAudioSession:
+        recording = False
+
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def start(self, *_args, **_kwargs) -> None:
+            self.recording = True
+            raise RuntimeError("microphone unavailable")
+
+        def stop(self) -> MultiTrackCapture:
+            self.stop_calls += 1
+            if self.stop_calls == 2:
+                self.recording = False
+            return MultiTrackCapture(results=())
+
+    audio_session = RetainedAudioSession()
+    state = DictationState()
+    window = SimpleNamespace(
+        audio_session=audio_session,
+        _operation_coordinator=MagicMock(),
+        license_manager=MagicMock(),
+        _dictation=state,
+        _selected_device_id=lambda: None,
+        _selected_audio_source=lambda: AudioSourceKind.MICROPHONE_SYSTEM,
+        system_audio_box=SimpleNamespace(currentData=lambda: None),
+        system_audio_consent_toggle=SimpleNamespace(isChecked=lambda: True),
+        overlay=MagicMock(),
+        _add_journal_entry=MagicMock(),
+        _announce_status=MagicMock(),
+        _update_tray_icon=MagicMock(),
+        _t=lambda key: key,
+    )
+    window.license_manager.get_license_info.return_value = SimpleNamespace(
+        is_trial=False
+    )
+
+    MainWindow._start_recording_with_overlay(window)
+
+    assert audio_session.recording is True
+    assert len(callbacks) == 1
+    assert callbacks[0][0] == 100
+
+    callbacks.pop(0)[1]()
+    assert audio_session.recording is True
+    assert len(callbacks) == 1
+
+    callbacks.pop(0)[1]()
+    assert audio_session.recording is False
+    assert audio_session.stop_calls == 2
+
+
 def test_failed_projection_keeps_source_pending_ack(
     tmp_path,
     monkeypatch,

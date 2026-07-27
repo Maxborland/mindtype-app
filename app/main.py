@@ -709,6 +709,9 @@ class MainWindow(QMainWindow):
                 self._cloud_session_manager = CloudSessionManager(
                     client=LicenseSessionClient(API_BASE_URL),
                     lease_store=lease_store,
+                    install_lease=(
+                        self.license_manager.install_entitlement_lease
+                    ),
                     refresh_store=KeyringRefreshTokenStore(),
                     device_id=self.license_manager.get_device_id(),
                 )
@@ -3598,10 +3601,56 @@ class MainWindow(QMainWindow):
                     lambda token=operation_token: self._stop_at_trial_quota(token),
                 )
         except Exception as exc:
+            if self.audio_session.recording:
+                MainWindow._schedule_failed_audio_start_cleanup(
+                    self,
+                    operation_token,
+                )
             self._dictation.request_cancel(operation_token)
             self._dictation.mark_cancelled(operation_token)
             self._add_journal_entry("error", "error", text=str(exc), is_translatable=True)
             self.overlay.show_error(self._t("error"))
+
+    def _schedule_failed_audio_start_cleanup(
+        self,
+        operation_token: int,
+    ) -> None:
+        if getattr(self, "_audio_finalize_retry_token", None) == operation_token:
+            return
+        self._audio_finalize_retry_token = operation_token
+        QTimer.singleShot(
+            100,
+            lambda token=operation_token: (
+                MainWindow._retry_failed_audio_start_cleanup(self, token)
+            ),
+        )
+
+    def _retry_failed_audio_start_cleanup(
+        self,
+        operation_token: int,
+    ) -> None:
+        if (
+            getattr(self, "_audio_finalize_retry_token", None)
+            != operation_token
+        ):
+            return
+        self._audio_finalize_retry_token = None
+        if (
+            self._dictation.operation_token != operation_token
+            or not self.audio_session.recording
+        ):
+            return
+        try:
+            capture = self.audio_session.stop()
+            for track in capture.tracks:
+                track.path.unlink(missing_ok=True)
+        except Exception:
+            logger.exception("Could not finalize failed audio startup")
+        if self.audio_session.recording:
+            MainWindow._schedule_failed_audio_start_cleanup(
+                self,
+                operation_token,
+            )
 
     def _stop_at_trial_quota(self, operation_token: int) -> None:
         """Остановить только ту запись, для которой истёк trial budget."""

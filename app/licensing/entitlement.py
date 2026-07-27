@@ -44,6 +44,31 @@ class EntitlementClaims:
     limits: Mapping[str, Any]
 
 
+def _checked_at(value: datetime | None = None) -> datetime:
+    checked = value or datetime.now(timezone.utc)
+    if checked.tzinfo is None:
+        return checked.replace(tzinfo=timezone.utc)
+    return checked.astimezone(timezone.utc)
+
+
+def _write_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def _decode_base64url(value: str, *, field: str) -> bytes:
     if not value:
         raise LeaseValidationError("MALFORMED_LEASE", f"{field} is empty")
@@ -198,11 +223,7 @@ class EntitlementLeaseVerifier:
                 "LEASE_TOO_LONG",
                 "lease exceeds the seven-day offline allowance",
             )
-        checked_at = now or datetime.now(timezone.utc)
-        if checked_at.tzinfo is None:
-            checked_at = checked_at.replace(tzinfo=timezone.utc)
-        else:
-            checked_at = checked_at.astimezone(timezone.utc)
+        checked_at = _checked_at(now)
         if issued_at > checked_at + LEASE_CLOCK_SKEW:
             raise LeaseValidationError(
                 "LEASE_NOT_YET_VALID",
@@ -250,16 +271,46 @@ class EntitlementLeaseStore:
         device_id: str,
     ):
         self.path = path
+        self.clock_path = path.with_name("entitlement.clock")
         self._verifier = verifier
         self._device_id = device_id
 
+    def _advance_clock(self, now: datetime | None) -> None:
+        checked_at = _checked_at(now)
+        high_water: datetime | None = None
+        if self.clock_path.exists():
+            try:
+                high_water = datetime.fromisoformat(
+                    self.clock_path.read_text(encoding="ascii").replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+                if high_water.tzinfo is None:
+                    raise ValueError("timezone is missing")
+                high_water = high_water.astimezone(timezone.utc)
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise LeaseValidationError(
+                    "ENTITLEMENT_CLOCK_INVALID",
+                    "entitlement clock state is invalid",
+                ) from exc
+            if checked_at + LEASE_CLOCK_SKEW < high_water:
+                raise LeaseValidationError(
+                    "CLOCK_ROLLBACK",
+                    "system clock moved backwards after lease validation",
+                )
+        observed_at = max(checked_at, high_water or checked_at)
+        _write_atomic(self.clock_path, observed_at.isoformat())
+
     def load(self, *, now: datetime | None = None) -> EntitlementClaims:
         token = self.path.read_text(encoding="utf-8")
-        return self._verifier.verify(
+        claims = self._verifier.verify(
             token,
             device_id=self._device_id,
             now=now,
         )
+        self._advance_clock(now)
+        return claims
 
     def save(
         self,
@@ -272,22 +323,10 @@ class EntitlementLeaseStore:
             device_id=self._device_id,
             now=now,
         )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.",
-            suffix=".tmp",
-            dir=self.path.parent,
-        )
-        temporary_path = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(token)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, self.path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+        self._advance_clock(now)
+        _write_atomic(self.path, token)
         return claims
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
+        self.clock_path.unlink(missing_ok=True)

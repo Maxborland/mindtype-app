@@ -54,6 +54,15 @@ class RefreshTokenStore(Protocol):
     def clear(self, device_id: str) -> None: ...
 
 
+class EntitlementLeaseInstaller(Protocol):
+    def __call__(
+        self,
+        token: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> EntitlementClaims: ...
+
+
 class KeyringRefreshTokenStore:
     """Store refresh tokens only in the OS credential backend."""
 
@@ -356,11 +365,13 @@ class CloudSessionManager:
         *,
         client: LicenseSessionClient,
         lease_store: EntitlementLeaseStore,
+        install_lease: EntitlementLeaseInstaller,
         refresh_store: RefreshTokenStore,
         device_id: str,
     ) -> None:
         self.client = client
         self.lease_store = lease_store
+        self.install_lease = install_lease
         self.refresh_store = refresh_store
         self.device_id = device_id
         self._access_token: Optional[str] = None
@@ -441,7 +452,7 @@ class CloudSessionManager:
 
         self.refresh_store.save(self.device_id, session.refresh_token)
         try:
-            claims = self.lease_store.save(
+            claims = self.install_lease(
                 session.entitlement_lease,
                 now=checked_at,
             )

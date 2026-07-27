@@ -4,6 +4,7 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -120,6 +121,7 @@ def session_manager(
     return CloudSessionManager(
         client=client,
         lease_store=lease_store,
+        install_lease=lease_store.save,
         refresh_store=refresh_store,
         device_id=device_id,
     )
@@ -176,6 +178,69 @@ def test_session_adopts_verified_lease_and_keeps_access_token_in_memory(
     assert "access-token" not in (
         tmp_path / "entitlement.lease"
     ).read_text(encoding="utf-8")
+
+
+def test_session_adoption_runs_license_manager_migration_boundary(
+    tmp_path: Path,
+) -> None:
+    from app.licensing.entitlement import EntitlementLeaseVerifier
+    from app.licensing.license_manager import LicenseManager
+    from app.licensing.session import CloudSessionManager, LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    public = private_key.public_key().public_bytes(
+        Encoding.Raw,
+        PublicFormat.Raw,
+    )
+    data_dir = tmp_path / "MindType"
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        license_manager = LicenseManager(
+            lease_verifier=EntitlementLeaseVerifier(b64url(public))
+        )
+        license_manager._license_data = {
+            "license_key": "ABCDEFGHJKMNPQRS",
+            "validated_at": now.isoformat(),
+        }
+        license_manager._save_license()
+        response = LicenseSession(
+            access_token="access-token",
+            access_expires_at=now + timedelta(minutes=15),
+            refresh_token="refresh-token",
+            entitlement_lease=signed_lease(
+                private_key,
+                device_id=license_manager.get_device_id(),
+                now=now,
+            ),
+            claim_version=1,
+        )
+        manager = CloudSessionManager(
+            client=FakeSessionClient(response=response),
+            lease_store=license_manager.get_entitlement_lease_store(),
+            install_lease=license_manager.install_entitlement_lease,
+            refresh_store=FakeRefreshStore(),
+            device_id=license_manager.get_device_id(),
+        )
+
+        manager.activate(
+            license_key="MT-AAAA-BBBB-CCCC",
+            desktop_version="0.9.3",
+            platform="windows",
+            now=now,
+        )
+
+    assert license_manager._lease_marker_file.is_file()
+    assert license_manager._lease_file.is_file()
+    assert not license_manager._license_file.exists()
 
 
 def test_invalid_lease_rolls_back_refresh_token(tmp_path: Path) -> None:

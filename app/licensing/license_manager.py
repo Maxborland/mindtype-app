@@ -360,14 +360,19 @@ class LicenseManager:
         if callback not in self._deactivation_cleanup:
             self._deactivation_cleanup.append(callback)
 
-    def install_entitlement_lease(self, token: str) -> EntitlementClaims:
+    def install_entitlement_lease(
+        self,
+        token: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> EntitlementClaims:
         """Verify and atomically adopt a server-issued offline lease."""
         if self._lease_store is None:
             raise LeaseValidationError(
                 "ENTITLEMENT_VERIFIER_UNAVAILABLE",
                 "desktop build has no entitlement public key",
             )
-        claims = self._lease_store.save(token)
+        claims = self._lease_store.save(token, now=now)
         self._lease_marker_file.write_text("1", encoding="ascii")
         self._lease_claims = claims
         self._lease_error_code = None
@@ -376,7 +381,13 @@ class LicenseManager:
         return claims
 
     def _refresh_entitlement_lease(self) -> None:
-        if self._lease_store is None or not self._lease_file.exists():
+        if self._lease_store is None:
+            return
+        if not self._lease_file.exists():
+            self._lease_claims = None
+            if self._lease_marker_file.exists():
+                self._license_data = None
+                self._lease_error_code = "ENTITLEMENT_REQUIRED"
             return
         try:
             self._lease_claims = self._lease_store.load()

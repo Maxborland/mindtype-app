@@ -166,6 +166,30 @@ def test_store_verifies_before_replace_and_preserves_last_valid_lease(
     assert store.load().plan == "personal"
 
 
+def test_store_rejects_clock_rollback_after_prior_validation(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    issued_at = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    path = tmp_path / "entitlement.lease"
+    store = EntitlementLeaseStore(path, verifier, device_id="device-123")
+    store.save(
+        _lease(
+            signing_key,
+            issued_at=issued_at,
+            expires_at=issued_at + timedelta(days=7),
+        ),
+        now=issued_at + timedelta(days=2),
+    )
+
+    with pytest.raises(LeaseValidationError) as exc:
+        store.load(now=issued_at + timedelta(hours=1))
+
+    assert exc.value.code == "CLOCK_ROLLBACK"
+    assert store.clock_path.is_file()
+
+
 def test_license_manager_migrates_legacy_cache_to_signed_lease(
     tmp_path,
     signing_key: Ed25519PrivateKey,
@@ -204,6 +228,45 @@ def test_license_manager_migrates_legacy_cache_to_signed_lease(
     assert not manager._license_file.exists()
     assert manager._lease_file.exists()
     assert manager._lease_marker_file.exists()
+
+
+def test_missing_adopted_lease_invalidates_in_memory_claims(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.license_manager import LicenseManager, LicenseStatus
+
+    data_dir = tmp_path / "MindType"
+    now = datetime.now(timezone.utc)
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now,
+                expires_at=now + timedelta(days=7),
+            ),
+            now=now,
+        )
+        assert manager.get_license_info().status is LicenseStatus.VALID
+        manager._lease_file.unlink()
+
+        info = manager.get_license_info()
+
+    assert info.status is LicenseStatus.INVALID
+    assert manager._lease_claims is None
+    assert manager._lease_error_code == "ENTITLEMENT_REQUIRED"
 
 
 def test_online_lease_keeps_legacy_cloud_credential_until_session_cutover(
