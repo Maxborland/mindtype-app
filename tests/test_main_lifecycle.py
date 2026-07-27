@@ -609,6 +609,37 @@ def test_server_rejected_access_token_forces_cloud_session_refresh() -> None:
     )
 
 
+def test_missing_access_token_refresh_reuses_concurrent_session() -> None:
+    from app.main import MainWindow
+
+    session_manager = MagicMock()
+    window = SimpleNamespace(
+        _cloud_session_manager=session_manager,
+        license_manager=MagicMock(),
+    )
+
+    MainWindow._refresh_mindtype_cloud_session(window, None)
+
+    session_manager.refresh_access_token.assert_called_once_with(
+        force=False,
+        rejected_access_token=None,
+    )
+
+
+def test_scheduled_entitlement_renewal_remains_forced() -> None:
+    from app.main import MainWindow
+
+    window = SimpleNamespace(
+        _refresh_mindtype_cloud_session=MagicMock()
+    )
+
+    MainWindow._renew_mindtype_cloud_entitlement(window)
+
+    window._refresh_mindtype_cloud_session.assert_called_once_with(
+        scheduled=True
+    )
+
+
 def test_file_batch_prioritizes_one_persisted_cloud_route() -> None:
     from pathlib import Path
 

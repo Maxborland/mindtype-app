@@ -728,7 +728,7 @@ class MainWindow(QMainWindow):
                     self._cloud_session_manager.deactivate_remote
                 )
                 self.license_manager.set_entitlement_renewer(
-                    self._refresh_mindtype_cloud_session
+                    self._renew_mindtype_cloud_entitlement
                 )
         except Exception:
             logger.exception("MindType Cloud session boundary is unavailable")
@@ -908,6 +908,8 @@ class MainWindow(QMainWindow):
     def _refresh_mindtype_cloud_session(
         self,
         rejected_access_token: Optional[str] = None,
+        *,
+        scheduled: bool = False,
     ) -> None:
         """Refresh or create a short-lived session without persisting access."""
         if self._cloud_session_manager is None:
@@ -918,7 +920,7 @@ class MainWindow(QMainWindow):
 
         try:
             self._cloud_session_manager.refresh_access_token(
-                force=True,
+                force=scheduled or rejected_access_token is not None,
                 rejected_access_token=rejected_access_token,
             )
             return
@@ -948,6 +950,10 @@ class MainWindow(QMainWindow):
             if error.authoritative:
                 self.license_manager.clear_authoritative_cache()
             raise
+
+    def _renew_mindtype_cloud_entitlement(self) -> None:
+        """Force scheduled lease renewal even while access remains valid."""
+        self._refresh_mindtype_cloud_session(scheduled=True)
 
     def _refresh_credits_balance(self) -> None:
         """Refresh credits balance from server."""
