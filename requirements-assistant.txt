@@ -3,4 +3,4 @@
 # Optional wake-word and TTS assistant pack.
 openwakeword>=0.6.0
 edge-tts>=6.1.0
-pydub>=0.25.0
+pydub>=0.25.1
