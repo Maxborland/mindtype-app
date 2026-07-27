@@ -159,8 +159,19 @@ def test_legacy_cloud_jobs_migrate_once_with_backup_and_state_mapping(
 
     assert migrated.get("operation-inflight").status is OperationStatus.RETRYABLE
     assert migrated.get("operation-inflight").progress == 45
-    assert migrated.get("operation-inflight").server_job_ids == {
-        "legacy": "remote-transcription-1"
+    migrated_inflight = migrated.get("operation-inflight")
+    assert migrated_inflight.server_job_ids == {
+        "transcription": "remote-transcription-1"
+    }
+    assert migrated_inflight.route == {
+        "transcription": {
+            "provider": "mindtype_cloud",
+            "model": "auto",
+        },
+        "summary": {
+            "provider": "openrouter",
+            "model": "auto",
+        },
     }
     recovered_completed = migrated.get("operation-completed")
     assert recovered_completed.status is OperationStatus.RETRYABLE

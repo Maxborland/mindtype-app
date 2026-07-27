@@ -1068,6 +1068,60 @@ def test_legacy_retry_is_upgraded_to_spool_and_canonical_route(
     assert original.is_file()
 
 
+def test_legacy_remote_job_resumes_through_current_cloud_executor_slot(
+    tmp_path: Path,
+) -> None:
+    from app.cloud_jobs import CloudJobState, CloudJobStore
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    original = tmp_path / "legacy-cloud.wav"
+    original.write_bytes(b"legacy-cloud-audio")
+    database = tmp_path / "cloud_jobs.sqlite3"
+    legacy = CloudJobStore(database)
+    job = legacy.create_or_get(
+        idempotency_key="legacy-cloud-operation",
+        source_path=original,
+        operation="file_processing",
+        route={"audio": "MindType Cloud"},
+    )
+    legacy.transition(
+        job.job_id,
+        CloudJobState.PROCESSING,
+        remote_job_id="remote-transcription-1",
+    )
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+
+    [task] = coordinator.restore_retryable_file_tasks()
+    resumed = coordinator.prepare_file_task(
+        task,
+        route={
+            "transcription": {
+                "provider": "local",
+                "model": "small",
+            }
+        },
+    )
+
+    assert resumed.status is OperationStatus.RUNNING
+    assert resumed.route == {
+        "transcription": {
+            "provider": "mindtype_cloud",
+            "model": "auto",
+        }
+    }
+    assert resumed.server_job_ids == {
+        "transcription": "remote-transcription-1"
+    }
+    assert resumed.source_asset_path.is_file()
+    assert resumed.source_asset_path != original
+
+
 def test_shutdown_cancellation_stays_recoverable_until_next_start(
     tmp_path: Path,
 ) -> None:

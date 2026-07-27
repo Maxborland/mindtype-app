@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from .data_routes import ProcessingRoute, canonical_processing_route
 from .operation_models import (
     InvalidOperationTransition,
     OperationKind,
@@ -153,11 +154,51 @@ class OperationStore:
             return OperationStatus.RETRYABLE
         return OperationStatus(state)
 
+    @staticmethod
+    def _canonical_legacy_route(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise ValueError("legacy cloud route must be an object")
+        transcription = payload.get("transcription")
+        if isinstance(transcription, Mapping):
+            return dict(payload)
+        return canonical_processing_route(
+            ProcessingRoute(
+                audio=str(payload.get("audio") or "Local"),
+                diarization=str(payload.get("diarization") or "Off"),
+                summary=str(payload.get("summary") or "Off"),
+            ),
+            {},
+        )
+
+    @staticmethod
+    def _legacy_remote_key(route: Mapping[str, Any]) -> Optional[str]:
+        transcription = route.get("transcription")
+        if (
+            isinstance(transcription, Mapping)
+            and transcription.get("provider") == "mindtype_cloud"
+        ):
+            return "transcription"
+        summary = route.get("summary")
+        if (
+            isinstance(summary, Mapping)
+            and summary.get("provider") == "mindtype_cloud"
+        ):
+            return "summary"
+        return None
+
     def _migrate_legacy_cloud_jobs(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("SELECT * FROM cloud_jobs").fetchall()
         for row in rows:
+            route = self._canonical_legacy_route(
+                json.loads(row["route_json"])
+            )
             remote_job_id = row["remote_job_id"]
-            server_job_ids = {"legacy": remote_job_id} if remote_job_id else {}
+            remote_key = self._legacy_remote_key(route)
+            server_job_ids = (
+                {remote_key: remote_job_id}
+                if remote_job_id and remote_key
+                else {}
+            )
             status = self._legacy_status(row["state"])
             stage = self._legacy_stage(row["state"])
             last_error = row["last_error"]
@@ -169,6 +210,16 @@ class OperationStore:
                 )
                 stage = OperationStage.TRANSCRIBE
                 last_error = "LEGACY_RESULT_REQUIRES_RECOVERY"
+            if remote_key == "transcription":
+                stage = OperationStage.TRANSCRIBE
+            elif remote_key == "summary":
+                stage = OperationStage.SUMMARIZE
+            elif remote_job_id and status not in {
+                OperationStatus.FAILED,
+                OperationStatus.CANCELLED,
+            }:
+                status = OperationStatus.FAILED
+                last_error = "LEGACY_REMOTE_JOB_UNSUPPORTED"
             connection.execute(
                 """
                 INSERT OR IGNORE INTO operations (
@@ -186,7 +237,11 @@ class OperationStore:
                     stage.value,
                     row["source_path"],
                     None,
-                    row["route_json"],
+                    json.dumps(
+                        route,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     json.dumps(server_job_ids, sort_keys=True),
                     None,
                     row["attempt_count"],
