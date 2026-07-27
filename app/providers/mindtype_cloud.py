@@ -1412,6 +1412,8 @@ class MindTypeCloudExecutor:
             return self.coordinator.finish_cancel(operation_id)
         state = str(response.get("state") or "")
         if state == "cancelled":
+            if summary_id and transcription_id:
+                self.client.acknowledge_transcription(transcription_id)
             return self.coordinator.finish_cancel(operation_id)
         if state in {
             "awaiting_upload",

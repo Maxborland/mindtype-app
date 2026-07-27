@@ -8,6 +8,7 @@
 """
 
 import tempfile
+import wave
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -15,12 +16,38 @@ import pytest
 
 
 def test_windows_ga_media_limit_rejects_more_than_eight_hours() -> None:
-    from app.media_io import MediaDurationTooLong, enforce_media_duration_limit
+    from app.media_io import (
+        MediaDurationTooLong,
+        MediaDurationUnavailable,
+        enforce_media_duration_limit,
+    )
 
     enforce_media_duration_limit(8 * 60 * 60)
 
+    with pytest.raises(MediaDurationUnavailable, match="measured"):
+        enforce_media_duration_limit(0)
     with pytest.raises(MediaDurationTooLong, match="8 hours"):
         enforce_media_duration_limit(8 * 60 * 60 + 0.001)
+
+
+def test_duration_uses_bundled_soundfile_when_ffprobe_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.media_io import get_file_duration
+
+    source = tmp_path / "duration.wav"
+    with wave.open(str(source), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16_000)
+        audio.writeframes(b"\0\0" * 8_000)
+    monkeypatch.setattr(
+        "app.media_io.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    assert get_file_duration(source) == pytest.approx(0.5)
 
 
 class TestIsSupportedFile:

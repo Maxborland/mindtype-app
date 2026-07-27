@@ -83,6 +83,7 @@ from .file_transcriber import (
     PostProcessOptions,
 )
 from .media_io import (
+    MediaDurationUnavailable,
     MediaDurationTooLong,
     enforce_media_duration_limit,
     get_file_duration,
@@ -5125,19 +5126,16 @@ class MainWindow(QMainWindow):
                 )
                 enforce_media_duration_limit(duration_seconds)
                 estimated_seconds += duration_seconds
-            except MediaDurationTooLong as exc:
+            except (
+                MediaDurationTooLong,
+                MediaDurationUnavailable,
+            ) as exc:
                 QMessageBox.warning(
                     self,
                     self._t("error"),
                     f"{task.file_name}: {exc}",
                 )
                 return
-            except Exception as exc:
-                logger.warning(
-                    "Could not estimate duration for %s: %s",
-                    task.file_path,
-                    exc,
-                )
         has_access, _ = self.license_manager.check_transcription_entitlement(
             required_seconds=estimated_seconds,
         )

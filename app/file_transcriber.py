@@ -51,6 +51,7 @@ from .media_io import (
     AUDIO_EXTENSIONS,
     VIDEO_EXTENSIONS,
     ALL_EXTENSIONS,
+    enforce_media_duration_limit,
     is_supported_file,
     get_file_duration,
     extract_audio_from_video,
@@ -392,6 +393,7 @@ class FileTranscriptionQueue:
 
             # Получаем длительность
             duration = get_file_duration(processing_path)
+            enforce_media_duration_limit(duration)
             if finish_cancelled():
                 return
 

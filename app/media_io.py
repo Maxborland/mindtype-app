@@ -6,6 +6,7 @@
 """
 
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -26,7 +27,15 @@ class MediaDurationTooLong(ValueError):
     """Raised before processing media outside the Windows GA limit."""
 
 
+class MediaDurationUnavailable(ValueError):
+    """Raised when the GA duration and entitlement gates cannot be enforced."""
+
+
 def enforce_media_duration_limit(duration_seconds: float) -> None:
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise MediaDurationUnavailable(
+            "media duration could not be measured safely"
+        )
     if duration_seconds > MAX_MEDIA_DURATION_SECONDS:
         raise MediaDurationTooLong(
             "media duration exceeds the 8 hours Windows GA limit"
@@ -41,7 +50,8 @@ def is_supported_file(path: Path) -> bool:
 def get_file_duration(file_path: Path) -> float:
     """
     Получить длительность медиафайла в секундах.
-    Использует ffprobe если доступен, иначе возвращает 0.
+    Uses ffprobe, bundled SoundFile, or optional PyAV and fails closed when
+    none of them can measure a positive finite duration.
     """
     try:
         # Пробуем использовать ffprobe
@@ -57,8 +67,22 @@ def get_file_duration(file_path: Path) -> float:
             timeout=30
         )
         if result.returncode == 0:
-            return float(result.stdout.strip())
+            duration = float(result.stdout.strip())
+            if math.isfinite(duration) and duration > 0:
+                return duration
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
+
+    # SoundFile is part of the lightweight Windows base runtime and covers
+    # WAV, FLAC, OGG and the codecs available through bundled libsndfile.
+    try:
+        import soundfile
+
+        info = soundfile.info(str(file_path))
+        duration = float(info.duration)
+        if math.isfinite(duration) and duration > 0:
+            return duration
+    except Exception:
         pass
 
     # Пробуем PyAV как альтернативу
@@ -66,11 +90,15 @@ def get_file_duration(file_path: Path) -> float:
         import av
         with av.open(str(file_path)) as container:
             if container.duration:
-                return container.duration / 1000000.0  # microseconds to seconds
+                duration = container.duration / 1000000.0
+                if math.isfinite(duration) and duration > 0:
+                    return duration
     except Exception:
         pass
 
-    return 0.0
+    raise MediaDurationUnavailable(
+        "media duration could not be measured safely"
+    )
 
 
 def extract_audio_from_video(video_path: Path, output_path: Optional[Path] = None) -> Path:
