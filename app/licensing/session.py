@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Protocol
@@ -364,15 +365,19 @@ class CloudSessionManager:
         self.device_id = device_id
         self._access_token: Optional[str] = None
         self._access_expires_at: Optional[datetime] = None
+        self._claims: Optional[EntitlementClaims] = None
+        self._session_lock = threading.RLock()
 
     def _clear_memory_and_lease(self) -> None:
         self._access_token = None
         self._access_expires_at = None
+        self._claims = None
         self.lease_store.clear()
 
     def clear(self) -> None:
-        self._clear_memory_and_lease()
-        self.refresh_store.clear(self.device_id)
+        with self._session_lock:
+            self._clear_memory_and_lease()
+            self.refresh_store.clear(self.device_id)
 
     def activate(
         self,
@@ -387,20 +392,21 @@ class CloudSessionManager:
             checked_at = checked_at.replace(tzinfo=timezone.utc)
         else:
             checked_at = checked_at.astimezone(timezone.utc)
-        try:
-            session = self.client.create_session(
-                license_key=license_key,
-                device_id_hash=self.device_id,
-                desktop_version=desktop_version,
-                platform=platform,
-            )
-        except LicenseSessionError as exc:
-            if exc.authoritative:
-                self._clear_memory_and_lease()
-                self.refresh_store.clear(self.device_id)
-            raise
+        with self._session_lock:
+            try:
+                session = self.client.create_session(
+                    license_key=license_key,
+                    device_id_hash=self.device_id,
+                    desktop_version=desktop_version,
+                    platform=platform,
+                )
+            except LicenseSessionError as exc:
+                if exc.authoritative:
+                    self._clear_memory_and_lease()
+                    self.refresh_store.clear(self.device_id)
+                raise
 
-        return self._adopt_session(session, checked_at=checked_at)
+            return self._adopt_session(session, checked_at=checked_at)
 
     def _adopt_session(
         self,
@@ -429,6 +435,7 @@ class CloudSessionManager:
             raise
         self._access_token = session.access_token
         self._access_expires_at = expires_at
+        self._claims = claims
         return claims
 
     def refresh_access_token(
@@ -441,43 +448,53 @@ class CloudSessionManager:
             checked_at = checked_at.replace(tzinfo=timezone.utc)
         else:
             checked_at = checked_at.astimezone(timezone.utc)
-        refresh_token = self.refresh_store.load(self.device_id)
-        if not refresh_token:
-            self._clear_memory_and_lease()
-            raise LicenseSessionError(
-                "AUTH_REQUIRED",
-                "cloud refresh token is missing",
-                retryable=False,
-                authoritative=True,
-            )
-        try:
-            session = self.client.refresh_session(
-                refresh_token=refresh_token,
-            )
-        except LicenseSessionError as exc:
-            if exc.authoritative:
+        with self._session_lock:
+            if (
+                self._access_token is not None
+                and self._access_expires_at is not None
+                and self._access_expires_at
+                > checked_at + timedelta(seconds=30)
+                and self._claims is not None
+            ):
+                return self._claims
+            refresh_token = self.refresh_store.load(self.device_id)
+            if not refresh_token:
                 self._clear_memory_and_lease()
-                self.refresh_store.clear(self.device_id)
-            raise
-        return self._adopt_session(session, checked_at=checked_at)
+                raise LicenseSessionError(
+                    "AUTH_REQUIRED",
+                    "cloud refresh token is missing",
+                    retryable=False,
+                    authoritative=True,
+                )
+            try:
+                session = self.client.refresh_session(
+                    refresh_token=refresh_token,
+                )
+            except LicenseSessionError as exc:
+                if exc.authoritative:
+                    self._clear_memory_and_lease()
+                    self.refresh_store.clear(self.device_id)
+                raise
+            return self._adopt_session(session, checked_at=checked_at)
 
     def access_token(
         self,
         *,
         now: Optional[datetime] = None,
     ) -> Optional[str]:
-        if self._access_token is None or self._access_expires_at is None:
-            return None
-        checked_at = now or datetime.now(timezone.utc)
-        if checked_at.tzinfo is None:
-            checked_at = checked_at.replace(tzinfo=timezone.utc)
-        else:
-            checked_at = checked_at.astimezone(timezone.utc)
-        if self._access_expires_at <= checked_at + timedelta(seconds=30):
-            self._access_token = None
-            self._access_expires_at = None
-            return None
-        return self._access_token
+        with self._session_lock:
+            if self._access_token is None or self._access_expires_at is None:
+                return None
+            checked_at = now or datetime.now(timezone.utc)
+            if checked_at.tzinfo is None:
+                checked_at = checked_at.replace(tzinfo=timezone.utc)
+            else:
+                checked_at = checked_at.astimezone(timezone.utc)
+            if self._access_expires_at <= checked_at + timedelta(seconds=30):
+                self._access_token = None
+                self._access_expires_at = None
+                return None
+            return self._access_token
 
 
 __all__ = [

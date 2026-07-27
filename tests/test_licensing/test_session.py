@@ -530,3 +530,60 @@ def test_manager_refresh_rotates_credential_and_access_token(
     assert client.calls == [{"refresh_token": "old-refresh"}]
     assert refresh_store.token == "new-refresh"
     assert manager.access_token(now=now) == "new-access"
+
+
+def test_concurrent_refreshes_share_one_rotated_session(
+    tmp_path: Path,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    refresh_store = FakeRefreshStore()
+    refresh_store.token = "old-refresh"
+    response = LicenseSession(
+        access_token="new-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="new-refresh",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    entered = Event()
+    release = Event()
+    client = FakeSessionClient()
+
+    def refresh_session(**request):
+        client.calls.append(request)
+        entered.set()
+        assert release.wait(timeout=2)
+        return response
+
+    client.refresh_session = refresh_session
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(manager.refresh_access_token, now=now)
+        assert entered.wait(timeout=2)
+        second = executor.submit(manager.refresh_access_token, now=now)
+        release.set()
+        first_claims = first.result(timeout=2)
+        second_claims = second.result(timeout=2)
+
+    assert client.calls == [{"refresh_token": "old-refresh"}]
+    assert first_claims == second_claims
+    assert refresh_store.token == "new-refresh"
+    assert manager.access_token(now=now) == "new-access"

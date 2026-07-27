@@ -3574,23 +3574,48 @@ class MainWindow(QMainWindow):
             return
 
         operation_token = self._dictation.operation_token
-        if not self._dictation.begin_transcription(
-            operation_token,
-            auto_insert=bool(
-                self.config.config.get("auto_insert_enabled", True)
-            ),
-        ):
-            return
+        auto_insert = bool(
+            self.config.config.get("auto_insert_enabled", True)
+        )
 
         try:
             capture = self.audio_session.stop()
         except Exception as exc:
-            self._dictation.finish_transcription(
-                operation_token,
-                succeeded=False,
-            )
+            if (
+                not self.audio_session.recording
+                and self._dictation.begin_transcription(
+                    operation_token,
+                    auto_insert=auto_insert,
+                )
+            ):
+                self._dictation.finish_transcription(
+                    operation_token,
+                    succeeded=False,
+                )
             self._add_journal_entry("error", "error", text=str(exc), is_translatable=True)
             self.overlay.show_error(self._t("error"))
+            return
+
+        if not capture.tracks:
+            if self.audio_session.recording:
+                self.overlay.show_processing()
+                return
+            if self._dictation.begin_transcription(
+                operation_token,
+                auto_insert=auto_insert,
+            ):
+                self._dictation.finish_transcription(
+                    operation_token,
+                    succeeded=False,
+                )
+            self._add_journal_entry("error", "error", text="no_audio", is_translatable=True)
+            self.overlay.show_error(self._t("error"))
+            return
+
+        if not self._dictation.begin_transcription(
+            operation_token,
+            auto_insert=auto_insert,
+        ):
             return
 
         duration_seconds = 0.0
@@ -3604,15 +3629,6 @@ class MainWindow(QMainWindow):
 
         self.overlay.show_processing()
         self._announce_status(self._t("transcribing"))
-
-        if not capture.tracks:
-            self._add_journal_entry("error", "error", text="no_audio", is_translatable=True)
-            self.overlay.show_error(self._t("error"))
-            self._dictation.finish_transcription(
-                operation_token,
-                succeeded=False,
-            )
-            return
 
         if self._operation_coordinator is None:
             self._dictation.finish_transcription(
@@ -5059,17 +5075,18 @@ class MainWindow(QMainWindow):
                         task.warning = (
                             f"{task.warning}\n" if task.warning else ""
                         ) + f"Export failed: {export_exc}"
-                    try:
-                        self._operation_coordinator.acknowledge_result(
-                            operation.operation_id
-                        )
-                    except Exception as acknowledgement_exc:
-                        logger.exception(
-                            "Canonical result was saved, but source cleanup failed"
-                        )
-                        task.warning = (
-                            f"{task.warning}\n" if task.warning else ""
-                        ) + f"Local cleanup failed: {acknowledgement_exc}"
+                    else:
+                        try:
+                            self._operation_coordinator.acknowledge_result(
+                                operation.operation_id
+                            )
+                        except Exception as acknowledgement_exc:
+                            logger.exception(
+                                "Canonical result was saved, but source cleanup failed"
+                            )
+                            task.warning = (
+                                f"{task.warning}\n" if task.warning else ""
+                            ) + f"Local cleanup failed: {acknowledgement_exc}"
             except Exception as exc:
                 logger.exception("Could not persist durable file completion")
                 task.status = FileStatus.ERROR
