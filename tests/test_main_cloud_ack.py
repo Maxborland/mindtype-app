@@ -102,10 +102,17 @@ def test_main_schedules_acknowledgement_without_running_it_on_gui_thread(
         _cloud_executor=MagicMock(),
         _add_journal_entry=MagicMock(),
     )
+    window._operation_coordinator.store.get.return_value = (
+        SimpleNamespace(server_job_ids={"transcription": "job-1"})
+    )
 
     MainWindow._acknowledge_completed_operation(window, "operation-4")
 
     assert len(created) == 1
     assert created[0].started is True
     assert created[0] in window._acknowledgement_workers
-    window._init_mindtype_cloud.assert_not_called()
+    window._init_mindtype_cloud.assert_called_once_with()
+
+    created[0].acknowledge()
+
+    window._init_mindtype_cloud.assert_called_once_with()

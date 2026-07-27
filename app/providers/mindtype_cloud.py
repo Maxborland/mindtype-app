@@ -906,7 +906,6 @@ class MindTypeCloudExecutor:
         if operation is None:
             raise KeyError(operation_id)
         summary_id = operation.server_job_ids.get("summary")
-        transcription_id = operation.server_job_ids.get("transcription")
         if not summary_id:
             raise CloudAPIError(
                 CloudErrorCode.SCHEMA_UNSUPPORTED,
@@ -922,9 +921,6 @@ class MindTypeCloudExecutor:
             operation_id,
             result,
         )
-        self.client.acknowledge_summary(summary_id)
-        if transcription_id:
-            self.client.acknowledge_transcription(transcription_id)
         return completed
 
     def _handle_job(
@@ -1050,7 +1046,6 @@ class MindTypeCloudExecutor:
             operation_id,
             result,
         )
-        self.client.acknowledge_transcription(job_id)
         return completed
 
     def advance_transcription(

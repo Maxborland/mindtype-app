@@ -3544,6 +3544,15 @@ class MainWindow(QMainWindow):
         """Начать запись с показом overlay."""
         if self.audio_session.recording:
             return
+        if self._operation_coordinator is None:
+            self._add_journal_entry(
+                "error",
+                "error",
+                text="Durable operation storage is unavailable.",
+                is_translatable=False,
+            )
+            self.overlay.show_error(self._t("error"))
+            return
         info = self.license_manager.get_license_info()
         quota_seconds = (
             max(0.0, info.trial_remaining_minutes * 60)
@@ -3707,6 +3716,14 @@ class MainWindow(QMainWindow):
                 route=route,
             )
             if capture.interrupted:
+                if (
+                    operation.operation_id
+                    not in self._retryable_dictation_ids
+                ):
+                    self._retryable_dictation_ids.append(
+                        operation.operation_id
+                    )
+                self._update_recovered_dictation_actions()
                 self._dictation.finish_transcription(
                     operation_token,
                     succeeded=False,
@@ -5548,16 +5565,20 @@ class MainWindow(QMainWindow):
         if self._operation_coordinator is None:
             raise RuntimeError("Durable operation storage is unavailable")
 
-        def cloud_executor():
+        operation = self._operation_coordinator.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        captured_executor = None
+        if operation.server_job_ids:
             self._init_mindtype_cloud()
-            return self._cloud_executor
+            captured_executor = self._cloud_executor
 
         worker = OperationAcknowledgementWorker(
             operation_id,
             lambda: acknowledge_completed_operation(
                 self._operation_coordinator,
                 operation_id,
-                cloud_executor_factory=cloud_executor,
+                cloud_executor_factory=lambda: captured_executor,
             ),
         )
         self._acknowledgement_workers.add(worker)

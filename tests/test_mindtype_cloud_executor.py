@@ -238,13 +238,12 @@ def test_success_is_saved_and_source_waits_for_projection_ack(
     )
     assert saved_result["source"]["display_name"] == "meeting.wav"
     assert operation.source_asset_path.is_file()
-    assert client.calls[-2:] == [
+    assert client.calls[-1:] == [
         (
             "get_transcription_result",
             "job-1",
             operation.operation_id,
         ),
-        ("acknowledge_transcription", "job-1"),
     ]
 
     acknowledged = executor.acknowledge_completed(operation.operation_id)
@@ -278,12 +277,20 @@ def test_failed_ack_keeps_completed_result_and_source_for_retry(
         coordinator=coordinator,
     )
 
-    with pytest.raises(CloudAPIError):
-        executor.advance_transcription(operation.operation_id, options={})
+    completed = executor.advance_transcription(
+        operation.operation_id,
+        options={},
+    )
 
     saved = coordinator.store.get(operation.operation_id)
+    assert completed.status is OperationStatus.COMPLETED
     assert saved.status is OperationStatus.COMPLETED
     assert saved.canonical_result_path.is_file()
+    assert saved.source_asset_path.is_file()
+
+    with pytest.raises(CloudAPIError):
+        executor.acknowledge_completed(operation.operation_id)
+
     assert saved.source_asset_path.is_file()
 
     retried = executor.acknowledge_completed(operation.operation_id)
@@ -540,12 +547,14 @@ def test_summary_remains_durable_between_transcription_and_final_ack(
     assert saved_result["source"]["display_name"] == "meeting.wav"
     assert completed.source_asset_path.is_file()
     assert ("get_summary", "summary-1") in client.calls
-    assert ("acknowledge_summary", "summary-1") in client.calls
-    assert ("acknowledge_transcription", "job-1") in client.calls
+    assert ("acknowledge_summary", "summary-1") not in client.calls
+    assert ("acknowledge_transcription", "job-1") not in client.calls
 
     acknowledged = executor.acknowledge_completed(operation.operation_id)
 
     assert acknowledged.source_asset_path.exists() is False
+    assert ("acknowledge_summary", "summary-1") in client.calls
+    assert ("acknowledge_transcription", "job-1") in client.calls
 
 
 def test_local_transcript_can_use_durable_cloud_summary_without_cloud_stt(
@@ -625,7 +634,11 @@ def test_local_transcript_can_use_durable_cloud_summary_without_cloud_stt(
     )
     assert saved["route"]["transcription"]["provider"] == "local"
     assert saved["summary"]["generated"] is True
-    assert ("acknowledge_summary", "summary-1") in client.calls
+    assert ("acknowledge_summary", "summary-1") not in client.calls
     assert not any(
         call[0] == "acknowledge_transcription" for call in client.calls
     )
+
+    executor.acknowledge_completed(operation.operation_id)
+
+    assert ("acknowledge_summary", "summary-1") in client.calls

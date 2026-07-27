@@ -2,6 +2,91 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
+def test_recording_is_rejected_before_capture_without_durable_storage() -> None:
+    from app.main import MainWindow
+
+    window = SimpleNamespace(
+        audio_session=SimpleNamespace(
+            recording=False,
+            start=MagicMock(),
+        ),
+        _operation_coordinator=None,
+        _add_journal_entry=MagicMock(),
+        overlay=MagicMock(),
+        _t=lambda key: key,
+    )
+
+    MainWindow._start_recording_with_overlay(window)
+
+    window.audio_session.start.assert_not_called()
+    window.overlay.show_error.assert_called_once_with("error")
+
+
+def test_interrupted_capture_is_immediately_exposed_for_retry(
+    tmp_path,
+) -> None:
+    from app.audio_sources import (
+        AudioCaptureResult,
+        AudioCaptureStatus,
+        AudioSourceKind,
+        MultiTrackCapture,
+        RecordedTrack,
+    )
+    from app.dictation_state import DictationState
+    from app.main import MainWindow
+
+    source = tmp_path / "partial.wav"
+    source.write_bytes(b"partial")
+    capture = MultiTrackCapture(
+        results=(
+            AudioCaptureResult(
+                status=AudioCaptureStatus.INTERRUPTED,
+                track=RecordedTrack(
+                    source=AudioSourceKind.MICROPHONE,
+                    path=source,
+                    sample_rate=16_000,
+                    channels=1,
+                    started_at_monotonic_ns=1,
+                    ended_at_monotonic_ns=2,
+                ),
+                error="device disconnected",
+            ),
+        )
+    )
+    state = DictationState()
+    state.begin_recording(started_at=1.0)
+    coordinator = MagicMock()
+    coordinator.adopt_multitrack_dictation.return_value = SimpleNamespace(
+        operation_id="retry-operation"
+    )
+    window = SimpleNamespace(
+        audio_session=SimpleNamespace(
+            recording=True,
+            stop=MagicMock(return_value=capture),
+        ),
+        _dictation=state,
+        config=SimpleNamespace(
+            config={
+                "auto_insert_enabled": True,
+                "transcriber_backend": "whisper_cpp",
+            }
+        ),
+        license_manager=MagicMock(),
+        overlay=MagicMock(),
+        _announce_status=MagicMock(),
+        _operation_coordinator=coordinator,
+        _retryable_dictation_ids=[],
+        _update_recovered_dictation_actions=MagicMock(),
+        _add_journal_entry=MagicMock(),
+        _t=lambda key: key,
+    )
+
+    MainWindow._stop_recording_with_auto_insert(window)
+
+    assert window._retryable_dictation_ids == ["retry-operation"]
+    window._update_recovered_dictation_actions.assert_called_once_with()
+
+
 def test_unfinished_multitrack_stop_can_be_retried() -> None:
     from app.audio_sources import MultiTrackCapture
     from app.dictation_state import DictationPhase, DictationState
