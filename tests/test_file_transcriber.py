@@ -53,10 +53,14 @@ def test_duration_uses_bundled_soundfile_when_ffprobe_is_unavailable(
 class TestIsSupportedFile:
     """Тесты для is_supported_file."""
 
-    def test_is_supported_file_audio(self):
+    def test_is_supported_file_audio(self, monkeypatch):
         """is_supported_file должен возвращать True для аудио файлов."""
         from app.file_transcriber import is_supported_file
 
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: True,
+        )
         audio_files = [
             Path("test.mp3"),
             Path("test.wav"),
@@ -71,10 +75,14 @@ class TestIsSupportedFile:
         for audio_file in audio_files:
             assert is_supported_file(audio_file) is True, f"Should support {audio_file.suffix}"
 
-    def test_is_supported_file_video(self):
+    def test_is_supported_file_video(self, monkeypatch):
         """is_supported_file должен возвращать True для видео файлов."""
         from app.file_transcriber import is_supported_file
 
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: True,
+        )
         video_files = [
             Path("test.mp4"),
             Path("test.mkv"),
@@ -105,13 +113,44 @@ class TestIsSupportedFile:
         for unsupported_file in unsupported_files:
             assert is_supported_file(unsupported_file) is False, f"Should not support {unsupported_file.suffix}"
 
-    def test_is_supported_file_case_insensitive(self):
+    def test_is_supported_file_case_insensitive(self, monkeypatch):
         """is_supported_file должен быть case-insensitive."""
         from app.file_transcriber import is_supported_file
 
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: True,
+        )
         assert is_supported_file(Path("test.MP3")) is True
         assert is_supported_file(Path("test.Mp4")) is True
         assert is_supported_file(Path("test.WAV")) is True
+
+    def test_base_runtime_does_not_advertise_unprobeable_media(
+        self,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            is_supported_file,
+            supported_extensions,
+        )
+
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: False,
+        )
+
+        assert is_supported_file(Path("meeting.wav")) is True
+        assert is_supported_file(Path("meeting.mp3")) is True
+        assert is_supported_file(Path("meeting.mp4")) is False
+        assert is_supported_file(Path("meeting.m4a")) is False
+        assert not (supported_extensions() & {
+            ".mp4",
+            ".mkv",
+            ".mov",
+            ".m4a",
+            ".aac",
+            ".wma",
+        })
 
 
 class TestFileTask:

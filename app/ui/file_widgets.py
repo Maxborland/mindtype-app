@@ -34,8 +34,8 @@ from PyQt6.QtGui import (
 from ..file_transcriber import (
     FileTask,
     FileStatus,
-    ALL_EXTENSIONS,
     is_supported_file,
+    supported_extensions,
 )
 from .icons import STATUS_OK, STATUS_ERROR, STATUS_PENDING, STATUS_PROGRESS
 from .tokens import COLORS, SPACING, TYPOGRAPHY
@@ -112,7 +112,7 @@ class DropZoneWidget(QFrame):
         layout.addWidget(self._sub_label)
 
         # Форматы
-        self._formats_label = QLabel(self._translate("supported_formats"))
+        self._formats_label = QLabel(self._supported_formats_text())
         self._formats_label.setObjectName("small")
         self._formats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._formats_label.setWordWrap(True)
@@ -121,7 +121,14 @@ class DropZoneWidget(QFrame):
     def _update_texts(self) -> None:
         self._main_label.setText(self._translate("drag_drop_files"))
         self._sub_label.setText(self._translate("or_click_to_select"))
-        self._formats_label.setText(self._translate("supported_formats"))
+        self._formats_label.setText(self._supported_formats_text())
+
+    @staticmethod
+    def _supported_formats_text() -> str:
+        return ", ".join(
+            extension.removeprefix(".").upper()
+            for extension in sorted(supported_extensions())
+        )
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -161,7 +168,7 @@ class DropZoneWidget(QFrame):
                 files.append(path)
             elif path.is_dir():
                 # Рекурсивно ищем файлы в папке
-                for ext in ALL_EXTENSIONS:
+                for ext in supported_extensions():
                     files.extend(path.rglob(f"*{ext}"))
 
         if files:

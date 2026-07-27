@@ -53,6 +53,7 @@ from .media_io import (
     ALL_EXTENSIONS,
     enforce_media_duration_limit,
     is_supported_file,
+    supported_extensions,
     get_file_duration,
     extract_audio_from_video,
 )

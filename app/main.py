@@ -76,8 +76,8 @@ from .file_transcriber import (
     FileTranscriptionQueue,
     FileTask,
     FileStatus,
-    ALL_EXTENSIONS,
     is_supported_file,
+    supported_extensions,
     TranscribeOptions,
     SummaryOptions,
     PostProcessOptions,
@@ -4600,7 +4600,9 @@ class MainWindow(QMainWindow):
 
     def _on_select_files_clicked(self) -> None:
         """Открыть диалог выбора файлов."""
-        extensions = " ".join(f"*{ext}" for ext in ALL_EXTENSIONS)
+        extensions = " ".join(
+            f"*{ext}" for ext in sorted(supported_extensions())
+        )
         files, _ = QFileDialog.getOpenFileNames(
             self,
             self._t("select_files"),

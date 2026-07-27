@@ -6,10 +6,12 @@
 """
 
 import logging
+import importlib.util
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -20,6 +22,13 @@ logger = logging.getLogger("file_transcriber")
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus'}
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.flv', '.m4v'}
 ALL_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+SOUNDFILE_AUDIO_EXTENSIONS = {
+    '.mp3',
+    '.wav',
+    '.flac',
+    '.ogg',
+    '.opus',
+}
 MAX_MEDIA_DURATION_SECONDS = 8 * 60 * 60
 
 
@@ -42,9 +51,45 @@ def enforce_media_duration_limit(duration_seconds: float) -> None:
         )
 
 
+def _media_binary(name: str) -> Optional[Path]:
+    executable = f"{name}.exe" if sys.platform == "win32" else name
+    discovered = shutil.which(executable)
+    if discovered:
+        return Path(discovered)
+    roots = [
+        Path(getattr(sys, "_MEIPASS", "")),
+        Path(sys.executable).resolve().parent / "_internal",
+        Path(__file__).resolve().parents[1],
+    ]
+    for root in roots:
+        if not str(root):
+            continue
+        candidate = root / "bin" / "win-x64" / executable
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def full_media_probe_available() -> bool:
+    """Whether the current runtime can safely inspect advertised video."""
+    if _media_binary("ffprobe") is not None:
+        return True
+    try:
+        return importlib.util.find_spec("av") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def supported_extensions() -> set[str]:
+    """Formats that this concrete installation can duration-gate."""
+    if full_media_probe_available():
+        return set(ALL_EXTENSIONS)
+    return set(SOUNDFILE_AUDIO_EXTENSIONS)
+
+
 def is_supported_file(path: Path) -> bool:
-    """Проверить, поддерживается ли формат файла."""
-    return path.suffix.lower() in ALL_EXTENSIONS
+    """Проверить, поддерживается ли формат файла в текущей установке."""
+    return path.suffix.lower() in supported_extensions()
 
 
 def get_file_duration(file_path: Path) -> float:
@@ -55,9 +100,12 @@ def get_file_duration(file_path: Path) -> float:
     """
     try:
         # Пробуем использовать ffprobe
+        ffprobe = _media_binary("ffprobe")
+        if ffprobe is None:
+            raise FileNotFoundError("ffprobe is unavailable")
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
+                str(ffprobe), "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(file_path)
@@ -133,7 +181,7 @@ def extract_audio_from_video(video_path: Path, output_path: Optional[Path] = Non
         output_path = Path(tmp_name)
 
     # Пробуем ffmpeg
-    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_path = _media_binary("ffmpeg")
     if ffmpeg_path:
         try:
             result = subprocess.run(
