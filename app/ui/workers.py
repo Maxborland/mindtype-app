@@ -149,10 +149,6 @@ class CloudDictationWorker(QThread):
 
     def cancel(self) -> None:
         self._cancelled = True
-        try:
-            self.executor.cancel(self.operation_id)
-        except Exception:
-            pass
 
     def is_cancelled(self) -> bool:
         return self._cancelled

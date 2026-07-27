@@ -33,6 +33,7 @@ class AudioRecorder:
         self.dtype = "int16"
         self._stream: Optional[sd.RawInputStream] = None
         self._writer_thread: Optional[threading.Thread] = None
+        self._writer_stop_requested = False
         self._queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=256)
         self._tmp_path: Optional[Path] = None
         self._running = threading.Event()
@@ -109,6 +110,7 @@ class AudioRecorder:
         self._queue = queue.Queue(maxsize=256)
         self._overflowed.clear()
         self._writer_error = None
+        self._writer_stop_requested = False
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         self._tmp_path = Path(tmp.name)
@@ -184,9 +186,10 @@ class AudioRecorder:
                     if stream_error is None:
                         stream_error = exc
                 self._stream = None
-        if was_running:
+        if self._writer_thread and not self._writer_stop_requested:
             try:
                 self._queue.put(None, timeout=timeout)
+                self._writer_stop_requested = True
             except queue.Full as exc:
                 raise RuntimeError(
                     "Не удалось завершить запись: аудиобуфер переполнен"
@@ -196,6 +199,7 @@ class AudioRecorder:
             if self._writer_thread.is_alive():
                 raise RuntimeError("Не удалось завершить запись: WAV-файл ещё записывается")
             self._writer_thread = None
+            self._writer_stop_requested = False
         path = self._tmp_path
         self._tmp_path = None
         if self._writer_error:

@@ -5,6 +5,8 @@ Unit тесты для модуля audio.py
 используя mocking.
 """
 
+import queue
+
 import numpy as np
 import pytest
 from pathlib import Path
@@ -137,6 +139,28 @@ class TestAudioRecorder:
         assert recorder.stop(timeout=0.01) == wav_path
         assert recorder._writer_thread is None
         assert recorder._tmp_path is None
+
+    def test_full_queue_stop_retries_the_writer_sentinel(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "pending.wav"
+        wav_path.touch()
+        pending_queue = queue.Queue(maxsize=1)
+        pending_queue.put(b"audio")
+        writer = MagicMock()
+        writer.is_alive.return_value = False
+        recorder._tmp_path = wav_path
+        recorder._queue = pending_queue
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+
+        with pytest.raises(RuntimeError, match="аудиобуфер переполнен"):
+            recorder.stop(timeout=0.01)
+
+        assert recorder._writer_stop_requested is False
+        assert pending_queue.get_nowait() == b"audio"
+        assert recorder.stop(timeout=0.01) == wav_path
+        assert recorder._writer_thread is None
 
     @patch('app.audio.sd.RawInputStream')
     def test_start_monitoring_success(self, mock_stream):

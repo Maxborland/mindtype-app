@@ -201,7 +201,7 @@ def test_executor_restart_polls_existing_job_without_upload_or_post(
     assert client.calls == [("get_transcription", "job-existing")]
 
 
-def test_success_is_saved_before_ack_and_then_source_is_cleaned(
+def test_success_is_saved_and_source_waits_for_projection_ack(
     tmp_path: Path,
 ) -> None:
     import json
@@ -237,7 +237,7 @@ def test_success_is_saved_before_ack_and_then_source_is_cleaned(
         completed.canonical_result_path.read_text(encoding="utf-8")
     )
     assert saved_result["source"]["display_name"] == "meeting.wav"
-    assert operation.source_asset_path.exists() is False
+    assert operation.source_asset_path.is_file()
     assert client.calls[-2:] == [
         (
             "get_transcription_result",
@@ -246,6 +246,10 @@ def test_success_is_saved_before_ack_and_then_source_is_cleaned(
         ),
         ("acknowledge_transcription", "job-1"),
     ]
+
+    acknowledged = executor.acknowledge_completed(operation.operation_id)
+
+    assert acknowledged.source_asset_path.exists() is False
 
 
 def test_failed_ack_keeps_completed_result_and_source_for_retry(
@@ -465,10 +469,14 @@ def test_summary_remains_durable_between_transcription_and_final_ack(
         completed.canonical_result_path.read_text(encoding="utf-8")
     )
     assert saved_result["source"]["display_name"] == "meeting.wav"
-    assert completed.source_asset_path.exists() is False
+    assert completed.source_asset_path.is_file()
     assert ("get_summary", "summary-1") in client.calls
     assert ("acknowledge_summary", "summary-1") in client.calls
     assert ("acknowledge_transcription", "job-1") in client.calls
+
+    acknowledged = executor.acknowledge_completed(operation.operation_id)
+
+    assert acknowledged.source_asset_path.exists() is False
 
 
 def test_local_transcript_can_use_durable_cloud_summary_without_cloud_stt(

@@ -1,6 +1,7 @@
 """Lifecycle tests for background workers."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from app.ui.workers import CloudDictationWorker, TranscribeWorker
 
@@ -104,3 +105,24 @@ def test_cloud_dictation_worker_returns_saved_canonical_text(tmp_path):
 
     assert len(finished) == 1
     assert finished[0][1:] == ("ru", 0.94, "")
+
+
+def test_cloud_cancel_only_calls_network_from_worker_thread():
+    executor = MagicMock()
+    worker = CloudDictationWorker(
+        executor,
+        "operation-1",
+        options={},
+        poll_interval_ms=0,
+    )
+    cancelled = []
+    worker.cancelled.connect(lambda: cancelled.append(True))
+
+    worker.cancel()
+
+    executor.cancel.assert_not_called()
+
+    worker.run()
+
+    executor.cancel.assert_called_once_with("operation-1")
+    assert cancelled == [True]

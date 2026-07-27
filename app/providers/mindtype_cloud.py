@@ -924,7 +924,6 @@ class MindTypeCloudExecutor:
         self.client.acknowledge_summary(summary_id)
         if transcription_id:
             self.client.acknowledge_transcription(transcription_id)
-        self.coordinator.acknowledge_result(operation_id)
         return completed
 
     def _handle_job(
@@ -1050,7 +1049,6 @@ class MindTypeCloudExecutor:
             result,
         )
         self.client.acknowledge_transcription(job_id)
-        self.coordinator.acknowledge_result(operation_id)
         return completed
 
     def advance_transcription(

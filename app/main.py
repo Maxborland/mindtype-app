@@ -5077,7 +5077,7 @@ class MainWindow(QMainWindow):
                         ) + f"Export failed: {export_exc}"
                     else:
                         try:
-                            self._operation_coordinator.acknowledge_result(
+                            self._acknowledge_completed_operation(
                                 operation.operation_id
                             )
                         except Exception as acknowledgement_exc:
