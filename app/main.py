@@ -5809,9 +5809,23 @@ class MainWindow(QMainWindow):
     def _prepare_for_full_exit(self) -> None:
         """Preserve cloud jobs and stop every local runtime before exit."""
         self._preserve_cloud_jobs_on_shutdown = True
-        if self._file_queue and self._file_queue.is_running:
-            self._file_queue.stop_for_shutdown()
+        local_file_worker_stopped = True
+        if self._file_queue:
+            stopped = self._file_queue.stop_for_shutdown()
+            if (
+                getattr(
+                    self._file_queue,
+                    "uses_local_transcriber",
+                    True,
+                )
+                and stopped is False
+            ):
+                local_file_worker_stopped = False
         self._cleanup_all()
+        if not local_file_worker_stopped:
+            raise RuntimeError(
+                "Local file transcription did not stop before shutdown"
+            )
 
     def _cleanup_all(self) -> None:
         """Остановить все фоновые потоки и освободить ресурсы."""
@@ -5843,13 +5857,28 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.exception("Не удалось остановить transcriber backend")
         if self._transcribe_thread and self._transcribe_thread.isRunning():
-            cancel_worker = getattr(self._transcribe_thread, "cancel", None)
-            if callable(cancel_worker):
+            preserve_cloud_dictation = (
+                self._preserve_cloud_jobs_on_shutdown
+                and isinstance(
+                    self._transcribe_thread,
+                    CloudDictationWorker,
+                )
+            )
+            stop_worker = getattr(
+                self._transcribe_thread,
+                (
+                    "stop_for_shutdown"
+                    if preserve_cloud_dictation
+                    else "cancel"
+                ),
+                None,
+            )
+            if callable(stop_worker):
                 try:
-                    cancel_worker()
+                    stop_worker()
                 except Exception:
                     logger.exception(
-                        "Could not request dictation worker cancellation"
+                        "Could not stop dictation worker"
                     )
 
         # Останавливаем QThread воркеры

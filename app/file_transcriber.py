@@ -209,12 +209,14 @@ class FileTranscriptionQueue:
 
     def start(self) -> None:
         """Запустить обработку очереди."""
-        if self._running.is_set():
+        if (
+            self._running.is_set()
+            or self._shutdown_requested.is_set()
+        ):
             return
 
         self._running.set()
         self._cancelled.clear()
-        self._shutdown_requested.clear()
 
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
@@ -239,10 +241,28 @@ class FileTranscriptionQueue:
                     self._on_completed(task)
         return cancelled_tasks
 
-    def stop_for_shutdown(self) -> None:
-        """Stop local polling without cancelling durable cloud jobs."""
+    def stop_for_shutdown(self, timeout_seconds: float = 5.0) -> bool:
+        """Stop and join work while preserving any durable cloud job."""
         self._shutdown_requested.set()
         self._running.clear()
+        if self.uses_local_transcriber:
+            cancel_current = getattr(
+                self.transcriber,
+                "cancel_current",
+                None,
+            )
+            if callable(cancel_current):
+                try:
+                    cancel_current()
+                except Exception:
+                    logger.exception(
+                        "Could not stop local transcription for shutdown"
+                    )
+        worker = self._worker_thread
+        if worker is None or worker is threading.current_thread():
+            return True
+        worker.join(max(0.0, float(timeout_seconds)))
+        return not worker.is_alive()
 
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""
@@ -263,6 +283,8 @@ class FileTranscriptionQueue:
                         models_dir=str(self.models_dir),
                     )
                 except Exception as e:
+                    if self._shutdown_requested.is_set():
+                        return
                     for task in self._tasks:
                         if task.status == FileStatus.PENDING:
                             task.status = (
@@ -298,6 +320,8 @@ class FileTranscriptionQueue:
                 try:
                     self._process_task(task)
                 except Exception as exc:
+                    if self._shutdown_requested.is_set():
+                        return
                     task.status = (
                         FileStatus.CANCELLED
                         if self._cancelled.is_set()
@@ -325,6 +349,8 @@ class FileTranscriptionQueue:
         audio_path = processing_path
 
         def finish_cancelled() -> bool:
+            if self._shutdown_requested.is_set():
+                return True
             if not self._cancelled.is_set():
                 return False
             task.status = FileStatus.CANCELLED
@@ -341,10 +367,7 @@ class FileTranscriptionQueue:
                 if self._on_progress:
                     self._on_progress(task)
 
-                if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                if finish_cancelled():
                     return
 
                 audio_path = extract_audio_from_video(processing_path)
@@ -359,14 +382,13 @@ class FileTranscriptionQueue:
             if self._on_progress:
                 self._on_progress(task)
 
-            if self._cancelled.is_set():
-                task.status = FileStatus.CANCELLED
-                if self._on_completed:
-                    self._on_completed(task)
+            if finish_cancelled():
                 return
 
             # Получаем длительность
             duration = get_file_duration(processing_path)
+            if finish_cancelled():
+                return
 
             # Транскрибируем
             segments_data, detected_lang, prob = self.transcriber.transcribe_with_timestamps(
@@ -432,10 +454,7 @@ class FileTranscriptionQueue:
             # Постобработка транскрипции (если включена)
             logger.info(f"Проверка постобработки: enable={self.enable_postprocessing}, text_len={len(task.result.full_text) if task.result.full_text else 0}")
             if self.enable_postprocessing and task.result.full_text:
-                if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                if finish_cancelled():
                     return
 
                 task.status = FileStatus.PROCESSING
@@ -509,10 +528,7 @@ class FileTranscriptionQueue:
 
             # Суммаризация (если включена)
             if self.enable_summary and task.result.text_for_summary:
-                if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                if finish_cancelled():
                     return
 
                 task.status = FileStatus.SUMMARIZING
@@ -569,6 +585,8 @@ class FileTranscriptionQueue:
             task.progress = 100
 
         except Exception as e:
+            if self._shutdown_requested.is_set():
+                return
             if self._cancelled.is_set():
                 task.status = FileStatus.CANCELLED
                 task.progress = 0
@@ -924,6 +942,10 @@ class FileTranscriptionQueue:
     def is_running(self) -> bool:
         """Проверить, выполняется ли обработка."""
         return self._running.is_set()
+
+    @property
+    def uses_local_transcriber(self) -> bool:
+        return self.cloud_executor is None
 
     @property
     def completed_count(self) -> int:

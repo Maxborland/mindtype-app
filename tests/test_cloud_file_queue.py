@@ -2,11 +2,51 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 
 
 class UnusedLocalTranscriber:
     def load_model(self, **_kwargs):
         raise AssertionError("cloud route must not load a local model")
+
+
+def test_local_shutdown_cancels_model_loading_and_joins_worker(
+    tmp_path: Path,
+) -> None:
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.transcription_models import TranscribeOptions
+
+    entered = threading.Event()
+    released = threading.Event()
+
+    class BlockingTranscriber:
+        def load_model(self, **_kwargs):
+            entered.set()
+            released.wait(5)
+
+        def cancel_current(self):
+            released.set()
+
+        def transcribe_with_timestamps(self, **_kwargs):
+            raise AssertionError("shutdown must stop before inference")
+
+    queue = FileTranscriptionQueue(
+        transcriber=BlockingTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+    )
+    queue.start()
+    assert entered.wait(1)
+
+    assert queue.stop_for_shutdown(timeout_seconds=1) is True
+    assert queue.is_running is False
 
 
 def test_cloud_file_queue_polls_durable_executor_and_reads_canonical_result(

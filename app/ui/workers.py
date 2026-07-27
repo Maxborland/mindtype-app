@@ -147,9 +147,14 @@ class CloudDictationWorker(QThread):
         self.options = dict(options)
         self.poll_interval_ms = max(0, int(poll_interval_ms))
         self._cancelled = False
+        self._shutdown_requested = False
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    def stop_for_shutdown(self) -> None:
+        """Stop polling without changing the durable server job."""
+        self._shutdown_requested = True
 
     def is_cancelled(self) -> bool:
         return self._cancelled
@@ -159,6 +164,8 @@ class CloudDictationWorker(QThread):
 
         try:
             while True:
+                if self._shutdown_requested:
+                    return
                 if self._cancelled:
                     operation = self.executor.cancel(self.operation_id)
                     if operation.status is OperationStatus.CANCELLED:
@@ -172,6 +179,8 @@ class CloudDictationWorker(QThread):
                     self.operation_id,
                     options=self.options,
                 )
+                if self._shutdown_requested:
+                    return
                 if operation.status is OperationStatus.COMPLETED:
                     result_path = operation.canonical_result_path
                     if result_path is None or not result_path.is_file():

@@ -159,6 +159,22 @@ def test_cloud_cancel_failure_stays_pending():
     assert pending == ["server unavailable"]
 
 
+def test_cloud_shutdown_stops_polling_without_remote_cancellation():
+    executor = MagicMock()
+    worker = CloudDictationWorker(
+        executor,
+        "operation-1",
+        options={},
+        poll_interval_ms=0,
+    )
+    worker.stop_for_shutdown()
+
+    worker.run()
+
+    executor.advance_transcription.assert_not_called()
+    executor.cancel.assert_not_called()
+
+
 def test_recovery_cancellation_requires_terminal_server_confirmation():
     from app.operation_models import OperationStatus
 

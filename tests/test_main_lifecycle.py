@@ -478,6 +478,7 @@ def test_update_install_preparation_stops_native_runtime_and_preserves_cloud_job
 
     file_queue = SimpleNamespace(
         is_running=True,
+        uses_local_transcriber=True,
         stop_for_shutdown=MagicMock(),
     )
     window = SimpleNamespace(
@@ -495,6 +496,34 @@ def test_update_install_preparation_stops_native_runtime_and_preserves_cloud_job
     assert window._really_quit is True
     assert window._preserve_cloud_jobs_on_shutdown is True
     file_queue.stop_for_shutdown.assert_called_once_with()
+    window._cleanup_all.assert_called_once_with()
+
+
+def test_update_install_is_blocked_until_local_file_worker_stops() -> None:
+    from app.main import MainWindow
+
+    file_queue = SimpleNamespace(
+        uses_local_transcriber=True,
+        stop_for_shutdown=MagicMock(return_value=False),
+    )
+    window = SimpleNamespace(
+        _really_quit=False,
+        _preserve_cloud_jobs_on_shutdown=False,
+        _file_queue=file_queue,
+        _cleanup_all=MagicMock(),
+    )
+    window._prepare_for_full_exit = lambda: (
+        MainWindow._prepare_for_full_exit(window)
+    )
+
+    import pytest
+
+    with pytest.raises(
+        RuntimeError,
+        match="Local file transcription did not stop",
+    ):
+        MainWindow._prepare_for_update_install(window)
+
     window._cleanup_all.assert_called_once_with()
 
 
