@@ -386,6 +386,40 @@ def test_bounded_queue_reports_overflow_and_preserves_wav(
     assert result.track.path.is_file()
 
 
+def test_stop_retries_a_wasapi_writer_sentinel_after_a_full_queue(
+    tmp_path: Path,
+) -> None:
+    recorder = SystemAudioRecorder(
+        backend=_FakeSoundCard([]),
+        temp_dir=tmp_path,
+        queue_blocks=1,
+    )
+    path = tmp_path / "pending-system.wav"
+    path.write_bytes(b"partial")
+    recorder._path = path
+    recorder._started_at_ns = 1
+    recorder._ended_at_ns = 2
+    recorder._queue.put_nowait(b"buffered")
+    allow_drain = threading.Event()
+    saw_sentinel = threading.Event()
+
+    def finish_writer() -> None:
+        allow_drain.wait(timeout=1)
+        assert recorder._queue.get(timeout=1) == b"buffered"
+        assert recorder._queue.get(timeout=1) is None
+        saw_sentinel.set()
+
+    recorder._writer_thread = threading.Thread(target=finish_writer)
+    recorder._writer_thread.start()
+    allow_drain.set()
+
+    result = recorder.stop(timeout=1)
+
+    assert saw_sentinel.is_set()
+    assert recorder._writer_stop_sent is True
+    assert result.track is not None
+
+
 def test_multitrack_stop_keeps_each_source_result() -> None:
     microphone = MagicMock()
     microphone.stop_capture.return_value = MagicMock(

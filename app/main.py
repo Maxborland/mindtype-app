@@ -5094,6 +5094,7 @@ class MainWindow(QMainWindow):
                         exported = CanonicalExporter().export_bundle(
                             canonical_payload,
                             self._output_dir,
+                            idempotency_key=operation.operation_id,
                         )
                         task.output_files.update(
                             {

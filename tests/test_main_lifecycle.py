@@ -75,6 +75,49 @@ def test_failed_projection_keeps_source_pending_ack(
     assert "Export failed" in task.warning
 
 
+def test_initial_projection_uses_operation_id_for_crash_safe_replay(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app.main import MainWindow
+    from app.transcription_models import FileStatus, FileTask
+
+    canonical_path = tmp_path / "result.json"
+    canonical_path.write_text("{}", encoding="utf-8")
+    operation = SimpleNamespace(
+        operation_id="operation-1",
+        canonical_result_path=canonical_path,
+    )
+    coordinator = MagicMock()
+    coordinator.sync_file_task.return_value = operation
+    export_bundle = MagicMock(return_value={})
+    monkeypatch.setattr(
+        "app.main.CanonicalExporter.export_bundle",
+        export_bundle,
+    )
+    task = FileTask(
+        file_path=tmp_path / "meeting.wav",
+        status=FileStatus.COMPLETED,
+        operation_id=operation.operation_id,
+    )
+    window = SimpleNamespace(
+        _operation_coordinator=coordinator,
+        _preserve_cloud_jobs_on_shutdown=False,
+        _output_dir=tmp_path / "exports",
+        _file_widgets={},
+        _task_key=lambda path: str(path),
+        _acknowledge_completed_operation=MagicMock(),
+        license_manager=MagicMock(),
+        _file_processing_batch_size=0,
+    )
+
+    MainWindow._on_file_task_completed(window, task)
+
+    assert export_bundle.call_args.kwargs == {
+        "idempotency_key": operation.operation_id,
+    }
+
+
 def test_recovered_dictation_action_starts_the_preserved_operation(
     tmp_path,
     monkeypatch,

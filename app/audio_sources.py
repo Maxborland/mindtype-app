@@ -138,6 +138,7 @@ class SystemAudioRecorder:
         self._ended_at_ns: Optional[int] = None
         self._capture_error: Optional[str] = None
         self._writer_error: Optional[str] = None
+        self._writer_stop_sent = False
 
     @property
     def _soundcard(self) -> _SoundCardBackend:
@@ -192,6 +193,7 @@ class SystemAudioRecorder:
         self._stop_requested.clear()
         self._capture_error = None
         self._writer_error = None
+        self._writer_stop_sent = False
         self._started_at_ns = time.monotonic_ns()
         self._ended_at_ns = None
         self._active.set()
@@ -257,6 +259,8 @@ class SystemAudioRecorder:
                         self._capture_error = (
                             "system audio writer did not drain its bounded buffer"
                         )
+                else:
+                    self._writer_stop_sent = True
 
         self._writer_thread = threading.Thread(
             target=write_wav,
@@ -289,6 +293,15 @@ class SystemAudioRecorder:
             else:
                 self._capture_thread = None
         if self._writer_thread is not None and self._capture_thread is None:
+            if not self._writer_stop_sent:
+                try:
+                    self._queue.put(None, timeout=max(0.0, timeout))
+                except queue.Full:
+                    self._writer_error = (
+                        "system audio WAV writer did not accept its stop signal"
+                    )
+                else:
+                    self._writer_stop_sent = True
             self._writer_thread.join(timeout=timeout)
             if self._writer_thread.is_alive():
                 self._writer_error = "system audio WAV writer did not finish"

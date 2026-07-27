@@ -324,6 +324,57 @@ def test_network_error_preserves_existing_offline_lease(tmp_path: Path) -> None:
     assert manager.access_token(now=now) == "access-token"
 
 
+def test_missing_refresh_token_preserves_valid_offline_lease(
+    tmp_path: Path,
+) -> None:
+    from app.licensing.session import (
+        LicenseSession,
+        LicenseSessionError,
+    )
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    refresh_store = FakeRefreshStore()
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=FakeSessionClient(
+            response=LicenseSession(
+                access_token="access-token",
+                access_expires_at=now + timedelta(minutes=15),
+                refresh_token="refresh-token",
+                entitlement_lease=signed_lease(
+                    private_key,
+                    device_id=device_id,
+                    now=now,
+                ),
+                claim_version=1,
+            )
+        ),
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+    manager.activate(
+        license_key="MT-AAAA-BBBB-CCCC",
+        desktop_version="0.9.3",
+        platform="windows",
+        now=now,
+    )
+    refresh_store.token = None
+
+    with pytest.raises(LicenseSessionError) as exc:
+        manager.refresh_access_token(now=now + timedelta(minutes=16))
+
+    assert exc.value.code == "AUTH_REQUIRED"
+    assert exc.value.authoritative is False
+    assert manager.access_token(now=now + timedelta(minutes=16)) is None
+    assert (tmp_path / "entitlement.lease").is_file()
+    assert manager.lease_store.load(
+        now=now + timedelta(minutes=16)
+    ).device_id == device_id
+
+
 def test_keyring_refresh_store_never_falls_back_to_plaintext() -> None:
     from app.licensing.session import (
         CredentialStoreError,

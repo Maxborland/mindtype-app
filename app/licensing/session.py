@@ -374,6 +374,10 @@ class CloudSessionManager:
         self._claims = None
         self.lease_store.clear()
 
+    def _clear_access_token(self) -> None:
+        self._access_token = None
+        self._access_expires_at = None
+
     def clear(self) -> None:
         with self._session_lock:
             self._clear_memory_and_lease()
@@ -459,12 +463,12 @@ class CloudSessionManager:
                 return self._claims
             refresh_token = self.refresh_store.load(self.device_id)
             if not refresh_token:
-                self._clear_memory_and_lease()
+                self._clear_access_token()
                 raise LicenseSessionError(
                     "AUTH_REQUIRED",
                     "cloud refresh token is missing",
                     retryable=False,
-                    authoritative=True,
+                    authoritative=False,
                 )
             try:
                 session = self.client.refresh_session(
