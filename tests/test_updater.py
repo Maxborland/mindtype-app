@@ -488,6 +488,45 @@ class TestUpdaterInstallation:
         assert installed is True
         assert events == ["verified", "cleaned", "launched"]
 
+    def test_post_cleanup_launch_failure_is_terminal(self, tmp_path):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import (
+            UpdateLaunchAfterCleanupError,
+            Updater,
+        )
+
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        installer = tmp_path / "MindType-1.2.0-Setup.exe"
+        installer.write_bytes(b"signed installer")
+        updater = Updater(
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+        updater.verified_manifest = manifest
+        updater._temp_path = installer
+        cleanup = MagicMock()
+
+        with (
+            patch("app.updater.verify_downloaded_installer"),
+            patch(
+                "app.updater.subprocess.Popen",
+                side_effect=OSError("antivirus blocked launch"),
+            ),
+            pytest.raises(UpdateLaunchAfterCleanupError),
+        ):
+            updater.install_update(before_launch=cleanup)
+
+        cleanup.assert_called_once_with()
+
 
 class TestUpdaterGetDownloadInfo:
     """Тесты для get_download_info."""

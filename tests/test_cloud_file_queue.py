@@ -355,3 +355,48 @@ def test_pending_cloud_cancel_respects_poll_interval(
 
     assert calls == ["cancel", "cancel"]
     assert sleeps == [0.25]
+
+
+def test_shutdown_stops_cloud_polling_without_remote_cancel(
+    tmp_path: Path,
+) -> None:
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.transcription_models import FileTask, TranscribeOptions
+
+    class Executor:
+        def __init__(self):
+            self.cancelled = []
+            self.advanced = []
+
+        def cancel(self, operation_id):
+            self.cancelled.append(operation_id)
+            raise AssertionError("shutdown must not cancel the remote job")
+
+        def advance_transcription(self, operation_id, **_options):
+            self.advanced.append(operation_id)
+            raise AssertionError("shutdown must stop before another poll")
+
+    executor = Executor()
+    queue = FileTranscriptionQueue(
+        transcriber=UnusedLocalTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        cloud_executor=executor,
+    )
+    task = FileTask(
+        file_path=tmp_path / "meeting.wav",
+        operation_id="preserved-cloud-job",
+    )
+
+    queue.stop_for_shutdown()
+    queue._process_cloud_task(task)
+
+    assert executor.cancelled == []
+    assert executor.advanced == []

@@ -60,6 +60,10 @@ class UpdateStatus(Enum):
     READY = auto()
     ERROR = auto()
 
+
+class UpdateLaunchAfterCleanupError(RuntimeError):
+    """Installer process creation failed after the application stopped."""
+
 class UpdateInfo:
     """Информация об обновлении."""
     def __init__(self):
@@ -326,9 +330,11 @@ class Updater:
         ):
             logger.warning(AUTOMATIC_UPDATE_DISABLED_MESSAGE)
             return False
+        cleanup_started = False
         try:
             verify_downloaded_installer(installer, manifest)
             if before_launch is not None:
+                cleanup_started = True
                 before_launch()
             subprocess.Popen(
                 [str(installer.resolve(strict=True))],
@@ -337,6 +343,8 @@ class Updater:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception as exc:
+            if cleanup_started:
+                raise UpdateLaunchAfterCleanupError(str(exc)) from exc
             logger.warning("Запуск обновления отклонён: %s", exc)
             return False
         return True

@@ -4367,29 +4367,11 @@ class MainWindow(QMainWindow):
             self.update_status_label.style().unpolish(self.update_status_label)
             self.update_status_label.style().polish(self.update_status_label)
             self.check_update_btn.setText(self._t("update_now"))
-
-            # Предлагаем установить
-            reply = QMessageBox.question(
-                self,
-                self._t("update_ready"),
-                self._t("update_ready") + "\n\n" +
-                "Приложение будет закрыто для установки обновления.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
+            self.check_update_btn.clicked.disconnect()
+            self.check_update_btn.clicked.connect(
+                self._prompt_install_downloaded_update
             )
-
-            if reply == QMessageBox.StandardButton.Yes:
-                self._add_journal_entry("success", "update_ready", is_translatable=True)
-                if self.updater.install_update(
-                    before_launch=self._prepare_for_update_install,
-                ):
-                    QApplication.quit()
-                else:
-                    QMessageBox.critical(
-                        self,
-                        self._t("update_error"),
-                        self._t("automatic_update_disabled"),
-                    )
+            self._prompt_install_downloaded_update()
         else:
             self.update_status_label.setText(f"{self._t('update_error')}: {error}")
             self.update_status_label.setObjectName("updateStatusError")
@@ -4399,6 +4381,44 @@ class MainWindow(QMainWindow):
             self.check_update_btn.clicked.disconnect()
             self.check_update_btn.clicked.connect(self._check_for_updates)
             self._add_journal_entry("error", "update_error", text=error, is_translatable=True)
+
+    def _prompt_install_downloaded_update(self) -> None:
+        """Keep a verified deferred installer actionable without re-downloading."""
+        from .updater import UpdateLaunchAfterCleanupError
+
+        reply = QMessageBox.question(
+            self,
+            self._t("update_ready"),
+            self._t("update_ready") + "\n\n"
+            "Приложение будет закрыто для установки обновления.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._add_journal_entry(
+            "success",
+            "update_ready",
+            is_translatable=True,
+        )
+        try:
+            installed = self.updater.install_update(
+                before_launch=self._prepare_for_update_install,
+            )
+        except UpdateLaunchAfterCleanupError:
+            logger.critical(
+                "Installer launch failed after application cleanup",
+                exc_info=True,
+            )
+            return
+        if installed:
+            QApplication.quit()
+            return
+        QMessageBox.critical(
+            self,
+            self._t("update_error"),
+            self._t("automatic_update_disabled"),
+        )
 
     # === Обработчики вкладки "Файлы" ===
 
@@ -5790,7 +5810,7 @@ class MainWindow(QMainWindow):
         """Preserve cloud jobs and stop every local runtime before exit."""
         self._preserve_cloud_jobs_on_shutdown = True
         if self._file_queue and self._file_queue.is_running:
-            self._file_queue.cancel()
+            self._file_queue.stop_for_shutdown()
         self._cleanup_all()
 
     def _cleanup_all(self) -> None:

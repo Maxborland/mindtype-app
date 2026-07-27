@@ -4,6 +4,7 @@ import hashlib
 import json
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,8 +58,10 @@ def test_url_transport_wraps_success_response_read_timeout(
             raise TimeoutError("response body stalled")
 
     monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda *_args, **_kwargs: StalledResponse(),
+        "urllib.request.build_opener",
+        lambda *_handlers: SimpleNamespace(
+            open=lambda *_args, **_kwargs: StalledResponse()
+        ),
     )
 
     with pytest.raises(TransportError, match="response body stalled"):
@@ -94,7 +97,10 @@ def test_url_transport_wraps_error_response_read_failure(
     def raise_failure(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr("urllib.request.urlopen", raise_failure)
+    monkeypatch.setattr(
+        "urllib.request.build_opener",
+        lambda *_handlers: SimpleNamespace(open=raise_failure),
+    )
 
     with pytest.raises(TransportError, match="error body stalled"):
         UrlLibTransport().request(
@@ -128,8 +134,10 @@ def test_url_transport_rejects_oversized_response_without_retry(
             return b"12345"
 
     monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda *_args, **_kwargs: OversizedResponse(),
+        "urllib.request.build_opener",
+        lambda *_handlers: SimpleNamespace(
+            open=lambda *_args, **_kwargs: OversizedResponse()
+        ),
     )
 
     with pytest.raises(ResponseTooLargeError):
@@ -140,6 +148,24 @@ def test_url_transport_rejects_oversized_response_without_retry(
             body=None,
             timeout=1,
         )
+
+
+def test_url_transport_rejects_redirects_before_reusing_headers() -> None:
+    from app.providers.mindtype_cloud import _RejectRedirects
+
+    handler = _RejectRedirects()
+
+    assert (
+        handler.redirect_request(
+            None,
+            None,
+            302,
+            "Found",
+            {},
+            "https://attacker.example/collect",
+        )
+        is None
+    )
 
 
 def test_401_refreshes_once_and_preserves_idempotency_key() -> None:

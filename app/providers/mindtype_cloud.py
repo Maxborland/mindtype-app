@@ -90,15 +90,32 @@ class HTTPTransport(Protocol):
     ) -> HTTPResponse: ...
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 class UrlLibTransport:
     def __init__(
         self,
         *,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        opener: Optional[Any] = None,
     ) -> None:
         if max_response_bytes < 1:
             raise ValueError("max_response_bytes must be positive")
         self.max_response_bytes = int(max_response_bytes)
+        self._opener = opener or urllib.request.build_opener(
+            _RejectRedirects()
+        )
 
     def _read_body(self, response: Any) -> bytes:
         declared = response.headers.get("Content-Length")
@@ -139,7 +156,7 @@ class UrlLibTransport:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 return HTTPResponse(
                     status=response.status,
                     headers=dict(response.headers.items()),

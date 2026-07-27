@@ -478,7 +478,7 @@ def test_update_install_preparation_stops_native_runtime_and_preserves_cloud_job
 
     file_queue = SimpleNamespace(
         is_running=True,
-        cancel=MagicMock(),
+        stop_for_shutdown=MagicMock(),
     )
     window = SimpleNamespace(
         _really_quit=False,
@@ -494,5 +494,42 @@ def test_update_install_preparation_stops_native_runtime_and_preserves_cloud_job
 
     assert window._really_quit is True
     assert window._preserve_cloud_jobs_on_shutdown is True
-    file_queue.cancel.assert_called_once_with()
+    file_queue.stop_for_shutdown.assert_called_once_with()
     window._cleanup_all.assert_called_once_with()
+
+
+def test_downloaded_update_stays_bound_to_install_prompt_after_deferral(
+) -> None:
+    from app.main import MainWindow
+
+    class Signal:
+        def __init__(self):
+            self.callback = None
+
+        def disconnect(self):
+            self.callback = None
+
+        def connect(self, callback):
+            self.callback = callback
+
+    signal = Signal()
+    button = MagicMock()
+    button.clicked = signal
+    prompt = MagicMock()
+    window = SimpleNamespace(
+        update_progress=MagicMock(),
+        check_update_btn=button,
+        update_status_label=MagicMock(),
+        _prompt_install_downloaded_update=prompt,
+        _t=lambda key: key,
+    )
+
+    MainWindow._on_update_download_finished(
+        window,
+        True,
+        "MindType-Setup.exe",
+        "",
+    )
+
+    assert signal.callback is prompt
+    prompt.assert_called_once_with()

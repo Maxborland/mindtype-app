@@ -162,6 +162,7 @@ class FileTranscriptionQueue:
         self._worker_thread: Optional[threading.Thread] = None
         self._running = threading.Event()
         self._cancelled = threading.Event()
+        self._shutdown_requested = threading.Event()
         self._temp_files: List[Path] = []
         self._summarizer = None  # Ленивая инициализация
         self._text_processor = None  # Ленивая инициализация
@@ -213,6 +214,7 @@ class FileTranscriptionQueue:
 
         self._running.set()
         self._cancelled.clear()
+        self._shutdown_requested.clear()
 
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
@@ -236,6 +238,11 @@ class FileTranscriptionQueue:
                 if self._on_completed:
                     self._on_completed(task)
         return cancelled_tasks
+
+    def stop_for_shutdown(self) -> None:
+        """Stop local polling without cancelling durable cloud jobs."""
+        self._shutdown_requested.set()
+        self._running.clear()
 
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""
@@ -519,6 +526,8 @@ class FileTranscriptionQueue:
                         and self.cloud_summary_executor is not None
                     ):
                         if not self._summarize_local_result_in_cloud(task):
+                            if self._shutdown_requested.is_set():
+                                return
                             if finish_cancelled():
                                 return
                             raise RuntimeError(
@@ -641,6 +650,8 @@ class FileTranscriptionQueue:
         from .operation_models import OperationStage, OperationStatus
 
         while True:
+            if self._shutdown_requested.is_set():
+                return
             if self._cancelled.is_set():
                 try:
                     operation = self.cloud_executor.cancel(
@@ -715,6 +726,8 @@ class FileTranscriptionQueue:
             .canonical_payload_for_file_task(task)
         )
         while True:
+            if self._shutdown_requested.is_set():
+                return False
             if self._cancelled.is_set():
                 try:
                     operation = self.cloud_summary_executor.cancel(
@@ -759,10 +772,12 @@ class FileTranscriptionQueue:
             self._wait_for_cloud_poll()
 
     def _wait_for_cloud_poll(self) -> None:
+        if self._shutdown_requested.is_set():
+            return
         if self._cancelled.is_set():
             time.sleep(self.cloud_poll_interval)
             return
-        self._cancelled.wait(self.cloud_poll_interval)
+        self._shutdown_requested.wait(self.cloud_poll_interval)
 
     def _summarize_text(self, text: str, task: FileTask):
         """Выполнить суммаризацию текста."""
