@@ -32,7 +32,7 @@ comtypes>=1.4.0,<2.0.0; sys_platform == 'win32'
 
 # Тестирование (dev)
 pytest>=9.0.3
-pytest-cov>=4.0.0
+pytest-cov>=7.1.0
 
 # Нормализация текста
 num2words>=0.5.13        # Числа в слова
