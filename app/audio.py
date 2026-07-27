@@ -237,6 +237,14 @@ class AudioRecorder:
             if not writer_is_alive:
                 self._tmp_path = None
             ended_at = time.monotonic_ns()
+            validation_error = (
+                self._invalid_wav_error(path)
+                if path is not None and not writer_is_alive
+                else None
+            )
+            if validation_error and path is not None:
+                path.unlink(missing_ok=True)
+                path = None
             track = (
                 RecordedTrack(
                     source=AudioSourceKind.MICROPHONE,
@@ -258,10 +266,18 @@ class AudioRecorder:
             return AudioCaptureResult(
                 status=AudioCaptureStatus.INTERRUPTED,
                 track=track,
-                error=str(exc),
+                error="; ".join(
+                    part
+                    for part in (str(exc), validation_error)
+                    if part
+                ),
             )
         ended_at = time.monotonic_ns()
         self._started_at_monotonic_ns = None
+        validation_error = self._invalid_wav_error(path)
+        if validation_error and path is not None:
+            path.unlink(missing_ok=True)
+            path = None
         track = (
             RecordedTrack(
                 source=AudioSourceKind.MICROPHONE,
@@ -275,9 +291,26 @@ class AudioRecorder:
             else None
         )
         return AudioCaptureResult(
-            status=AudioCaptureStatus.COMPLETED,
+            status=(
+                AudioCaptureStatus.INTERRUPTED
+                if validation_error
+                else AudioCaptureStatus.COMPLETED
+            ),
             track=track,
+            error=validation_error,
         )
+
+    @staticmethod
+    def _invalid_wav_error(path: Optional[Path]) -> Optional[str]:
+        if path is None or not path.is_file():
+            return "microphone WAV is unavailable"
+        try:
+            with wave.open(str(path), "rb") as audio:
+                if audio.getnframes() <= 0:
+                    return "microphone WAV does not contain audio frames"
+        except (OSError, EOFError, wave.Error) as exc:
+            return f"microphone WAV is invalid: {exc}"
+        return None
 
     def stop(self, timeout: float = 5.0) -> Optional[Path]:
         """Compatibility wrapper for microphone-only callers."""

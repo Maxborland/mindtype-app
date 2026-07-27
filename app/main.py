@@ -5323,6 +5323,11 @@ class MainWindow(QMainWindow):
                 if task.status is FileStatus.COMPLETED:
                     if operation.canonical_result_path is None:
                         raise RuntimeError("Canonical file result was not saved")
+                    MainWindow._record_file_trial_usage(
+                        self,
+                        task,
+                        operation.operation_id,
+                    )
                     task.output_files["json"] = operation.canonical_result_path
                     try:
                         canonical_payload = json.loads(
@@ -5384,15 +5389,26 @@ class MainWindow(QMainWindow):
             widget.update_status()
 
         if task.status == FileStatus.COMPLETED:
-            if (
-                task.result is not None
-                and task.claim_trial_time_charge()
-            ):
-                self.license_manager.add_transcription_time(task.result.duration)
             self._last_completed_task = task
             # Если обрабатываем один файл — открываем отчёт автоматически
             if getattr(self, "_file_processing_batch_size", 0) == 1:
                 self._auto_open_transcription(task)
+
+    def _record_file_trial_usage(
+        self,
+        task: FileTask,
+        operation_id: str,
+    ) -> None:
+        if task.result is None or not task.claim_trial_time_charge():
+            return
+        try:
+            self.license_manager.add_transcription_time(
+                task.result.duration,
+                operation_id=operation_id,
+            )
+        except Exception:
+            task.trial_time_charged = False
+            raise
 
     def _on_all_files_completed(self) -> None:
         """Все файлы обработаны."""
@@ -5621,6 +5637,11 @@ class MainWindow(QMainWindow):
                     )
                     if projection.file_task is not None:
                         recovered_task = projection.file_task
+                        MainWindow._record_file_trial_usage(
+                            self,
+                            recovered_task,
+                            operation.operation_id,
+                        )
                         if recovered_task.operation_id not in existing_operation_ids:
                             self._file_tasks.append(recovered_task)
                             self._add_file_widget(recovered_task)

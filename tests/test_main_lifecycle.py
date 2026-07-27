@@ -277,6 +277,15 @@ def test_initial_projection_uses_operation_id_for_crash_safe_replay(
         file_path=tmp_path / "meeting.wav",
         status=FileStatus.COMPLETED,
         operation_id=operation.operation_id,
+        result=SimpleNamespace(duration=60.0),
+    )
+    events = []
+    license_manager = MagicMock()
+    license_manager.add_transcription_time.side_effect = (
+        lambda *_args, **_kwargs: events.append("usage")
+    )
+    acknowledge = MagicMock(
+        side_effect=lambda _operation_id: events.append("ack")
     )
     window = SimpleNamespace(
         _operation_coordinator=coordinator,
@@ -284,8 +293,8 @@ def test_initial_projection_uses_operation_id_for_crash_safe_replay(
         _output_dir=tmp_path / "exports",
         _file_widgets={},
         _task_key=lambda path: str(path),
-        _acknowledge_completed_operation=MagicMock(),
-        license_manager=MagicMock(),
+        _acknowledge_completed_operation=acknowledge,
+        license_manager=license_manager,
         _file_processing_batch_size=0,
     )
 
@@ -294,6 +303,11 @@ def test_initial_projection_uses_operation_id_for_crash_safe_replay(
     assert export_bundle.call_args.kwargs == {
         "idempotency_key": operation.operation_id,
     }
+    license_manager.add_transcription_time.assert_called_once_with(
+        60.0,
+        operation_id=operation.operation_id,
+    )
+    assert events == ["usage", "ack"]
 
 def test_recovered_cloud_file_is_removed_only_after_remote_cancel(
     tmp_path,

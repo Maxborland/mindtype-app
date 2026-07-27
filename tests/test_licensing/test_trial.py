@@ -130,6 +130,20 @@ class TestTrialManagerTranscriptionTime:
         used_minutes = trial_manager.get_used_transcription_minutes()
         assert used_minutes == 1.0  # 60 секунд = 1 минута
 
+    def test_trial_usage_is_idempotent_by_operation(self, trial_manager):
+        trial_manager.start_trial()
+
+        assert trial_manager.add_transcription_time(
+            60,
+            operation_id="operation-1",
+        ) is True
+        assert trial_manager.add_transcription_time(
+            60,
+            operation_id="operation-1",
+        ) is False
+
+        assert trial_manager.get_used_transcription_minutes() == 1.0
+
     def test_add_transcription_time_starts_trial(self, trial_manager):
         """Тест автоматического запуска trial при добавлении времени."""
         assert trial_manager.has_trial_started() is False
@@ -346,4 +360,3 @@ class TestGetMachineId:
         """Тест что machine_id содержит только hex символы."""
         machine_id = _get_machine_id()
         assert all(c in "0123456789abcdef" for c in machine_id)
-

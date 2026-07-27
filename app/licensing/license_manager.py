@@ -781,11 +781,20 @@ class LicenseManager:
                 trial_start_date=start_date,
             )
 
-    def add_transcription_time(self, seconds: float) -> None:
+    def add_transcription_time(
+        self,
+        seconds: float,
+        *,
+        operation_id: Optional[str] = None,
+    ) -> bool:
         """Добавить использованное время транскрипции (для trial)."""
         info = self.get_license_info()
         if info.is_trial:
-            self._trial_manager.add_transcription_time(seconds)
+            return self._trial_manager.add_transcription_time(
+                seconds,
+                operation_id=operation_id,
+            )
+        return False
 
     def activate(self, license_key: str) -> tuple[bool, str]:
         """

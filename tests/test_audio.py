@@ -6,6 +6,7 @@ Unit тесты для модуля audio.py
 """
 
 import queue
+import wave
 
 import numpy as np
 import pytest
@@ -92,10 +93,31 @@ class TestAudioRecorder:
         result = recorder.stop()
         assert result is None
 
+    def test_empty_microphone_wav_is_not_published(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "empty.wav"
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+        recorder._tmp_path = wav_path
+        recorder._started_at_monotonic_ns = 1
+
+        result = recorder.stop_capture()
+
+        assert result.status is AudioCaptureStatus.INTERRUPTED
+        assert result.track is None
+        assert "does not contain audio frames" in (result.error or "")
+        assert wav_path.exists() is False
+
     def test_stop_does_not_return_path_while_writer_is_alive(self, tmp_path):
         recorder = AudioRecorder()
         wav_path = tmp_path / "unfinished.wav"
-        wav_path.touch()
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+            audio.writeframes(b"\0\0")
         recorder._tmp_path = wav_path
         recorder._running.set()
         recorder._stream = MagicMock()
@@ -146,7 +168,11 @@ class TestAudioRecorder:
     ):
         recorder = AudioRecorder()
         wav_path = tmp_path / "unfinished.wav"
-        wav_path.touch()
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+            audio.writeframes(b"\0\0")
         writer = MagicMock()
         writer.is_alive.side_effect = [True, True, True, False]
         recorder._tmp_path = wav_path
@@ -382,6 +408,12 @@ class TestErrorHandling:
     ):
         recorder = AudioRecorder()
         recorder.start()
+        recorder._callback(
+            np.ones((10, 1), dtype=np.int16),
+            10,
+            None,
+            None,
+        )
 
         result = recorder.stop_capture()
 

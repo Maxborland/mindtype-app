@@ -158,6 +158,17 @@ class OperationStore:
         for row in rows:
             remote_job_id = row["remote_job_id"]
             server_job_ids = {"legacy": remote_job_id} if remote_job_id else {}
+            status = self._legacy_status(row["state"])
+            stage = self._legacy_stage(row["state"])
+            last_error = row["last_error"]
+            if status is OperationStatus.COMPLETED:
+                status = (
+                    OperationStatus.RETRYABLE
+                    if Path(row["source_path"]).is_file()
+                    else OperationStatus.FAILED
+                )
+                stage = OperationStage.TRANSCRIBE
+                last_error = "LEGACY_RESULT_REQUIRES_RECOVERY"
             connection.execute(
                 """
                 INSERT OR IGNORE INTO operations (
@@ -171,8 +182,8 @@ class OperationStore:
                 (
                     row["idempotency_key"],
                     OperationKind.FILE.value,
-                    self._legacy_status(row["state"]).value,
-                    self._legacy_stage(row["state"]).value,
+                    status.value,
+                    stage.value,
                     row["source_path"],
                     None,
                     row["route_json"],
@@ -180,7 +191,7 @@ class OperationStore:
                     None,
                     row["attempt_count"],
                     row["progress"],
-                    row["last_error"],
+                    last_error,
                     None,
                     row["created_at"],
                     row["updated_at"],

@@ -147,7 +147,12 @@ def test_legacy_cloud_jobs_migrate_once_with_backup_and_state_mapping(
         route={"audio": "MindType Cloud"},
     )
     legacy.transition(completed.job_id, CloudJobState.PROCESSING)
-    legacy.transition(completed.job_id, CloudJobState.COMPLETED, progress=100)
+    legacy.transition(
+        completed.job_id,
+        CloudJobState.COMPLETED,
+        progress=100,
+        result={"outputs": {"json": "legacy-result.json"}},
+    )
 
     migrated = OperationStore(database)
     reopened = OperationStore(database)
@@ -157,7 +162,12 @@ def test_legacy_cloud_jobs_migrate_once_with_backup_and_state_mapping(
     assert migrated.get("operation-inflight").server_job_ids == {
         "legacy": "remote-transcription-1"
     }
-    assert migrated.get("operation-completed").status is OperationStatus.COMPLETED
+    recovered_completed = migrated.get("operation-completed")
+    assert recovered_completed.status is OperationStatus.RETRYABLE
+    assert (
+        recovered_completed.last_error_code
+        == "LEGACY_RESULT_REQUIRES_RECOVERY"
+    )
     assert reopened.count() == 2
     assert len(list(tmp_path.glob("cloud_jobs.v1-backup-*.sqlite3"))) == 1
 
