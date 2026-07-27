@@ -348,6 +348,74 @@ def test_recovered_cloud_file_is_removed_only_after_remote_cancel(
     widget.deleteLater.assert_called_once_with()
 
 
+def test_file_batch_prioritizes_one_persisted_cloud_route() -> None:
+    from pathlib import Path
+
+    from app.main import MainWindow
+    from app.transcription_models import FileTask
+
+    cloud_route = {
+        "transcription": {
+            "provider": "mindtype_cloud",
+            "model": "auto",
+        }
+    }
+    other_cloud_route = {
+        "transcription": {
+            "provider": "mindtype_cloud",
+            "model": "accurate",
+        }
+    }
+    requested_route = {
+        "transcription": {
+            "provider": "local",
+            "model": "small",
+        }
+    }
+    first = FileTask(
+        file_path=Path("first.wav"),
+        operation_id="cloud-first",
+    )
+    same_route = FileTask(
+        file_path=Path("same.wav"),
+        operation_id="cloud-same",
+    )
+    other_route = FileTask(
+        file_path=Path("other.wav"),
+        operation_id="cloud-other",
+    )
+    new_local = FileTask(file_path=Path("new-local.wav"))
+    operations = {
+        first.operation_id: SimpleNamespace(
+            route=cloud_route,
+            server_job_ids={"transcription": "job-1"},
+        ),
+        same_route.operation_id: SimpleNamespace(
+            route=cloud_route,
+            server_job_ids={"transcription": "job-2"},
+        ),
+        other_route.operation_id: SimpleNamespace(
+            route=other_cloud_route,
+            server_job_ids={"transcription": "job-3"},
+        ),
+    }
+    store = SimpleNamespace(
+        get=lambda operation_id: operations.get(operation_id)
+    )
+    window = SimpleNamespace(
+        _operation_coordinator=SimpleNamespace(store=store)
+    )
+
+    selected, route = MainWindow._select_file_processing_batch(
+        window,
+        [first, same_route, other_route, new_local],
+        requested_route,
+    )
+
+    assert selected == [first, same_route]
+    assert route == cloud_route
+
+
 def test_recovered_dictation_action_starts_the_preserved_operation(
     tmp_path,
     monkeypatch,

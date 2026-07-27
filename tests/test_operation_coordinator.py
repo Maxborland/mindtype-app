@@ -746,6 +746,68 @@ def test_startup_recovery_exposes_unconfirmed_cloud_cancellation(
     assert recovered.status is OperationStatus.CANCEL_REQUESTED
 
 
+def test_file_retry_preserves_route_when_remote_job_already_exists(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import FileTask
+
+    source = tmp_path / "meeting.wav"
+    source.write_bytes(b"audio")
+    cloud_route = {
+        "transcription": {
+            "provider": "mindtype_cloud",
+            "model": "auto",
+        }
+    }
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    operation = coordinator.create_file_operation(
+        source,
+        route=cloud_route,
+        operation_id="cloud-route-retry",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    coordinator.store.transition(
+        operation.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"transcription": "server-job-1"},
+    )
+    coordinator.mark_retryable(
+        operation.operation_id,
+        error_code="RATE_LIMITED",
+    )
+    task = FileTask(
+        file_path=source,
+        source_asset_path=operation.source_asset_path,
+        operation_id=operation.operation_id,
+    )
+
+    resumed = coordinator.prepare_file_task(
+        task,
+        route={
+            "transcription": {
+                "provider": "local",
+                "model": "small",
+            }
+        },
+    )
+
+    assert resumed.route == cloud_route
+    assert resumed.server_job_ids == {
+        "transcription": "server-job-1"
+    }
+    assert resumed.status is OperationStatus.RUNNING
+
+
 def test_file_task_progress_and_error_are_persisted_without_source_loss(
     tmp_path: Path,
 ) -> None:

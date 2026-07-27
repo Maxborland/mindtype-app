@@ -258,7 +258,7 @@ class OperationCoordinator:
                 source_asset_path=asset.path,
                 source_sha256=asset.sha256,
             )
-        if operation.route != route:
+        if operation.route != route and not operation.server_job_ids:
             operation = self.store.update_route(operation.operation_id, route)
 
         task.source_asset_path = operation.source_asset_path

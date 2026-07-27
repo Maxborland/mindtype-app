@@ -4429,6 +4429,39 @@ class MainWindow(QMainWindow):
         except Exception:
             return path.absolute()
 
+    def _select_file_processing_batch(
+        self,
+        pending_tasks: list[FileTask],
+        requested_route: dict,
+    ) -> tuple[list[FileTask], dict]:
+        """Run durable cloud retries without mixing in a new route."""
+        if self._operation_coordinator is None:
+            return pending_tasks, requested_route
+        durable_routes: list[dict] = []
+        operations: dict[str, object] = {}
+        for task in pending_tasks:
+            operation = self._operation_coordinator.store.get(
+                task.operation_id
+            )
+            if operation is None:
+                continue
+            operations[task.operation_id] = operation
+            if operation.server_job_ids:
+                durable_routes.append(operation.route)
+        if not durable_routes:
+            return pending_tasks, requested_route
+        preserved_route = durable_routes[0]
+        selected = [
+            task
+            for task in pending_tasks
+            if (
+                task.operation_id in operations
+                and operations[task.operation_id].server_job_ids
+                and operations[task.operation_id].route == preserved_route
+            )
+        ]
+        return selected, preserved_route
+
     def _on_files_dropped(self, files: list) -> None:
         """Обработчик drop файлов."""
         # Исключаем только файлы в процессе или ожидающие обработки
@@ -4933,6 +4966,48 @@ class MainWindow(QMainWindow):
         pending_tasks = [t for t in self._file_tasks if t.status == FileStatus.PENDING]
         if not pending_tasks:
             return
+        if self._operation_coordinator is None:
+            QMessageBox.critical(
+                self,
+                self._t("error"),
+                "Durable operation storage is unavailable. Files were not started.",
+            )
+            return
+
+        cfg = self.config.config
+        requested_summary = self.enable_summary_checkbox.isChecked()
+        requested_processing_route = resolve_processing_route(
+            cfg,
+            summary_enabled=requested_summary,
+            diarization_backend=cfg.get(
+                "postprocessing_diarization_backend",
+                "auto",
+            ),
+        )
+        requested_route = canonical_processing_route(
+            requested_processing_route,
+            cfg,
+        )
+        pending_tasks, canonical_route = (
+            self._select_file_processing_batch(
+                pending_tasks,
+                requested_route,
+            )
+        )
+        if not pending_tasks:
+            return
+        transcription_provider = str(
+            canonical_route.get("transcription", {}).get("provider")
+            or "local"
+        )
+        summary_provider_id = str(
+            canonical_route.get("summary", {}).get("provider") or ""
+        )
+        diarization_provider = str(
+            canonical_route.get("diarization", {}).get("provider") or ""
+        )
+        enable_summary = bool(summary_provider_id)
+        cloud_transcription = transcription_provider == "mindtype_cloud"
 
         estimated_seconds = 0.0
         for task in pending_tasks:
@@ -4973,9 +5048,6 @@ class MainWindow(QMainWindow):
         self._file_output_format = self.output_format_combo.currentData()
         self._last_completed_task: Optional[FileTask] = None
 
-        # Создаём очередь
-        cfg = self.config.config
-
         # Загружаем промпты из пресета (встроенного или пользовательского) и объединяем с кастомными
         from .summary_presets import get_preset_prompts
         preset_id = cfg.get("summary_preset", "pm")
@@ -4995,7 +5067,12 @@ class MainWindow(QMainWindow):
             )
 
         # Определяем провайдер суммаризации из настроек
-        llm_provider = cfg.get("llm_provider", "openrouter")
+        llm_provider = (
+            "ollama"
+            if summary_provider_id == "local"
+            else summary_provider_id
+            or cfg.get("llm_provider", "openrouter")
+        )
         summary_api_key = ""
         summary_model = ""
         summary_base_url = ""
@@ -5019,18 +5096,6 @@ class MainWindow(QMainWindow):
             summary_reasoning = bool(cfg.get("llm_reasoning_enabled", True))
             summary_reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
 
-        enable_summary = self.enable_summary_checkbox.isChecked()
-        processing_route = resolve_processing_route(
-            cfg,
-            summary_enabled=enable_summary,
-            diarization_backend=cfg.get(
-                "postprocessing_diarization_backend",
-                "auto",
-            ),
-        )
-        cloud_transcription = (
-            processing_route.audio == "MindType Cloud"
-        )
         # Credit checks belong only to routes the current client can execute.
         if enable_summary and llm_provider == "mindtype_cloud":
             if not self._check_cloud_credits_before_processing():
@@ -5047,7 +5112,7 @@ class MainWindow(QMainWindow):
                 return
             if (
                 enable_summary
-                and processing_route.summary != "MindType Cloud"
+                and summary_provider_id != "mindtype_cloud"
             ):
                 QMessageBox.warning(
                     self,
@@ -5056,15 +5121,6 @@ class MainWindow(QMainWindow):
                     "summary or summary disabled.",
                 )
                 return
-        if self._operation_coordinator is None:
-            QMessageBox.critical(
-                self,
-                self._t("error"),
-                "Durable operation storage is unavailable. Files were not started.",
-            )
-            return
-
-        canonical_route = canonical_processing_route(processing_route, cfg)
         try:
             for task in pending_tasks:
                 self._operation_coordinator.prepare_file_task(
@@ -5088,7 +5144,7 @@ class MainWindow(QMainWindow):
                 models_dir=self.models_dir,
             ),
             summary=SummaryOptions(
-                enable=self.enable_summary_checkbox.isChecked(),
+                enable=enable_summary,
                 enable_thinking=True,  # Всегда включен
                 custom_prompts=custom_prompts,
                 preset_name=preset_display_name,
@@ -5130,7 +5186,7 @@ class MainWindow(QMainWindow):
                 if (
                     not cloud_transcription
                     and enable_summary
-                    and processing_route.summary == "MindType Cloud"
+                    and summary_provider_id == "mindtype_cloud"
                 )
                 else None
             ),
@@ -5138,10 +5194,8 @@ class MainWindow(QMainWindow):
                 {
                     "language": cfg.get("language", "ru"),
                     "word_timestamps": True,
-                    "diarization": (
-                        processing_route.diarization
-                        == "MindType Cloud"
-                    ),
+                    "diarization": diarization_provider
+                    == "mindtype_cloud",
                     "quality_profile": "balanced",
                 }
                 if cloud_transcription
@@ -5155,7 +5209,7 @@ class MainWindow(QMainWindow):
                 }
                 if (
                     enable_summary
-                    and processing_route.summary == "MindType Cloud"
+                    and summary_provider_id == "mindtype_cloud"
                 )
                 else None
             ),
