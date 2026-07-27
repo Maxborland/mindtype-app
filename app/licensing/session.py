@@ -433,6 +433,7 @@ class CloudSessionManager:
         self._access_token: Optional[str] = None
         self._access_expires_at: Optional[datetime] = None
         self._claims: Optional[EntitlementClaims] = None
+        self._session_generation = 0
         self._session_lock = threading.RLock()
 
     def _clear_memory_and_lease(self) -> None:
@@ -536,6 +537,7 @@ class CloudSessionManager:
         self._access_token = session.access_token
         self._access_expires_at = expires_at
         self._claims = claims
+        self._session_generation += 1
         return claims
 
     def refresh_access_token(
@@ -550,6 +552,7 @@ class CloudSessionManager:
             checked_at = checked_at.replace(tzinfo=timezone.utc)
         else:
             checked_at = checked_at.astimezone(timezone.utc)
+        observed_generation = self._session_generation
         with self._session_lock:
             session_is_valid = (
                 self._access_token is not None
@@ -563,8 +566,14 @@ class CloudSessionManager:
                 and rejected_access_token is not None
                 and self._access_token != rejected_access_token
             )
+            session_was_replaced_while_waiting = (
+                force
+                and self._session_generation != observed_generation
+            )
             if session_is_valid and (
-                not force or rejected_generation_was_replaced
+                not force
+                or rejected_generation_was_replaced
+                or session_was_replaced_while_waiting
             ):
                 return self._claims
             refresh_token = self.refresh_store.load(self.device_id)

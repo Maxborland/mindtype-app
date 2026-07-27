@@ -1027,3 +1027,64 @@ def test_concurrent_forced_refreshes_share_replacement_session(
     assert first_claims == second_claims
     assert manager.access_token(now=now) == "replacement-access"
     assert refresh_store.token == "refresh-2"
+
+
+def test_scheduled_refresh_reuses_session_installed_while_waiting(
+    tmp_path: Path,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    refresh_store = FakeRefreshStore()
+    refresh_store.token = "refresh-1"
+    replacement = LicenseSession(
+        access_token="replacement-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="refresh-2",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    entered = Event()
+    release = Event()
+    client = FakeSessionClient()
+
+    def refresh_session(**request):
+        client.calls.append(request)
+        entered.set()
+        assert release.wait(timeout=2)
+        return replacement
+
+    client.refresh_session = refresh_session
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        ordinary = executor.submit(manager.refresh_access_token, now=now)
+        assert entered.wait(timeout=2)
+        scheduled = executor.submit(
+            manager.refresh_access_token,
+            now=now,
+            force=True,
+        )
+        release.set()
+        ordinary_claims = ordinary.result(timeout=2)
+        scheduled_claims = scheduled.result(timeout=2)
+
+    assert client.calls == [{"refresh_token": "refresh-1"}]
+    assert ordinary_claims == scheduled_claims
+    assert manager.access_token(now=now) == "replacement-access"
+    assert refresh_store.token == "refresh-2"
