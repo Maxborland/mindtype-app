@@ -424,6 +424,9 @@ class MultiTrackAudioRecorder:
                     partial.track.path.unlink(missing_ok=True)
                     self._system_finalized = True
                     self._source = None
+                elif getattr(self.system, "finalizing", True) is False:
+                    self._system_finalized = True
+                    self._source = None
                 else:
                     self._discard_results_on_finalize = True
             else:

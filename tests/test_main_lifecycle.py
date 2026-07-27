@@ -580,6 +580,50 @@ def test_failed_recovered_dictation_stays_actionable() -> None:
     window._update_recovered_dictation_actions.assert_called_once()
 
 
+def test_canonical_persistence_failure_is_immediately_actionable() -> None:
+    from app.dictation_state import DictationState
+    from app.main import MainWindow
+    from app.operation_models import OperationStatus
+
+    state = DictationState()
+    token = state.begin_recovery(auto_insert=False)
+    operation_id = "dictation-persist-retry"
+    coordinator = MagicMock()
+    coordinator.complete_dictation.side_effect = OSError("disk unavailable")
+    coordinator.store.get.side_effect = [
+        SimpleNamespace(status=OperationStatus.RUNNING),
+        SimpleNamespace(status=OperationStatus.RETRYABLE),
+    ]
+    window = SimpleNamespace(
+        _dictation=state,
+        _dictation_operation_ids={token: operation_id},
+        _dictation_durations_ms={token: 1000},
+        _retryable_dictation_ids=[],
+        _operation_coordinator=coordinator,
+        _update_recovered_dictation_actions=MagicMock(),
+        _update_tray_icon=MagicMock(),
+        _add_journal_entry=MagicMock(),
+        overlay=MagicMock(),
+        _t=lambda key: key,
+    )
+
+    MainWindow._on_transcribed(
+        window,
+        token,
+        "Сохранённый звук",
+        "ru",
+        0.9,
+        "",
+    )
+
+    coordinator.mark_retryable.assert_called_once_with(
+        operation_id,
+        error_code="CANONICAL_PERSIST_FAILED",
+    )
+    assert window._retryable_dictation_ids == [operation_id]
+    window._update_recovered_dictation_actions.assert_called_once()
+
+
 def test_update_install_preparation_stops_native_runtime_and_preserves_cloud_jobs(
 ) -> None:
     from app.main import MainWindow

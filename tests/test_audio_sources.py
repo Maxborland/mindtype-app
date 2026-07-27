@@ -643,3 +643,26 @@ def test_multitrack_start_rollback_remains_owned_until_system_finalizes(
     assert session.recording is False
     assert not rollback_track.path.exists()
     assert system.stop.call_count == 2
+
+
+def test_multitrack_start_releases_a_finalized_empty_system_rollback() -> None:
+    microphone = MagicMock()
+    microphone.start.side_effect = RuntimeError("microphone unavailable")
+    system = MagicMock()
+    system.finalizing = False
+    system.stop.return_value = AudioCaptureResult(
+        status=AudioCaptureStatus.INTERRUPTED,
+        track=None,
+        error="system audio WAV does not contain audio frames",
+    )
+    session = MultiTrackAudioRecorder(
+        microphone=microphone,
+        system=system,
+    )
+
+    with pytest.raises(RuntimeError, match="microphone unavailable"):
+        session.start(AudioSourceKind.MICROPHONE_SYSTEM)
+
+    assert session.recording is False
+    session.start(AudioSourceKind.SYSTEM)
+    assert system.start.call_count == 2

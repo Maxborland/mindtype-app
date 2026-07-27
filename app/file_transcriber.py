@@ -271,40 +271,9 @@ class FileTranscriptionQueue:
 
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""
+        local_model_ready = self.cloud_executor is not None
+        local_model_error: Optional[Exception] = None
         try:
-            if self.cloud_executor is None:
-                try:
-                    prepare_operation = getattr(
-                        self.transcriber,
-                        "prepare_operation",
-                        None,
-                    )
-                    if callable(prepare_operation):
-                        prepare_operation()
-                    self.transcriber.load_model(
-                        model_size=self.model_size,
-                        compute_type=self.compute_type,
-                        device=self.device,
-                        models_dir=str(self.models_dir),
-                    )
-                except Exception as e:
-                    if self._shutdown_requested.is_set():
-                        return
-                    for task in self._tasks:
-                        if task.status == FileStatus.PENDING:
-                            task.status = (
-                                FileStatus.CANCELLED
-                                if self._cancelled.is_set()
-                                else FileStatus.ERROR
-                            )
-                            if task.status is FileStatus.ERROR:
-                                task.error_message = (
-                                    f"Ошибка загрузки модели: {e}"
-                                )
-                            if self._on_completed:
-                                self._on_completed(task)
-                    return
-
             while self._running.is_set():
                 try:
                     task = self._queue.get(timeout=0.5)
@@ -323,6 +292,34 @@ class FileTranscriptionQueue:
                     continue
 
                 try:
+                    if (
+                        not local_model_ready
+                        and not self._has_persisted_cloud_summary(task)
+                    ):
+                        if local_model_error is not None:
+                            raise RuntimeError(
+                                f"Ошибка загрузки модели: {local_model_error}"
+                            )
+                        try:
+                            prepare_operation = getattr(
+                                self.transcriber,
+                                "prepare_operation",
+                                None,
+                            )
+                            if callable(prepare_operation):
+                                prepare_operation()
+                            self.transcriber.load_model(
+                                model_size=self.model_size,
+                                compute_type=self.compute_type,
+                                device=self.device,
+                                models_dir=str(self.models_dir),
+                            )
+                            local_model_ready = True
+                        except Exception as exc:
+                            local_model_error = exc
+                            raise RuntimeError(
+                                f"Ошибка загрузки модели: {exc}"
+                            ) from exc
                     self._process_task(task)
                 except Exception as exc:
                     if self._shutdown_requested.is_set():
@@ -607,17 +604,20 @@ class FileTranscriptionQueue:
         if self._on_completed:
             self._on_completed(task)
 
-    def _restore_persisted_cloud_summary(self, task: FileTask) -> bool:
+    def _has_persisted_cloud_summary(self, task: FileTask) -> bool:
         executor = self.cloud_summary_executor
         if executor is None:
             return False
-        coordinator = executor.coordinator
-        operation = coordinator.store.get(task.operation_id)
-        if (
-            operation is None
-            or not operation.server_job_ids.get("summary")
-        ):
+        operation = executor.coordinator.store.get(task.operation_id)
+        return bool(
+            operation is not None
+            and operation.server_job_ids.get("summary")
+        )
+
+    def _restore_persisted_cloud_summary(self, task: FileTask) -> bool:
+        if not self._has_persisted_cloud_summary(task):
             return False
+        coordinator = self.cloud_summary_executor.coordinator
         checkpoint = coordinator.load_canonical_checkpoint(
             task.operation_id
         )

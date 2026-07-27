@@ -42,6 +42,9 @@ def test_local_shutdown_cancels_model_loading_and_joins_worker(
             models_dir=tmp_path,
         ),
     )
+    source = tmp_path / "pending.wav"
+    source.touch()
+    assert queue.add_files([source])
     queue.start()
     assert entered.wait(1)
 
@@ -424,6 +427,11 @@ def test_retryable_cloud_summary_keeps_hybrid_task_pending(
     class LocalTranscriber:
         calls = 0
 
+        def load_model(self, **_kwargs):
+            raise AssertionError(
+                "summary resume must not load the local model"
+            )
+
         def transcribe_with_timestamps(self, **_kwargs):
             self.calls += 1
             return (
@@ -510,8 +518,9 @@ def test_retryable_cloud_summary_keeps_hybrid_task_pending(
     assert resumed.status is OperationStatus.RUNNING
     assert resumed.attempt_count == 2
 
+    queue._queue.put(task)
     queue._running.set()
-    queue._process_task(task)
+    queue._worker()
 
     assert transcriber.calls == 1
     assert task.status is FileStatus.COMPLETED

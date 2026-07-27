@@ -4000,6 +4000,23 @@ class MainWindow(QMainWindow):
                     )
             except Exception as exc:
                 logger.exception("Could not persist canonical dictation result")
+                try:
+                    current = self._operation_coordinator.store.get(
+                        operation_id
+                    )
+                    if current and current.status in {
+                        OperationStatus.CREATED,
+                        OperationStatus.RUNNING,
+                        OperationStatus.RETRYABLE,
+                    }:
+                        self._operation_coordinator.mark_retryable(
+                            operation_id,
+                            error_code="CANONICAL_PERSIST_FAILED",
+                        )
+                except Exception:
+                    logger.exception(
+                        "Could not mark canonical persistence retryable"
+                    )
                 err = str(exc)
 
         if not self._dictation.finish_transcription(
