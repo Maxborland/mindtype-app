@@ -895,31 +895,31 @@ class FileTranscriptionQueue:
         return self._cloud_wait_interrupted.wait(max(0.0, delay_seconds))
 
     def _cancel_pending_task(self, task: FileTask) -> None:
-        executor = None
-        if task.operation_id:
-            if self._has_persisted_cloud_summary(task):
-                executor = self.cloud_summary_executor
-            elif self.cloud_executor is not None:
-                executor = self.cloud_executor
-
-        task.cancellation_pending = False
-        if executor is not None:
-            try:
-                operation = executor.cancel(task.operation_id)
-                from .operation_models import OperationStatus
-
-                task.cancellation_pending = (
-                    operation.status is not OperationStatus.CANCELLED
-                )
-            except Exception:
-                task.cancellation_pending = True
-                logger.exception(
-                    "Could not confirm cancellation for cloud operation %s",
-                    task.operation_id,
-                )
+        task.cancellation_pending = self._has_persisted_remote_job(task)
         task.status = FileStatus.CANCELLED
         if self._on_completed:
             self._on_completed(task)
+
+    def _has_persisted_remote_job(self, task: FileTask) -> bool:
+        if not task.operation_id:
+            return False
+        for executor in (
+            self.cloud_summary_executor,
+            self.cloud_executor,
+        ):
+            coordinator = getattr(executor, "coordinator", None)
+            store = getattr(coordinator, "store", None)
+            if store is None:
+                continue
+            operation = store.get(task.operation_id)
+            if operation is None:
+                continue
+            if (
+                operation.server_job_ids.get("summary")
+                or operation.server_job_ids.get("transcription")
+            ):
+                return True
+        return False
 
     def _summarize_text(self, text: str, task: FileTask):
         """Выполнить суммаризацию текста."""

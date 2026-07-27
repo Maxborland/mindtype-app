@@ -491,6 +491,107 @@ def test_recovered_cloud_file_is_removed_only_after_remote_cancel(
     widget.deleteLater.assert_called_once_with()
 
 
+def test_stopped_batch_schedules_remote_cancel_outside_gui_thread(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app.main import MainWindow
+    from app.operation_models import OperationStatus
+    from app.transcription_models import FileStatus, FileTask
+
+    created = []
+
+    class Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+        def emit(self, *args):
+            self.callback(*args)
+
+    class FakeWorker:
+        def __init__(self, executor, operation_id):
+            self.executor = executor
+            self.operation_id = operation_id
+            self.resolved = Signal()
+            self.failed = Signal()
+            self.finished = Signal()
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr("app.main.CloudCancellationWorker", FakeWorker)
+    task = FileTask(
+        file_path=tmp_path / "queued.wav",
+        status=FileStatus.CANCELLED,
+        operation_id="queued-cloud-job",
+    )
+    task.cancellation_pending = True
+    running = SimpleNamespace(
+        operation_id=task.operation_id,
+        status=OperationStatus.RUNNING,
+        canonical_result_path=None,
+    )
+    cancel_requested = SimpleNamespace(
+        operation_id=task.operation_id,
+        status=OperationStatus.CANCEL_REQUESTED,
+        canonical_result_path=None,
+    )
+    coordinator = MagicMock()
+    coordinator.sync_file_task.return_value = running
+    coordinator.request_cancel.return_value = cancel_requested
+    widget = MagicMock()
+    window = SimpleNamespace(
+        _operation_coordinator=coordinator,
+        _preserve_cloud_jobs_on_shutdown=False,
+        _file_tasks=[task],
+        _file_widgets={str(task.file_path): widget},
+        _task_key=lambda path: str(path),
+        _init_mindtype_cloud=MagicMock(),
+        _cloud_executor=MagicMock(),
+        _cancellation_workers=set(),
+        _add_journal_entry=MagicMock(),
+        _file_processing_batch_size=0,
+    )
+    window._retry_file_task_cancellation = (
+        lambda current, **options: MainWindow._retry_file_task_cancellation(
+            window,
+            current,
+            **options,
+        )
+    )
+    window._on_file_batch_cancellation_resolved = (
+        lambda current: MainWindow._on_file_batch_cancellation_resolved(
+            window,
+            current,
+        )
+    )
+    window._on_file_batch_cancellation_failed = (
+        lambda current, operation_id, error: (
+            MainWindow._on_file_batch_cancellation_failed(
+                window,
+                current,
+                operation_id,
+                error,
+            )
+        )
+    )
+
+    MainWindow._on_file_task_completed(window, task)
+
+    coordinator.request_cancel.assert_called_once_with(task.operation_id)
+    window._cloud_executor.cancel.assert_not_called()
+    assert created[0].started is True
+    assert task in window._file_tasks
+
+    created[0].resolved.emit(task.operation_id)
+
+    assert task.cancellation_pending is False
+    assert task in window._file_tasks
+    widget.update_status.assert_called()
+
+
 def test_file_batch_prioritizes_one_persisted_cloud_route() -> None:
     from pathlib import Path
 

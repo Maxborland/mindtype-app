@@ -5377,6 +5377,21 @@ class MainWindow(QMainWindow):
                         and task.status is FileStatus.CANCELLED
                     ),
                 )
+                if (
+                    task.status is FileStatus.CANCELLED
+                    and task.cancellation_pending
+                ):
+                    if (
+                        operation.status
+                        is not OperationStatus.CANCEL_REQUESTED
+                    ):
+                        operation = self._operation_coordinator.request_cancel(
+                            task.operation_id
+                        )
+                    self._retry_file_task_cancellation(
+                        task,
+                        remove_when_resolved=False,
+                    )
                 if task.status is FileStatus.COMPLETED:
                     if operation.canonical_result_path is None:
                         raise RuntimeError("Canonical file result was not saved")
@@ -5594,9 +5609,19 @@ class MainWindow(QMainWindow):
                 logger.exception("Could not cancel durable file operation")
         return True
 
-    def _retry_file_task_cancellation(self, task: FileTask) -> None:
+    def _retry_file_task_cancellation(
+        self,
+        task: FileTask,
+        *,
+        remove_when_resolved: bool = True,
+    ) -> None:
         """Отменить recovered cloud job до удаления его UI-записи."""
         if not task.cancellation_pending:
+            return
+        if any(
+            getattr(worker, "operation_id", None) == task.operation_id
+            for worker in self._cancellation_workers
+        ):
             return
         self._init_mindtype_cloud()
         if self._cloud_executor is None:
@@ -5611,26 +5636,81 @@ class MainWindow(QMainWindow):
             task.operation_id,
         )
         self._cancellation_workers.add(worker)
-        worker.resolved.connect(
-            lambda _identifier, current=task: (
-                self._on_file_task_cancellation_resolved(current)
-            )
-        )
-        worker.failed.connect(
-            lambda identifier, error, current=task: (
-                self._on_file_task_cancellation_failed(
-                    current,
-                    identifier,
-                    error,
+        if remove_when_resolved:
+            worker.resolved.connect(
+                lambda _identifier, current=task: (
+                    self._on_file_task_cancellation_resolved(current)
                 )
             )
-        )
+            worker.failed.connect(
+                lambda identifier, error, current=task: (
+                    self._on_file_task_cancellation_failed(
+                        current,
+                        identifier,
+                        error,
+                    )
+                )
+            )
+        else:
+            worker.resolved.connect(
+                lambda _identifier, current=task: (
+                    self._on_file_batch_cancellation_resolved(current)
+                )
+            )
+            worker.failed.connect(
+                lambda identifier, error, current=task: (
+                    self._on_file_batch_cancellation_failed(
+                        current,
+                        identifier,
+                        error,
+                    )
+                )
+            )
         worker.finished.connect(
             lambda current=worker: self._cancellation_workers.discard(
                 current
             )
         )
         worker.start()
+
+    def _on_file_batch_cancellation_resolved(
+        self,
+        task: FileTask,
+    ) -> None:
+        task.cancellation_pending = False
+        task.status = FileStatus.CANCELLED
+        widget = self._file_widgets.get(self._task_key(task.file_path))
+        if widget:
+            widget.update_status()
+        self._add_journal_entry(
+            "success",
+            "Cloud cancellation confirmed",
+            text=task.operation_id,
+            is_translatable=False,
+        )
+
+    def _on_file_batch_cancellation_failed(
+        self,
+        task: FileTask,
+        operation_id: str,
+        error: str,
+    ) -> None:
+        self._add_journal_entry(
+            "error",
+            "Cloud cancellation is pending",
+            text=f"{operation_id}: {error}",
+            is_translatable=False,
+        )
+        if task in self._file_tasks and task.cancellation_pending:
+            QTimer.singleShot(
+                60_000,
+                lambda current=task: (
+                    self._retry_file_task_cancellation(
+                        current,
+                        remove_when_resolved=False,
+                    )
+                ),
+            )
 
     def _on_file_task_cancellation_resolved(
         self,

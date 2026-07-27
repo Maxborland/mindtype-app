@@ -643,23 +643,28 @@ def test_pending_cloud_cancel_respects_poll_interval(
     assert waits == [0.25]
 
 
-def test_cancel_pending_recovered_cloud_job_calls_remote_executor(
+def test_cancel_pending_recovered_cloud_job_defers_remote_executor(
     tmp_path: Path,
 ) -> None:
     from app.file_transcriber import FileTranscriptionQueue
-    from app.operation_models import OperationStatus
     from app.transcription_models import (
         FileStatus,
         FileTask,
         TranscribeOptions,
     )
 
-    cancelled = []
+    operation = SimpleNamespace(
+        server_job_ids={"transcription": "server-job"}
+    )
+    cancel_calls = []
 
     class Executor:
+        coordinator = SimpleNamespace(
+            store=SimpleNamespace(get=lambda _operation_id: operation)
+        )
+
         def cancel(self, operation_id):
-            cancelled.append(operation_id)
-            return SimpleNamespace(status=OperationStatus.CANCEL_REQUESTED)
+            cancel_calls.append(operation_id)
 
     completed = []
     queue = FileTranscriptionQueue(
@@ -684,7 +689,7 @@ def test_cancel_pending_recovered_cloud_job_calls_remote_executor(
 
     assert queue.cancel() == [task]
 
-    assert cancelled == ["recovered-cloud-job"]
+    assert cancel_calls == []
     assert completed == [task]
     assert task.status is FileStatus.CANCELLED
     assert task.cancellation_pending is True
