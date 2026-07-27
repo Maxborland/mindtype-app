@@ -342,6 +342,15 @@ class SystemAudioRecorder:
     def recording(self) -> bool:
         return self._active.is_set()
 
+    @property
+    def finalizing(self) -> bool:
+        return (
+            self._active.is_set()
+            or self._capture_thread is not None
+            or self._writer_thread is not None
+            or self._path is not None
+        )
+
 
 class MultiTrackAudioRecorder:
     """Coordinate independent microphone and system-audio recorders."""
@@ -417,6 +426,15 @@ class MultiTrackAudioRecorder:
                     microphone_result.track.path.unlink(missing_ok=True)
                 else:
                     self._results.append(microphone_result)
+            if (
+                microphone_result.track is not None
+                or getattr(self.microphone, "finalizing", True) is False
+            ):
+                if (
+                    microphone_result.track is None
+                    and not self._discard_results_on_finalize
+                ):
+                    self._results.append(microphone_result)
                 self._microphone_finalized = True
         if source in {
             AudioSourceKind.SYSTEM,
@@ -427,6 +445,15 @@ class MultiTrackAudioRecorder:
                 if self._discard_results_on_finalize:
                     system_result.track.path.unlink(missing_ok=True)
                 else:
+                    self._results.append(system_result)
+            if (
+                system_result.track is not None
+                or getattr(self.system, "finalizing", True) is False
+            ):
+                if (
+                    system_result.track is None
+                    and not self._discard_results_on_finalize
+                ):
                     self._results.append(system_result)
                 self._system_finalized = True
 

@@ -325,7 +325,10 @@ class FileQueueItemWidget(QFrame):
         )
         status_text = f"{icon} {self._translate(key)}"
 
-        if self.task.status == FileStatus.ERROR and self.task.error_message:
+        if (
+            self.task.status in {FileStatus.PENDING, FileStatus.ERROR}
+            and self.task.error_message
+        ):
             status_text += f": {self.task.error_message[:50]}"
 
         self._status_label.setText(status_text)

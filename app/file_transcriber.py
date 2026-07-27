@@ -225,12 +225,17 @@ class FileTranscriptionQueue:
         """Отменить обработку."""
         self._cancelled.set()
         self._running.clear()
-        cancel_current = getattr(self.transcriber, "cancel_current", None)
-        if callable(cancel_current):
-            try:
-                cancel_current()
-            except Exception:
-                pass
+        if self.uses_local_transcriber:
+            cancel_current = getattr(
+                self.transcriber,
+                "cancel_current",
+                None,
+            )
+            if callable(cancel_current):
+                try:
+                    cancel_current()
+                except Exception:
+                    pass
 
         cancelled_tasks = []
         for task in self._tasks:
@@ -713,10 +718,17 @@ class FileTranscriptionQueue:
                 if self._on_completed:
                     self._on_completed(task)
                 return
-            if operation.status in {
-                OperationStatus.FAILED,
-                OperationStatus.RETRYABLE,
-            }:
+            if operation.status is OperationStatus.RETRYABLE:
+                task.status = FileStatus.PENDING
+                task.progress = 0
+                task.error_message = (
+                    operation.last_error_code or "CLOUD_RETRY_REQUIRED"
+                )
+                self._running.clear()
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+            if operation.status is OperationStatus.FAILED:
                 task.status = FileStatus.ERROR
                 task.error_message = (
                     operation.last_error_code or "CLOUD_PROCESSING_FAILED"

@@ -156,6 +156,112 @@ def test_cloud_file_queue_polls_durable_executor_and_reads_canonical_result(
     assert completed == [task]
 
 
+def test_retryable_cloud_file_stays_actionable_with_same_operation(
+    tmp_path: Path,
+) -> None:
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import (
+        FileStatus,
+        FileTask,
+        TranscribeOptions,
+    )
+
+    source = tmp_path / "meeting.wav"
+    source.write_bytes(b"audio")
+    route = {
+        "transcription": {
+            "provider": "mindtype_cloud",
+            "model": "auto",
+        }
+    }
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    operation = coordinator.create_file_operation(
+        source,
+        route=route,
+        operation_id="retryable-cloud-file",
+    )
+
+    class Executor:
+        def advance_transcription(self, operation_id, **_options):
+            coordinator.begin_attempt(
+                operation_id,
+                stage=OperationStage.TRANSCRIBE,
+            )
+            return coordinator.mark_retryable(
+                operation_id,
+                error_code="INSUFFICIENT_CREDITS",
+            )
+
+    completed = []
+    queue = FileTranscriptionQueue(
+        transcriber=UnusedLocalTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        cloud_executor=Executor(),
+        cloud_poll_interval=0,
+        on_completed=completed.append,
+    )
+    task = FileTask(
+        file_path=source,
+        source_asset_path=operation.source_asset_path,
+        operation_id=operation.operation_id,
+    )
+    queue._running.set()
+
+    queue._process_cloud_task(task)
+
+    assert task.status is FileStatus.PENDING
+    assert task.error_message == "INSUFFICIENT_CREDITS"
+    assert queue.is_running is False
+    assert completed == [task]
+    resumed = coordinator.prepare_file_task(task, route=route)
+    assert resumed.operation_id == operation.operation_id
+    assert resumed.status is OperationStatus.RUNNING
+    assert resumed.attempt_count == 2
+
+
+def test_stopping_cloud_file_queue_does_not_cancel_shared_local_backend(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.transcription_models import TranscribeOptions
+
+    transcriber = MagicMock()
+    queue = FileTranscriptionQueue(
+        transcriber=transcriber,
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        cloud_executor=MagicMock(),
+    )
+
+    queue.cancel()
+
+    transcriber.cancel_current.assert_not_called()
+
+
 def test_local_transcription_can_use_cloud_summary_without_repeating_stt(
     tmp_path: Path,
     monkeypatch,

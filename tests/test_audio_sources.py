@@ -461,6 +461,36 @@ def test_multitrack_stop_keeps_each_source_result() -> None:
     system.start.assert_called_once()
 
 
+def test_multitrack_finalizes_microphone_error_without_a_track() -> None:
+    microphone = MagicMock()
+    microphone.finalizing = False
+    microphone.stop_capture.return_value = AudioCaptureResult(
+        status=AudioCaptureStatus.INTERRUPTED,
+        track=None,
+        error="WAV writer failed",
+    )
+    system = MagicMock()
+    session = MultiTrackAudioRecorder(
+        microphone=microphone,
+        system=system,
+    )
+    session.start(AudioSourceKind.MICROPHONE)
+
+    capture = session.stop()
+
+    assert capture.results == (
+        AudioCaptureResult(
+            status=AudioCaptureStatus.INTERRUPTED,
+            track=None,
+            error="WAV writer failed",
+        ),
+    )
+    assert capture.interrupted is True
+    assert session.recording is False
+    session.start(AudioSourceKind.MICROPHONE)
+    assert microphone.start.call_count == 2
+
+
 def test_multitrack_keeps_session_owned_until_system_track_finalizes() -> None:
     microphone = MagicMock()
     system = MagicMock()

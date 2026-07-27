@@ -293,6 +293,14 @@ class AudioRecorder:
     def recording(self) -> bool:
         return self._running.is_set()
 
+    @property
+    def finalizing(self) -> bool:
+        return (
+            self._running.is_set()
+            or self._writer_thread is not None
+            or self._tmp_path is not None
+        )
+
     # === Мониторинг микрофона (без записи) ===
 
     def _monitor_callback_fn(self, indata, frames, time, status) -> None:
