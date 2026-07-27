@@ -1108,6 +1108,9 @@ class MindTypeCloudExecutor:
             return operation
         if operation.status is OperationStatus.CANCEL_REQUESTED:
             return self.cancel(operation_id)
+        resuming_retryable = (
+            operation.status is OperationStatus.RETRYABLE
+        )
         if operation.status in {
             OperationStatus.CREATED,
             OperationStatus.RETRYABLE,
@@ -1132,7 +1135,10 @@ class MindTypeCloudExecutor:
                 summary_job = self.client.get_summary(summary_id)
                 if (
                     str(summary_job.get("state") or "") == "awaiting_funds"
-                    or self._is_retryable_failure(summary_job)
+                    or (
+                        resuming_retryable
+                        and self._is_retryable_failure(summary_job)
+                    )
                 ):
                     summary_job = self.client.resume_summary(summary_id)
                 return self._handle_summary_job(
@@ -1147,7 +1153,10 @@ class MindTypeCloudExecutor:
                 if str(job.get("state") or "") in {
                     "awaiting_funds",
                     "awaiting_upload",
-                } or self._is_retryable_failure(job):
+                } or (
+                    resuming_retryable
+                    and self._is_retryable_failure(job)
+                ):
                     job = self.client.resume_transcription(
                         transcription_id
                     )
@@ -1259,6 +1268,9 @@ class MindTypeCloudExecutor:
             return operation
         if operation.status is OperationStatus.CANCEL_REQUESTED:
             return self.cancel(operation_id)
+        resuming_retryable = (
+            operation.status is OperationStatus.RETRYABLE
+        )
         if operation.status in {
             OperationStatus.CREATED,
             OperationStatus.RETRYABLE,
@@ -1286,7 +1298,10 @@ class MindTypeCloudExecutor:
                 summary_job = self.client.get_summary(summary_id)
                 if (
                     str(summary_job.get("state") or "") == "awaiting_funds"
-                    or self._is_retryable_failure(summary_job)
+                    or (
+                        resuming_retryable
+                        and self._is_retryable_failure(summary_job)
+                    )
                 ):
                     summary_job = self.client.resume_summary(summary_id)
                 return self._handle_summary_job(

@@ -352,6 +352,67 @@ def test_retryable_failed_job_resumes_existing_remote_job(
     ]
 
 
+@pytest.mark.parametrize(
+    ("remote_kind", "remote_id"),
+    [
+        ("transcription", "job-existing"),
+        ("summary", "summary-existing"),
+    ],
+)
+def test_running_failed_job_waits_for_explicit_retry(
+    tmp_path: Path,
+    remote_kind: str,
+    remote_id: str,
+) -> None:
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+
+    coordinator, operation = operation_fixture(tmp_path)
+    stage = (
+        OperationStage.TRANSCRIBE
+        if remote_kind == "transcription"
+        else OperationStage.SUMMARIZE
+    )
+    running = coordinator.begin_attempt(operation.operation_id, stage=stage)
+    coordinator.store.transition(
+        running.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={remote_kind: remote_id},
+    )
+    client = FakeCloudClient()
+    failed_job = {
+        "id": remote_id,
+        "state": "failed",
+        "error": {
+            "code": "PROVIDER_UNAVAILABLE",
+            "retryable": True,
+            "retry_after_seconds": 30,
+        },
+    }
+    if remote_kind == "transcription":
+        client.job = failed_job
+    else:
+        client.summary_job = failed_job
+    executor = MindTypeCloudExecutor(client=client, coordinator=coordinator)
+
+    if remote_kind == "transcription":
+        updated = executor.advance_transcription(
+            operation.operation_id,
+            options={},
+        )
+    else:
+        updated = executor.advance_summary(
+            operation.operation_id,
+            canonical_transcript={},
+            options={},
+        )
+
+    assert updated.status is OperationStatus.RETRYABLE
+    assert updated.last_error_code == "PROVIDER_UNAVAILABLE"
+    assert updated.retry_after is not None
+    assert client.calls == [(f"get_{remote_kind}", remote_id)]
+
+
 def test_success_is_saved_and_source_waits_for_projection_ack(
     tmp_path: Path,
 ) -> None:
