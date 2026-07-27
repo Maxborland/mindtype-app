@@ -15,6 +15,7 @@
 #define AppPublisher "MindType"
 #define AppURL "https://mindtype.space"
 #define AppExeName "MindType.exe"
+#define WhisperServerExeName "whisper-server.exe"
 #define AppId "{{B2C3D4E5-F6A7-8901-BCDE-F12345678901}"
 
 [Setup]
@@ -108,6 +109,7 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(
 [UninstallRun]
 ; Close app before uninstall
 Filename: "taskkill"; Parameters: "/F /IM {#AppExeName}"; Flags: runhidden; RunOnceId: "KillApp"
+Filename: "taskkill"; Parameters: "/F /IM {#WhisperServerExeName}"; Flags: runhidden; RunOnceId: "KillWhisperServer"
 
 [Code]
 // Custom messages
@@ -150,6 +152,11 @@ begin
     Exec('taskkill', '/F /IM {#AppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(500);
   end;
+
+  // A manually launched installer does not pass through updater cleanup.
+  Exec('taskkill', '/IM {#WhisperServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(500);
+  Exec('taskkill', '/F /IM {#WhisperServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 // Initialize setup
@@ -177,6 +184,7 @@ begin
   Result := True;
   // Close app before uninstall
   Exec('taskkill', '/F /IM {#AppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM {#WhisperServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(500);
 end;
 

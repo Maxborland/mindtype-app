@@ -96,6 +96,26 @@ def test_uninstall_preserves_user_data():
     assert "{localappdata}" not in installer
 
 
+def test_installer_stops_persistent_whisper_server():
+    installer = (ROOT / "installer" / "windows.iss").read_text(
+        encoding="utf-8"
+    )
+
+    assert '#define WhisperServerExeName "whisper-server.exe"' in installer
+    assert (
+        'Parameters: "/F /IM {#WhisperServerExeName}"'
+        in installer
+    )
+    assert (
+        "Exec('taskkill', '/IM {#WhisperServerExeName}'"
+        in installer
+    )
+    assert (
+        "Exec('taskkill', '/F /IM {#WhisperServerExeName}'"
+        in installer
+    )
+
+
 def test_onnx_dependencies_use_a_compatible_transformers_range():
     base = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     onnx = (ROOT / "requirements-local-onnx.txt").read_text(encoding="utf-8")

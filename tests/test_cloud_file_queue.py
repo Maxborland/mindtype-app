@@ -301,7 +301,10 @@ def test_local_transcription_can_use_cloud_summary_without_repeating_stt(
     )
 
     class LocalTranscriber:
+        calls = 0
+
         def transcribe_with_timestamps(self, **_kwargs):
+            self.calls += 1
             return (
                 [{"start": 0.0, "end": 1.0, "text": "Локальный текст"}],
                 "ru",
@@ -390,7 +393,7 @@ def test_retryable_cloud_summary_keeps_hybrid_task_pending(
 ) -> None:
     from app.file_transcriber import FileTranscriptionQueue
     from app.operation_coordinator import OperationCoordinator
-    from app.operation_models import OperationStatus
+    from app.operation_models import OperationStage, OperationStatus
     from app.operation_store import OperationStore
     from app.spool import SpoolManager
     from app.transcription_models import (
@@ -419,7 +422,10 @@ def test_retryable_cloud_summary_keeps_hybrid_task_pending(
     )
 
     class LocalTranscriber:
+        calls = 0
+
         def transcribe_with_timestamps(self, **_kwargs):
+            self.calls += 1
             return (
                 [{"start": 0.0, "end": 1.0, "text": "Локальный текст"}],
                 "ru",
@@ -429,16 +435,49 @@ def test_retryable_cloud_summary_keeps_hybrid_task_pending(
     class SummaryExecutor:
         def __init__(self):
             self.coordinator = coordinator
+            self.calls = 0
 
-        def advance_summary(self, operation_id, **_options):
-            return coordinator.mark_retryable(
+        def advance_summary(
+            self,
+            operation_id,
+            *,
+            canonical_transcript,
+            **_options,
+        ):
+            self.calls += 1
+            if self.calls == 1:
+                coordinator.save_canonical_checkpoint(
+                    operation_id,
+                    canonical_transcript,
+                    stage=OperationStage.SUMMARIZE,
+                )
+                operation = coordinator.store.get(operation_id)
+                coordinator.store.transition(
+                    operation_id,
+                    operation.status,
+                    stage=OperationStage.SUMMARIZE,
+                    server_job_ids={"summary": "summary-1"},
+                )
+                return coordinator.mark_retryable(
+                    operation_id,
+                    error_code="INSUFFICIENT_CREDITS",
+                )
+            result = dict(canonical_transcript)
+            result["summary"] = {
+                "text": "Облачный итог после resume",
+                "preset": "pm",
+                "generated": True,
+                "source_segment_ids": ["segment-0001"],
+            }
+            return coordinator.save_canonical_result(
                 operation_id,
-                error_code="INSUFFICIENT_CREDITS",
+                result,
             )
 
     completed = []
+    transcriber = LocalTranscriber()
     queue = FileTranscriptionQueue(
-        transcriber=LocalTranscriber(),
+        transcriber=transcriber,
         transcribe=TranscribeOptions(
             model_size="small",
             compute_type="int8",
@@ -470,6 +509,14 @@ def test_retryable_cloud_summary_keeps_hybrid_task_pending(
     assert resumed.operation_id == task.operation_id
     assert resumed.status is OperationStatus.RUNNING
     assert resumed.attempt_count == 2
+
+    queue._running.set()
+    queue._process_task(task)
+
+    assert transcriber.calls == 1
+    assert task.status is FileStatus.COMPLETED
+    assert task.result.summary == "Облачный итог после resume"
+    assert len(completed) == 2
 
 
 def test_failed_cloud_cancel_stays_durable_for_startup_recovery(

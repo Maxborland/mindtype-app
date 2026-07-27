@@ -350,6 +350,9 @@ class FileTranscriptionQueue:
         if self.cloud_executor is not None:
             self._process_cloud_task(task)
             return
+        if self._restore_persisted_cloud_summary(task):
+            self._resume_persisted_cloud_summary(task)
+            return
         processing_path = task.processing_path
         audio_path = processing_path
 
@@ -601,6 +604,62 @@ class FileTranscriptionQueue:
                 task.status = FileStatus.ERROR
                 task.error_message = str(e)
 
+        if self._on_completed:
+            self._on_completed(task)
+
+    def _restore_persisted_cloud_summary(self, task: FileTask) -> bool:
+        executor = self.cloud_summary_executor
+        if executor is None:
+            return False
+        coordinator = executor.coordinator
+        operation = coordinator.store.get(task.operation_id)
+        if (
+            operation is None
+            or not operation.server_job_ids.get("summary")
+        ):
+            return False
+        checkpoint = coordinator.load_canonical_checkpoint(
+            task.operation_id
+        )
+        if checkpoint is None:
+            raise RuntimeError(
+                "Cloud summary checkpoint is missing"
+            )
+        task.result = self._result_from_canonical(
+            checkpoint,
+            fallback_path=task.file_path,
+        )
+        return True
+
+    def _resume_persisted_cloud_summary(self, task: FileTask) -> None:
+        task.status = FileStatus.SUMMARIZING
+        task.progress = 70
+        if self._on_progress:
+            self._on_progress(task)
+        try:
+            if not self._summarize_local_result_in_cloud(task):
+                if (
+                    self._shutdown_requested.is_set()
+                    or task.status in {
+                        FileStatus.PENDING,
+                        FileStatus.CANCELLED,
+                    }
+                ):
+                    return
+                raise RuntimeError(
+                    "MindType Cloud summary did not complete"
+                )
+            task.status = FileStatus.COMPLETED
+            task.progress = 100
+        except Exception as exc:
+            if self._shutdown_requested.is_set():
+                return
+            if self._cancelled.is_set():
+                task.status = FileStatus.CANCELLED
+                task.progress = 0
+            else:
+                task.status = FileStatus.ERROR
+                task.error_message = f"Ошибка саммаризации: {exc}"
         if self._on_completed:
             self._on_completed(task)
 

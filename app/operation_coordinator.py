@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -18,7 +19,11 @@ from .operation_models import (
     utc_now,
 )
 from .operation_store import OperationStore
-from .result_schema import CanonicalResultError, write_canonical_result
+from .result_schema import (
+    CanonicalResultError,
+    validate_canonical_result,
+    write_canonical_result,
+)
 from .spool import SpoolAsset, SpoolManager
 
 
@@ -373,6 +378,44 @@ class OperationCoordinator:
             stage=stage,
         )
         return checkpoint_path
+
+    def load_canonical_checkpoint(
+        self,
+        operation_id: str,
+        *,
+        name: str = "transcript",
+    ) -> Optional[dict[str, Any]]:
+        """Read and validate a durable intermediate result for retry."""
+        operation = self.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        checkpoint_path = (
+            self.spool.operation_dir(operation_id)
+            / "checkpoints"
+            / f"{name}.json"
+        )
+        if not checkpoint_path.is_file():
+            return None
+        try:
+            raw = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CanonicalResultError(
+                "canonical checkpoint is unreadable"
+            ) from exc
+        payload = validate_canonical_result(
+            raw,
+            expected_operation_id=operation_id,
+        )
+        source = payload.get("source")
+        if (
+            operation.source_sha256 is not None
+            and isinstance(source, Mapping)
+            and source.get("sha256") != operation.source_sha256
+        ):
+            raise CanonicalResultError(
+                "canonical checkpoint belongs to a different source asset"
+            )
+        return payload
 
     def complete_dictation(
         self,
