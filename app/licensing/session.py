@@ -542,6 +542,7 @@ class CloudSessionManager:
         self,
         *,
         now: Optional[datetime] = None,
+        force: bool = False,
     ) -> EntitlementClaims:
         checked_at = now or datetime.now(timezone.utc)
         if checked_at.tzinfo is None:
@@ -550,7 +551,8 @@ class CloudSessionManager:
             checked_at = checked_at.astimezone(timezone.utc)
         with self._session_lock:
             if (
-                self._access_token is not None
+                not force
+                and self._access_token is not None
                 and self._access_expires_at is not None
                 and self._access_expires_at
                 > checked_at + timedelta(seconds=30)

@@ -2,7 +2,7 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -476,6 +476,94 @@ def test_lease_revalidation_is_due_before_offline_expiry(
         }
 
     assert manager.needs_revalidation() is True
+
+
+def test_lease_only_activation_renews_before_expiry(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.license_manager import LicenseManager, ValidationResult
+
+    data_dir = tmp_path / "MindType"
+    now = datetime.now(timezone.utc)
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now - timedelta(days=6, minutes=1),
+                expires_at=now + timedelta(hours=23, minutes=59),
+            )
+        )
+        renewals = []
+
+        def renew() -> None:
+            renewals.append("renewed")
+            manager.install_entitlement_lease(
+                _lease(
+                    signing_key,
+                    device_id=manager.get_device_id(),
+                    issued_at=now,
+                    expires_at=now + timedelta(days=7),
+                )
+            )
+
+        manager.set_entitlement_renewer(renew)
+
+        assert manager.needs_revalidation() is True
+        assert manager.revalidate_if_needed() is ValidationResult.SUCCESS
+
+    assert renewals == ["renewed"]
+    assert manager.needs_revalidation() is False
+
+
+def test_seen_lease_without_legacy_cache_attempts_session_renewal(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.license_manager import LicenseManager, ValidationResult
+
+    data_dir = tmp_path / "MindType"
+    now = datetime.now(timezone.utc)
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now,
+                expires_at=now + timedelta(days=7),
+            )
+        )
+        manager._lease_claims = None
+        renew = MagicMock()
+        manager.set_entitlement_renewer(renew)
+
+        assert manager.needs_revalidation() is True
+        assert manager.revalidate_if_needed() is ValidationResult.SUCCESS
+
+    renew.assert_called_once_with()
 
 
 def test_expired_seen_lease_does_not_start_a_new_local_trial(

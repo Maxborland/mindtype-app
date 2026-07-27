@@ -727,6 +727,9 @@ class MainWindow(QMainWindow):
                 self.license_manager.set_cloud_deactivator(
                     self._cloud_session_manager.deactivate_remote
                 )
+                self.license_manager.set_entitlement_renewer(
+                    self._refresh_mindtype_cloud_session
+                )
         except Exception:
             logger.exception("MindType Cloud session boundary is unavailable")
         self.license_manager.revalidate_if_needed_async()
@@ -911,12 +914,13 @@ class MainWindow(QMainWindow):
         from .licensing.session import LicenseSessionError
 
         try:
-            self._cloud_session_manager.refresh_access_token()
+            self._cloud_session_manager.refresh_access_token(force=True)
             return
         except LicenseSessionError as error:
+            if error.authoritative:
+                self.license_manager.clear_authoritative_cache()
+                raise
             if error.code != "AUTH_REQUIRED":
-                if error.authoritative:
-                    self.license_manager.clear_authoritative_cache()
                 raise
 
         license_info = self.license_manager.get_license_info()

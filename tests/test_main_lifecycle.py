@@ -592,6 +592,20 @@ def test_stopped_batch_schedules_remote_cancel_outside_gui_thread(
     widget.update_status.assert_called()
 
 
+def test_server_rejected_access_token_forces_cloud_session_refresh() -> None:
+    from app.main import MainWindow
+
+    session_manager = MagicMock()
+    window = SimpleNamespace(
+        _cloud_session_manager=session_manager,
+        license_manager=MagicMock(),
+    )
+
+    MainWindow._refresh_mindtype_cloud_session(window)
+
+    session_manager.refresh_access_token.assert_called_once_with(force=True)
+
+
 def test_file_batch_prioritizes_one_persisted_cloud_route() -> None:
     from pathlib import Path
 
