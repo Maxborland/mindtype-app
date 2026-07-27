@@ -478,6 +478,45 @@ def test_lease_revalidation_is_due_before_offline_expiry(
     assert manager.needs_revalidation() is True
 
 
+def test_hybrid_lease_honors_configured_revalidation_interval(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.license_manager import LicenseManager
+
+    data_dir = tmp_path / "MindType"
+    now = datetime.now(timezone.utc)
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch("app.env.LICENSE_REVALIDATION_INTERVAL", 86400),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now,
+                expires_at=now + timedelta(days=7),
+            )
+        )
+        manager._license_data = {
+            "license_key": "ABCDEFGHJKMNPQRS",
+            "validated_at": (now - timedelta(days=2))
+            .replace(tzinfo=None)
+            .isoformat(),
+        }
+
+        assert manager.needs_revalidation() is True
+
+
 def test_lease_only_activation_renews_before_expiry(
     tmp_path,
     signing_key: Ed25519PrivateKey,

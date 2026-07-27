@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, Callable
+from typing import Callable, Optional, Tuple
 
 from .entitlement import (
     EntitlementClaims,
@@ -29,7 +29,7 @@ from .entitlement import (
     write_durable_text,
 )
 from .key_validator import KeyValidator
-from .trial import TrialManager, TRIAL_DURATION_DAYS, TRIAL_TRANSCRIPTION_LIMIT_SECONDS
+from .trial import TRIAL_DURATION_DAYS, TrialManager
 
 logger = logging.getLogger("mindtype.license")
 
@@ -663,10 +663,13 @@ class LicenseManager:
 
     def needs_revalidation(self) -> bool:
         """Проверить, нужна ли ревалидация лицензии."""
+        lease_due = False
         if self._lease_claims is not None:
             expires_at = self._lease_claims.expires_at
             current = datetime.now(expires_at.tzinfo)
-            return current >= expires_at - timedelta(days=1)
+            lease_due = current >= expires_at - timedelta(days=1)
+            if self._license_data is None:
+                return lease_due
         if (
             self._license_data is None
             and self._lease_marker_file.exists()
@@ -696,7 +699,7 @@ class LicenseManager:
                 if deadline.tzinfo is not None
                 else datetime.now()
             )
-            return current >= deadline
+            return lease_due or current >= deadline
         except Exception:
             return True
 
