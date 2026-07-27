@@ -16,6 +16,8 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
+_ACK_RETRY_DELAYS_MS = (5_000, 15_000, 60_000, 300_000)
+
 # Для корректного отображения иконки в панели задач Windows
 if sys.platform == "win32":
     import ctypes
@@ -675,6 +677,9 @@ class MainWindow(QMainWindow):
         self._transcribe_thread: Optional[QThread] = None
         self._cancellation_workers: set[QThread] = set()
         self._acknowledgement_workers: set[QThread] = set()
+        self._acknowledgement_inflight: set[str] = set()
+        self._acknowledgement_retry_failures: dict[str, int] = {}
+        self._acknowledgement_retry_pending: set[str] = set()
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
@@ -5900,6 +5905,8 @@ class MainWindow(QMainWindow):
         """ACK remote artifacts before removing the durable local source."""
         if self._operation_coordinator is None:
             raise RuntimeError("Durable operation storage is unavailable")
+        if operation_id in self._acknowledgement_inflight:
+            return
 
         operation = self._operation_coordinator.store.get(operation_id)
         if operation is None:
@@ -5917,21 +5924,58 @@ class MainWindow(QMainWindow):
                 cloud_executor_factory=lambda: captured_executor,
             ),
         )
+        self._acknowledgement_inflight.add(operation_id)
         self._acknowledgement_workers.add(worker)
+        worker.resolved.connect(self._on_operation_acknowledged)
         worker.failed.connect(
-            lambda identifier, error: self._add_journal_entry(
-                "error",
-                "Result acknowledgement is pending",
-                text=f"{identifier}: {error}",
-                is_translatable=False,
-            )
+            self._on_operation_acknowledgement_failed
         )
         worker.finished.connect(
-            lambda current=worker: self._acknowledgement_workers.discard(
-                current
+            lambda current=worker, identifier=operation_id: (
+                self._acknowledgement_workers.discard(current),
+                self._acknowledgement_inflight.discard(identifier),
             )
         )
         worker.start()
+
+    def _on_operation_acknowledged(self, operation_id: str) -> None:
+        self._acknowledgement_retry_failures.pop(operation_id, None)
+        self._acknowledgement_retry_pending.discard(operation_id)
+
+    def _on_operation_acknowledgement_failed(
+        self,
+        operation_id: str,
+        error: str,
+    ) -> None:
+        failures = self._acknowledgement_retry_failures.get(
+            operation_id,
+            0,
+        )
+        self._add_journal_entry(
+            "error",
+            "Result acknowledgement is pending",
+            text=f"{operation_id}: {error}",
+            is_translatable=False,
+        )
+        if (
+            failures >= len(_ACK_RETRY_DELAYS_MS)
+            or operation_id in self._acknowledgement_retry_pending
+        ):
+            return
+        self._acknowledgement_retry_failures[operation_id] = failures + 1
+        self._acknowledgement_retry_pending.add(operation_id)
+        QTimer.singleShot(
+            _ACK_RETRY_DELAYS_MS[failures],
+            lambda identifier=operation_id: (
+                self._run_scheduled_acknowledgement(identifier)
+            ),
+        )
+
+    def _run_scheduled_acknowledgement(self, operation_id: str) -> None:
+        if operation_id not in self._acknowledgement_retry_pending:
+            return
+        self._acknowledgement_retry_pending.discard(operation_id)
+        self._acknowledge_completed_operation(operation_id)
 
     def _cleanup_expired_spool(self) -> None:
         if self._operation_coordinator is None:

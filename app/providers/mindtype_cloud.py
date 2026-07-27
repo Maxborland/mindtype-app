@@ -1121,6 +1121,8 @@ class MindTypeCloudExecutor:
             summary_id = operation.server_job_ids.get("summary")
             if summary_id:
                 summary_job = self.client.get_summary(summary_id)
+                if str(summary_job.get("state") or "") == "awaiting_funds":
+                    summary_job = self.client.resume_summary(summary_id)
                 return self._handle_summary_job(
                     operation_id,
                     summary_job,
@@ -1130,6 +1132,13 @@ class MindTypeCloudExecutor:
             )
             if transcription_id:
                 job = self.client.get_transcription(transcription_id)
+                if str(job.get("state") or "") in {
+                    "awaiting_funds",
+                    "awaiting_upload",
+                }:
+                    job = self.client.resume_transcription(
+                        transcription_id
+                    )
                 return self._handle_job(
                     operation_id,
                     job,
@@ -1262,9 +1271,12 @@ class MindTypeCloudExecutor:
         try:
             summary_id = operation.server_job_ids.get("summary")
             if summary_id:
+                summary_job = self.client.get_summary(summary_id)
+                if str(summary_job.get("state") or "") == "awaiting_funds":
+                    summary_job = self.client.resume_summary(summary_id)
                 return self._handle_summary_job(
                     operation_id,
-                    self.client.get_summary(summary_id),
+                    summary_job,
                 )
             self.coordinator.save_canonical_checkpoint(
                 operation_id,

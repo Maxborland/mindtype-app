@@ -52,6 +52,11 @@ class FakeCloudClient:
         self.calls.append(("get_transcription", job_id))
         return self.job
 
+    def resume_transcription(self, job_id):
+        self.calls.append(("resume_transcription", job_id))
+        self.job = {**self.job, "state": "queued"}
+        return self.job
+
     def get_transcription_result(self, job_id, *, expected_operation_id=None):
         self.calls.append(
             ("get_transcription_result", job_id, expected_operation_id)
@@ -92,6 +97,11 @@ class FakeCloudClient:
 
     def get_summary(self, job_id):
         self.calls.append(("get_summary", job_id))
+        return self.summary_job
+
+    def resume_summary(self, job_id):
+        self.calls.append(("resume_summary", job_id))
+        self.summary_job = {**self.summary_job, "state": "queued"}
         return self.summary_job
 
     def get_summary_result(self, job_id, *, expected_operation_id=None):
@@ -199,6 +209,82 @@ def test_executor_restart_polls_existing_job_without_upload_or_post(
 
     assert updated.status is OperationStatus.RUNNING
     assert client.calls == [("get_transcription", "job-existing")]
+
+
+def test_retryable_transcription_resumes_existing_awaiting_funds_job(
+    tmp_path: Path,
+) -> None:
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+
+    coordinator, operation = operation_fixture(tmp_path)
+    running = coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    coordinator.store.transition(
+        running.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"transcription": "job-existing"},
+    )
+    coordinator.mark_retryable(
+        operation.operation_id,
+        error_code="INSUFFICIENT_CREDITS",
+    )
+    client = FakeCloudClient()
+    client.job = {"id": "job-existing", "state": "awaiting_funds"}
+    executor = MindTypeCloudExecutor(client=client, coordinator=coordinator)
+
+    updated = executor.advance_transcription(
+        operation.operation_id,
+        options={},
+    )
+
+    assert updated.status is OperationStatus.RUNNING
+    assert client.calls == [
+        ("get_transcription", "job-existing"),
+        ("resume_transcription", "job-existing"),
+    ]
+
+
+def test_retryable_summary_resumes_existing_awaiting_funds_job(
+    tmp_path: Path,
+) -> None:
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+
+    coordinator, operation = operation_fixture(tmp_path)
+    running = coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.SUMMARIZE,
+    )
+    coordinator.store.transition(
+        running.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"summary": "summary-existing"},
+    )
+    coordinator.mark_retryable(
+        operation.operation_id,
+        error_code="INSUFFICIENT_CREDITS",
+    )
+    client = FakeCloudClient()
+    client.summary_job = {
+        "id": "summary-existing",
+        "state": "awaiting_funds",
+    }
+    executor = MindTypeCloudExecutor(client=client, coordinator=coordinator)
+
+    updated = executor.advance_summary(
+        operation.operation_id,
+        canonical_transcript={},
+        options={},
+    )
+
+    assert updated.status is OperationStatus.RUNNING
+    assert client.calls == [
+        ("get_summary", "summary-existing"),
+        ("resume_summary", "summary-existing"),
+    ]
 
 
 def test_success_is_saved_and_source_waits_for_projection_ack(
