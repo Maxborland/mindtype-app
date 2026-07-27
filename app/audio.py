@@ -247,7 +247,8 @@ class AudioRecorder:
                 )
                 else None
             )
-            self._started_at_monotonic_ns = None
+            if not writer_is_alive:
+                self._started_at_monotonic_ns = None
             return AudioCaptureResult(
                 status=AudioCaptureStatus.INTERRUPTED,
                 track=track,

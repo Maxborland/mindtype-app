@@ -155,6 +155,7 @@ class FileTask:
     trial_time_charged: bool = False
     operation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cloud_job_id: Optional[str] = None
+    cancellation_pending: bool = False
 
     def claim_trial_time_charge(self) -> bool:
         """Вернуть True только для первого списания времени этой задачи."""

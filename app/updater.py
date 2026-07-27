@@ -198,13 +198,20 @@ class Updater:
                     info.release_notes = manifest.release_notes
 
                     if self._is_newer(latest_version, self.current_version):
-                        info.available = device_is_in_rollout(
-                            device_id=(
-                                self._rollout_device_id
-                                or "anonymous-local-device"
-                            ),
-                            version=latest_version,
-                            percentage=manifest.rollout_percentage,
+                        below_minimum = self._is_newer(
+                            manifest.minimum_supported_version,
+                            self.current_version,
+                        )
+                        info.available = (
+                            below_minimum
+                            or device_is_in_rollout(
+                                device_id=(
+                                    self._rollout_device_id
+                                    or "anonymous-local-device"
+                                ),
+                                version=latest_version,
+                                percentage=manifest.rollout_percentage,
+                            )
                         )
                         if info.available:
                             logger.info(

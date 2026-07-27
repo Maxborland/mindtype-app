@@ -620,6 +620,9 @@ class OperationCoordinator:
         operation = self.store.get(task.operation_id)
         if operation is None:
             raise KeyError(task.operation_id)
+        preserve_inflight = preserve_inflight or bool(
+            getattr(task, "cancellation_pending", False)
+        )
 
         stage_by_status = {
             FileStatus.EXTRACTING: OperationStage.TRANSCRIBE,

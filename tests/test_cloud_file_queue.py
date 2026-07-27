@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 
 class UnusedLocalTranscriber:
@@ -235,3 +236,122 @@ def test_local_transcription_can_use_cloud_summary_without_repeating_stt(
     ] == "local"
     assert task.source_asset_path.exists() is False
     assert completed == [task]
+
+
+def test_failed_cloud_cancel_stays_durable_for_startup_recovery(
+    tmp_path: Path,
+) -> None:
+    import pytest
+
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import (
+        FileStatus,
+        FileTask,
+        TranscribeOptions,
+    )
+
+    source = tmp_path / "meeting.wav"
+    source.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    operation = coordinator.create_file_operation(
+        source,
+        route={
+            "transcription": {
+                "provider": "mindtype_cloud",
+                "model": "auto",
+            }
+        },
+        operation_id="cancel-recovery",
+    )
+
+    class FailingExecutor:
+        def cancel(self, operation_id):
+            coordinator.request_cancel(operation_id)
+            raise RuntimeError("network unavailable")
+
+    queue = FileTranscriptionQueue(
+        transcriber=UnusedLocalTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        cloud_executor=FailingExecutor(),
+    )
+    task = FileTask(
+        file_path=source,
+        source_asset_path=operation.source_asset_path,
+        operation_id=operation.operation_id,
+        status=FileStatus.TRANSCRIBING,
+    )
+    queue._cancelled.set()
+
+    with pytest.raises(RuntimeError, match="network unavailable"):
+        queue._process_cloud_task(task)
+
+    task.status = FileStatus.CANCELLED
+    durable = coordinator.sync_file_task(task)
+    assert task.cancellation_pending is True
+    assert durable.status is OperationStatus.CANCEL_REQUESTED
+
+
+def test_pending_cloud_cancel_respects_poll_interval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.operation_models import OperationStage, OperationStatus
+    from app.transcription_models import FileTask, TranscribeOptions
+
+    calls = []
+
+    class Executor:
+        def cancel(self, _operation_id):
+            calls.append("cancel")
+            status = (
+                OperationStatus.CANCEL_REQUESTED
+                if len(calls) == 1
+                else OperationStatus.CANCELLED
+            )
+            return SimpleNamespace(
+                status=status,
+                stage=OperationStage.TRANSCRIBE,
+            )
+
+    sleeps = []
+    monkeypatch.setattr(
+        "app.file_transcriber.time.sleep",
+        sleeps.append,
+    )
+    queue = FileTranscriptionQueue(
+        transcriber=UnusedLocalTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        cloud_executor=Executor(),
+        cloud_poll_interval=0.25,
+    )
+    queue._cancelled.set()
+    task = FileTask(file_path=tmp_path / "meeting.wav")
+
+    queue._process_cloud_task(task)
+
+    assert calls == ["cancel", "cancel"]
+    assert sleeps == [0.25]

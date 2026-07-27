@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 import threading
 import queue
+import time
 
 from .text_processor.repetition_filter import (
     filter_hallucinated_segments,
@@ -641,7 +642,13 @@ class FileTranscriptionQueue:
 
         while True:
             if self._cancelled.is_set():
-                operation = self.cloud_executor.cancel(task.operation_id)
+                try:
+                    operation = self.cloud_executor.cancel(
+                        task.operation_id
+                    )
+                except Exception:
+                    task.cancellation_pending = True
+                    raise
             else:
                 operation = self.cloud_executor.advance_transcription(
                     task.operation_id,
@@ -697,8 +704,7 @@ class FileTranscriptionQueue:
                 task.progress = max(task.progress, 25)
             if self._on_progress:
                 self._on_progress(task)
-            if self._cancelled.wait(self.cloud_poll_interval):
-                continue
+            self._wait_for_cloud_poll()
 
     def _summarize_local_result_in_cloud(self, task: FileTask) -> bool:
         """Poll one idempotent summary job without repeating local STT."""
@@ -710,9 +716,13 @@ class FileTranscriptionQueue:
         )
         while True:
             if self._cancelled.is_set():
-                operation = self.cloud_summary_executor.cancel(
-                    task.operation_id
-                )
+                try:
+                    operation = self.cloud_summary_executor.cancel(
+                        task.operation_id
+                    )
+                except Exception:
+                    task.cancellation_pending = True
+                    raise
             else:
                 operation = self.cloud_summary_executor.advance_summary(
                     task.operation_id,
@@ -746,8 +756,13 @@ class FileTranscriptionQueue:
                 task.progress = max(task.progress, 75)
             if self._on_progress:
                 self._on_progress(task)
-            if self._cancelled.wait(self.cloud_poll_interval):
-                continue
+            self._wait_for_cloud_poll()
+
+    def _wait_for_cloud_poll(self) -> None:
+        if self._cancelled.is_set():
+            time.sleep(self.cloud_poll_interval)
+            return
+        self._cancelled.wait(self.cloud_poll_interval)
 
     def _summarize_text(self, text: str, task: FileTask):
         """Выполнить суммаризацию текста."""

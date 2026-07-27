@@ -23,7 +23,12 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 UPDATE_SIGNER = "CN=MindType"
 
 
-def signed_update_payload(version="1.2.0", release_notes="New features"):
+def signed_update_payload(
+    version="1.2.0",
+    release_notes="New features",
+    minimum_supported_version="0.9.0",
+    rollout_percentage=100,
+):
     private_key = Ed25519PrivateKey.generate()
     public = private_key.public_key().public_bytes(
         Encoding.Raw,
@@ -36,7 +41,7 @@ def signed_update_payload(version="1.2.0", release_notes="New features"):
         "version": version,
         "platform": "windows",
         "architecture": "x86_64",
-        "minimum_supported_version": "0.9.0",
+        "minimum_supported_version": minimum_supported_version,
         "url": (
             f"https://releases.mindtype.space/"
             f"MindType-{version}-Setup.exe"
@@ -44,7 +49,7 @@ def signed_update_payload(version="1.2.0", release_notes="New features"):
         "sha256": "a" * 64,
         "size": 53_000_000,
         "published_at": datetime.now(timezone.utc).isoformat(),
-        "rollout_percentage": 100,
+        "rollout_percentage": rollout_percentage,
         "authenticode_signer": UPDATE_SIGNER,
         "release_notes": release_notes,
     }
@@ -206,6 +211,56 @@ class TestUpdaterCheckForUpdates:
         assert info.available is False
         assert info.version == "1.0.0"
         assert info.error is None
+
+    def test_below_minimum_version_bypasses_staged_rollout(self):
+        from app.updater import Updater
+
+        mock_response = MagicMock()
+        payload, public_key = signed_update_payload(
+            version="1.2.0",
+            minimum_supported_version="1.1.0",
+            rollout_percentage=0,
+        )
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="excluded-device",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            info = updater.check_for_updates()
+
+        assert info.available is True
+
+    def test_supported_version_still_respects_staged_rollout(self):
+        from app.updater import Updater
+
+        mock_response = MagicMock()
+        payload, public_key = signed_update_payload(
+            version="1.2.0",
+            minimum_supported_version="0.9.0",
+            rollout_percentage=0,
+        )
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="excluded-device",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            info = updater.check_for_updates()
+
+        assert info.available is False
 
     def test_missing_embedded_trust_root_does_not_touch_network(self):
         from app.updater import Updater

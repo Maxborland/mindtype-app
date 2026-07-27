@@ -140,6 +140,31 @@ class TestAudioRecorder:
         assert recorder._writer_thread is None
         assert recorder._tmp_path is None
 
+    def test_typed_stop_retry_preserves_original_capture_timestamp(
+        self,
+        tmp_path,
+    ):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "unfinished.wav"
+        wav_path.touch()
+        writer = MagicMock()
+        writer.is_alive.side_effect = [True, True, False]
+        recorder._tmp_path = wav_path
+        recorder._queue = MagicMock()
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+        recorder._started_at_monotonic_ns = 123
+
+        unfinished = recorder.stop_capture(timeout=0.01)
+        finalized = recorder.stop_capture(timeout=0.01)
+
+        assert unfinished.status is AudioCaptureStatus.INTERRUPTED
+        assert unfinished.track is None
+        assert finalized.status is AudioCaptureStatus.COMPLETED
+        assert finalized.track is not None
+        assert finalized.track.started_at_monotonic_ns == 123
+
     def test_full_queue_stop_retries_the_writer_sentinel(self, tmp_path):
         recorder = AudioRecorder()
         wav_path = tmp_path / "pending.wav"
