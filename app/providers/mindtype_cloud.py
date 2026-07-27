@@ -852,9 +852,10 @@ class MindTypeCloudExecutor:
                 code=CloudErrorCode.INSUFFICIENT_CREDITS.value,
             )
         if state == "expired":
-            return self._retryable(
+            return self.coordinator.store.transition(
                 operation_id,
-                code=CloudErrorCode.RESULT_EXPIRED.value,
+                OperationStatus.FAILED,
+                last_error_code=CloudErrorCode.RESULT_EXPIRED.value,
             )
         if state == "cancelling":
             operation = self.coordinator.store.get(operation_id)
@@ -949,9 +950,10 @@ class MindTypeCloudExecutor:
                 code=CloudErrorCode.INSUFFICIENT_CREDITS.value,
             )
         if state == "expired":
-            return self._retryable(
+            return self.coordinator.store.transition(
                 operation_id,
-                code=CloudErrorCode.RESULT_EXPIRED.value,
+                OperationStatus.FAILED,
+                last_error_code=CloudErrorCode.RESULT_EXPIRED.value,
             )
         if state == "cancelling":
             operation = self.coordinator.store.get(operation_id)

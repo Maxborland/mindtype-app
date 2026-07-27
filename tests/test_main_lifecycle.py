@@ -73,3 +73,53 @@ def test_failed_projection_keeps_source_pending_ack(
     coordinator.acknowledge_result.assert_not_called()
     assert task.status is FileStatus.COMPLETED
     assert "Export failed" in task.warning
+
+
+def test_recovered_dictation_action_starts_the_preserved_operation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app.dictation_state import DictationPhase, DictationState
+    from app.main import MainWindow
+    from app.operation_models import OperationStatus
+
+    source = tmp_path / "recovered.wav"
+    source.write_bytes(b"preserved")
+    operation = SimpleNamespace(
+        operation_id="dictation-retry",
+        status=OperationStatus.RETRYABLE,
+        source_asset_path=source,
+    )
+    coordinator = MagicMock()
+    coordinator.store.get.return_value = operation
+    monkeypatch.setattr("app.main.get_file_duration", lambda _path: 1.25)
+    window = SimpleNamespace(
+        _operation_coordinator=coordinator,
+        _retryable_dictation_ids=[operation.operation_id],
+        license_manager=MagicMock(),
+        audio_session=SimpleNamespace(recording=False),
+        _dictation=DictationState(),
+        _dictation_operation_ids={},
+        _dictation_durations_ms={},
+        _update_recovered_dictation_actions=MagicMock(),
+        _show_trial_expired_dialog=MagicMock(),
+        _add_journal_entry=MagicMock(),
+        _announce_status=MagicMock(),
+        _run_transcription=MagicMock(),
+        overlay=MagicMock(),
+        _t=lambda key: key,
+    )
+    window.license_manager.check_transcription_entitlement.return_value = (
+        True,
+        None,
+    )
+
+    MainWindow._retry_next_recovered_dictation(window)
+
+    coordinator.begin_attempt.assert_called_once()
+    assert window._retryable_dictation_ids == []
+    assert window._dictation.phase is DictationPhase.TRANSCRIBING
+    token = window._dictation.operation_token
+    assert window._dictation_operation_ids[token] == operation.operation_id
+    assert window._dictation_durations_ms[token] == 1250
+    window._run_transcription.assert_called_once_with(source, token)

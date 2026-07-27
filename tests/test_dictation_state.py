@@ -71,6 +71,16 @@ def test_begin_transcription_without_autoinsert():
     assert s.auto_insert_pending is False
 
 
+def test_recovered_dictation_gets_a_fresh_transcription_token():
+    s = DictationState()
+
+    token = s.begin_recovery(auto_insert=False)
+
+    assert token == 1
+    assert s.phase is DictationPhase.TRANSCRIBING
+    assert s.auto_insert_pending is False
+
+
 def test_finish_transcription_keeps_autoinsert_flag():
     s = DictationState()
     token = s.begin_recording(started_at=1.0)

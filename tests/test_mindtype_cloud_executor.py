@@ -361,6 +361,44 @@ def test_insufficient_credits_moves_operation_to_retryable(
     assert updated.last_error_code == "INSUFFICIENT_CREDITS"
 
 
+def test_expired_remote_job_becomes_terminal_instead_of_polling_forever(
+    tmp_path: Path,
+) -> None:
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+
+    coordinator, operation = operation_fixture(tmp_path)
+    running = coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    coordinator.store.transition(
+        running.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"transcription": "expired-job"},
+    )
+    client = FakeCloudClient()
+    client.job = {"id": "expired-job", "state": "expired"}
+    executor = MindTypeCloudExecutor(
+        client=client,
+        coordinator=coordinator,
+    )
+
+    failed = executor.advance_transcription(
+        operation.operation_id,
+        options={},
+    )
+    replay = executor.advance_transcription(
+        operation.operation_id,
+        options={},
+    )
+
+    assert failed.status is OperationStatus.FAILED
+    assert failed.last_error_code == "RESULT_EXPIRED"
+    assert replay.status is OperationStatus.FAILED
+    assert client.calls.count(("get_transcription", "expired-job")) == 1
+
+
 def test_cancel_uses_existing_job_and_finishes_only_after_response(
     tmp_path: Path,
 ) -> None:

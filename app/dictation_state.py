@@ -72,6 +72,16 @@ class DictationState:
         self.auto_insert_pending = auto_insert
         return True
 
+    def begin_recovery(self, *, auto_insert: bool = False) -> int:
+        if self.phase is DictationPhase.RECORDING or self.transcribing:
+            raise RuntimeError("dictation is already active")
+        self.operation_token += 1
+        self.phase = DictationPhase.TRANSCRIBING
+        self.auto_insert_pending = auto_insert
+        self.recording_started_at = None
+        self.recording_quota_deadline = None
+        return self.operation_token
+
     def request_cancel(self, token: int) -> bool:
         if token != self.operation_token:
             return False

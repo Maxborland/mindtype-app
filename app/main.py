@@ -678,6 +678,7 @@ class MainWindow(QMainWindow):
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
         self._dictation_operation_ids: dict[int, str] = {}
         self._dictation_durations_ms: dict[int, int] = {}
+        self._retryable_dictation_ids: list[str] = []
         self._recording_hotkey = False  # отдельная забота: идёт перепривязка хоткея в настройках
         self._really_quit = False  # Флаг для полного выхода
         self._preserve_cloud_jobs_on_shutdown = False
@@ -2628,6 +2629,15 @@ class MainWindow(QMainWindow):
 
         # Заголовок несёт сам title bar окна — внутри только кнопка очистки (справа)
         journal_header = QHBoxLayout()
+        self.retry_dictation_btn = QPushButton(
+            self._t("retry_recovered_dictation")
+        )
+        self.retry_dictation_btn.setObjectName("smallButton")
+        self.retry_dictation_btn.setVisible(False)
+        self.retry_dictation_btn.clicked.connect(
+            self._retry_next_recovered_dictation
+        )
+        journal_header.addWidget(self.retry_dictation_btn)
         journal_header.addStretch()
         self.clear_journal_btn = QPushButton(self._t("clear_journal"))
         self.clear_journal_btn.setObjectName("smallButton")
@@ -3240,6 +3250,9 @@ class MainWindow(QMainWindow):
 
         # Журнал
         self.clear_journal_btn.setText(self._t("clear_journal"))
+        self.retry_dictation_btn.setText(
+            self._t("retry_recovered_dictation")
+        )
         self.journal.set_translate_func(self._t)
         if hasattr(self, "journal_btn"):
             self.journal_btn.setText(self._t("journal"))
@@ -3317,6 +3330,16 @@ class MainWindow(QMainWindow):
         )
         tray_menu.addAction(self.tray_repeat_insert_action)
 
+        self.tray_retry_dictation_action = QAction(
+            self._t("retry_recovered_dictation"),
+            self,
+        )
+        self.tray_retry_dictation_action.setVisible(False)
+        self.tray_retry_dictation_action.triggered.connect(
+            self._retry_next_recovered_dictation
+        )
+        tray_menu.addAction(self.tray_retry_dictation_action)
+
         tray_menu.addSeparator()
 
         # Выход
@@ -3382,6 +3405,9 @@ class MainWindow(QMainWindow):
             self.tray_record_action.setText(self._t("start_recording"))
             self.tray_repeat_insert_action.setText(
                 self._t("repeat_last_insert")
+            )
+            self.tray_retry_dictation_action.setText(
+                self._t("retry_recovered_dictation")
             )
             self.tray_exit_action.setText(self._t("exit"))
 
@@ -5273,15 +5299,109 @@ class MainWindow(QMainWindow):
                     )
 
             for operation in durable_recovery.retryable_dictations:
+                if (
+                    operation.operation_id
+                    not in self._retryable_dictation_ids
+                ):
+                    self._retryable_dictation_ids.append(
+                        operation.operation_id
+                    )
                 self._add_journal_entry(
                     "error",
                     "Recovered dictation requires retry",
                     text=str(operation.source_asset_path),
                     is_translatable=False,
                 )
+            self._update_recovered_dictation_actions()
             for operation in durable_recovery.pending_cancellations:
                 self._retry_pending_cancellation(operation.operation_id)
         self._update_file_queue_ui()
+
+    def _update_recovered_dictation_actions(self) -> None:
+        available = bool(self._retryable_dictation_ids)
+        if hasattr(self, "retry_dictation_btn"):
+            self.retry_dictation_btn.setVisible(available)
+            self.retry_dictation_btn.setEnabled(available)
+        if hasattr(self, "tray_retry_dictation_action"):
+            self.tray_retry_dictation_action.setVisible(available)
+            self.tray_retry_dictation_action.setEnabled(available)
+
+    def _retry_next_recovered_dictation(self) -> None:
+        if (
+            self._operation_coordinator is None
+            or not self._retryable_dictation_ids
+        ):
+            self._update_recovered_dictation_actions()
+            return
+        has_access, _info = (
+            self.license_manager.check_transcription_entitlement()
+        )
+        if not has_access:
+            self._show_trial_expired_dialog()
+            return
+        if self.audio_session.recording or self._dictation.transcribing:
+            self._add_journal_entry(
+                "error",
+                "error",
+                text="Finish the active dictation before retrying recovery.",
+                is_translatable=False,
+            )
+            return
+
+        operation_id = self._retryable_dictation_ids[0]
+        operation = self._operation_coordinator.store.get(operation_id)
+        if (
+            operation is None
+            or operation.status is not OperationStatus.RETRYABLE
+            or not operation.source_asset_path.is_file()
+        ):
+            self._retryable_dictation_ids.pop(0)
+            self._update_recovered_dictation_actions()
+            self._add_journal_entry(
+                "error",
+                "error",
+                text="Recovered dictation audio is no longer available.",
+                is_translatable=False,
+            )
+            return
+
+        try:
+            duration_ms = max(
+                0,
+                int(get_file_duration(operation.source_asset_path) * 1000),
+            )
+            self._operation_coordinator.begin_attempt(
+                operation_id,
+                stage=OperationStage.TRANSCRIBE,
+            )
+            operation_token = self._dictation.begin_recovery(
+                auto_insert=False
+            )
+        except Exception as exc:
+            logger.exception("Could not retry recovered dictation")
+            self._add_journal_entry(
+                "error",
+                "error",
+                text=str(exc),
+                is_translatable=False,
+            )
+            return
+
+        self._retryable_dictation_ids.pop(0)
+        self._update_recovered_dictation_actions()
+        self._dictation_operation_ids[operation_token] = operation_id
+        self._dictation_durations_ms[operation_token] = duration_ms
+        self.overlay.show_processing()
+        self._announce_status(self._t("transcribing"))
+        self._add_journal_entry(
+            "pending",
+            "transcribing",
+            is_translatable=True,
+        )
+        self._run_transcription(
+            operation.source_asset_path,
+            operation_token,
+        )
 
     def _retry_pending_cancellation(self, operation_id: str) -> None:
         """Retry a durable cloud cancellation without blocking the GUI."""
