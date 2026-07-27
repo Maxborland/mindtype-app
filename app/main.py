@@ -5450,12 +5450,19 @@ class MainWindow(QMainWindow):
         self,
         task: FileTask,
         operation_id: str,
+        *,
+        recovered_duration_seconds: Optional[float] = None,
     ) -> None:
-        if task.result is None or not task.claim_trial_time_charge():
+        duration = recovered_duration_seconds
+        if duration is None:
+            if task.result is None:
+                return
+            duration = task.result.duration
+        if not task.claim_trial_time_charge():
             return
         try:
             self.license_manager.add_transcription_time(
-                task.result.duration,
+                duration,
                 operation_id=operation_id,
             )
         except Exception:
@@ -5693,6 +5700,9 @@ class MainWindow(QMainWindow):
                             self,
                             recovered_task,
                             operation.operation_id,
+                            recovered_duration_seconds=(
+                                projection.file_duration_seconds
+                            ),
                         )
                         if recovered_task.operation_id not in existing_operation_ids:
                             self._file_tasks.append(recovered_task)

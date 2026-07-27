@@ -26,6 +26,7 @@ from .entitlement import (
     EntitlementLeaseStore,
     EntitlementLeaseVerifier,
     LeaseValidationError,
+    write_durable_text,
 )
 from .key_validator import KeyValidator
 from .trial import TrialManager, TRIAL_DURATION_DAYS, TRIAL_TRANSCRIPTION_LIMIT_SECONDS
@@ -380,8 +381,14 @@ class LicenseManager:
                 "ENTITLEMENT_VERIFIER_UNAVAILABLE",
                 "desktop build has no entitlement public key",
             )
-        claims = self._lease_store.save(token, now=now)
-        self._lease_marker_file.write_text("1", encoding="ascii")
+        claims = self._lease_store.save(
+            token,
+            now=now,
+            before_publish=lambda: write_durable_text(
+                self._lease_marker_file,
+                "1",
+            ),
+        )
         self._lease_claims = claims
         self._lease_error_code = None
         self._license_data = None
@@ -923,13 +930,12 @@ class LicenseManager:
         self._lease_claims = None
         self._license_data = None
         self._lease_error_code = "ENTITLEMENT_REQUIRED"
+        write_durable_text(self._lease_marker_file, "1")
         if self._lease_store is not None:
             self._lease_store.clear()
         else:
             self._lease_file.unlink(missing_ok=True)
         self._license_file.unlink(missing_ok=True)
-        self._lease_marker_file.parent.mkdir(parents=True, exist_ok=True)
-        self._lease_marker_file.touch(exist_ok=True)
 
     def get_device_name(self) -> str:
         """Получить имя текущего устройства."""

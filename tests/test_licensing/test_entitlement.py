@@ -1,6 +1,7 @@
 import base64
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -253,6 +254,59 @@ def test_license_manager_migrates_legacy_cache_to_signed_lease(
     assert not manager._license_file.exists()
     assert manager._lease_file.exists()
     assert manager._lease_marker_file.exists()
+
+
+def test_lease_migration_marker_survives_crash_before_lease_publish(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    import app.licensing.entitlement as entitlement_module
+    from app.licensing.license_manager import LicenseManager, LicenseStatus
+
+    data_dir = tmp_path / "MindType"
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager._license_data = {
+            "license_key": "ABCDEFGHJKMNPQRS",
+            "validated_at": datetime.now().isoformat(),
+        }
+        manager._save_license()
+        durable_write = entitlement_module.write_durable_text
+
+        def crash_before_lease(path: Path, value: str) -> None:
+            if path == manager._lease_file:
+                raise OSError("power loss")
+            durable_write(path, value)
+
+        with patch.object(
+            entitlement_module,
+            "write_durable_text",
+            side_effect=crash_before_lease,
+        ):
+            with pytest.raises(OSError, match="power loss"):
+                manager.install_entitlement_lease(
+                    _lease(
+                        signing_key,
+                        device_id=manager.get_device_id(),
+                    )
+                )
+        restarted = LicenseManager(lease_verifier=verifier)
+
+    assert manager._lease_marker_file.is_file()
+    assert manager._license_file.is_file()
+    assert not manager._lease_file.exists()
+    assert restarted._license_data is None
+    assert restarted.get_license_info().status is LicenseStatus.INVALID
 
 
 def test_missing_adopted_lease_invalidates_in_memory_claims(

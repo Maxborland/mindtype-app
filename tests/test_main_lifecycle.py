@@ -2,6 +2,30 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
+def test_recovered_file_trial_usage_uses_canonical_duration() -> None:
+    from app.main import MainWindow
+
+    task = SimpleNamespace(
+        result=None,
+        trial_time_charged=False,
+        claim_trial_time_charge=MagicMock(return_value=True),
+    )
+    window = SimpleNamespace(license_manager=MagicMock())
+
+    MainWindow._record_file_trial_usage(
+        window,
+        task,
+        "recovered-operation",
+        recovered_duration_seconds=12.345,
+    )
+
+    task.claim_trial_time_charge.assert_called_once_with()
+    window.license_manager.add_transcription_time.assert_called_once_with(
+        12.345,
+        operation_id="recovered-operation",
+    )
+
+
 def test_recording_is_rejected_before_capture_without_durable_storage() -> None:
     from app.main import MainWindow
 

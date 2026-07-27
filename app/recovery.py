@@ -17,6 +17,7 @@ from .transcription_models import FileStatus, FileTask
 class RecoveredProjection:
     file_task: Optional[FileTask]
     dictation_text: Optional[str]
+    file_duration_seconds: Optional[float] = None
 
 
 def project_completed_operation(
@@ -62,4 +63,8 @@ def project_completed_operation(
             for format_, path in exported.items()
         },
     )
-    return RecoveredProjection(file_task=task, dictation_text=None)
+    return RecoveredProjection(
+        file_task=task,
+        dictation_text=None,
+        file_duration_seconds=float(payload["source"]["duration_ms"]) / 1000,
+    )

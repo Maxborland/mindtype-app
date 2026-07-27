@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -51,7 +51,7 @@ def _checked_at(value: datetime | None = None) -> datetime:
     return checked.astimezone(timezone.utc)
 
 
-def _write_atomic(path: Path, value: str) -> None:
+def write_durable_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
@@ -310,7 +310,7 @@ class EntitlementLeaseStore:
                     "system clock moved backwards after lease validation",
                 )
         observed_at = max(checked_at, high_water or checked_at)
-        _write_atomic(self.clock_path, observed_at.isoformat())
+        write_durable_text(self.clock_path, observed_at.isoformat())
 
     def load(self, *, now: datetime | None = None) -> EntitlementClaims:
         token = self.path.read_text(encoding="utf-8")
@@ -327,6 +327,7 @@ class EntitlementLeaseStore:
         token: str,
         *,
         now: datetime | None = None,
+        before_publish: Callable[[], None] | None = None,
     ) -> EntitlementClaims:
         claims = self._verifier.verify(
             token,
@@ -334,7 +335,9 @@ class EntitlementLeaseStore:
             now=now,
         )
         self._advance_clock(now, require_existing=self.path.exists())
-        _write_atomic(self.path, token)
+        if before_publish is not None:
+            before_publish()
+        write_durable_text(self.path, token)
         return claims
 
     def clear(self) -> None:

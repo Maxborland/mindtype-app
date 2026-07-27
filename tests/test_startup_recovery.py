@@ -44,6 +44,7 @@ def test_completed_file_is_projected_for_ui_before_ack(tmp_path: Path) -> None:
     assert projected.file_task.operation_id == operation.operation_id
     assert projected.file_task.output_files["json"].is_file()
     assert projected.dictation_text is None
+    assert projected.file_duration_seconds == 12.345
     assert completed.source_asset_path.is_file()
 
 
