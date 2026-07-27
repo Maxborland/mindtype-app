@@ -655,6 +655,122 @@ def test_restart_adopts_result_saved_before_database_transition(
     )["retention_deadline"] is None
 
 
+def test_completion_metadata_failure_keeps_database_recoverable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import pytest
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from tests.test_result_schema import canonical_result
+
+    original = tmp_path / "metadata-failure.wav"
+    original.write_bytes(b"audio")
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="metadata-failure",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    payload = canonical_result(operation.operation_id)
+    payload["source"]["sha256"] = operation.source_sha256
+    def fail_metadata(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        coordinator.spool,
+        "write_operation_metadata",
+        fail_metadata,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        coordinator.save_canonical_result(operation.operation_id, payload)
+
+    interrupted = coordinator.store.get(operation.operation_id)
+    assert interrupted.status is OperationStatus.RUNNING
+    assert (
+        spool_root / operation.operation_id / "result.json"
+    ).is_file()
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    recovery = reopened.restore_startup()
+    recovered = reopened.store.get(operation.operation_id)
+    assert recovered.status is OperationStatus.COMPLETED
+    assert recovery.completed_pending_ack == (recovered,)
+
+
+def test_startup_repairs_stale_completed_retention_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    from datetime import timedelta
+
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus, utc_now
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from tests.test_result_schema import canonical_result
+
+    original = tmp_path / "stale-completed.wav"
+    original.write_bytes(b"audio")
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="stale-completed",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    payload = canonical_result(operation.operation_id)
+    payload["source"]["sha256"] = operation.source_sha256
+    completed = coordinator.save_canonical_result(
+        operation.operation_id,
+        payload,
+    )
+    coordinator.spool.write_operation_metadata(
+        operation.operation_id,
+        retention_deadline=utc_now() - timedelta(seconds=1),
+        display_name=original.name,
+    )
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    recovery = reopened.restore_startup()
+    recovered = reopened.store.get(operation.operation_id)
+
+    assert recovered.status is OperationStatus.COMPLETED
+    assert recovered.canonical_result_path.is_file()
+    assert recovered.source_asset_path.is_file()
+    assert recovery.completed_pending_ack == (recovered,)
+    assert reopened.spool.read_operation_metadata(
+        operation.operation_id
+    )["retention_deadline"] is None
+    assert completed.operation_id == recovered.operation_id
+
+
 def test_startup_recovery_exposes_retryable_dictation(
     tmp_path: Path,
 ) -> None:

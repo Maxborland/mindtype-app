@@ -319,16 +319,16 @@ class OperationCoordinator:
             payload,
             expected_operation_id=operation_id,
         )
+        self.spool.write_operation_metadata(
+            operation_id,
+            retention_deadline=None,
+        )
         completed = self.store.transition(
             operation_id,
             OperationStatus.COMPLETED,
             stage=OperationStage.EXPORT,
             canonical_result_path=result_path,
             progress=100,
-            retention_deadline=None,
-        )
-        self.spool.write_operation_metadata(
-            operation_id,
             retention_deadline=None,
         )
         return completed
@@ -580,14 +580,10 @@ class OperationCoordinator:
         """Recover durable work without starting processing or spending money."""
         from .transcription_models import FileStatus, FileTask
 
-        running_before_recovery = self.store.list_running()
         self.store.recover_incomplete()
-        for previous in running_before_recovery:
-            recovered = self.store.get(previous.operation_id)
-            if (
-                recovered is not None
-                and recovered.status is OperationStatus.COMPLETED
-            ):
+        completed_operations = self.store.list_completed()
+        for recovered in completed_operations:
+            if self.spool.operation_dir(recovered.operation_id).is_dir():
                 self.spool.write_operation_metadata(
                     recovered.operation_id,
                     retention_deadline=None,
@@ -616,7 +612,7 @@ class OperationCoordinator:
             )
         completed_pending_ack = tuple(
             operation
-            for operation in self.store.list_completed()
+            for operation in completed_operations
             if operation.source_asset_path.is_file()
             and operation.canonical_result_path is not None
             and operation.canonical_result_path.is_file()

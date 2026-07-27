@@ -275,9 +275,19 @@ class EntitlementLeaseStore:
         self._verifier = verifier
         self._device_id = device_id
 
-    def _advance_clock(self, now: datetime | None) -> None:
+    def _advance_clock(
+        self,
+        now: datetime | None,
+        *,
+        require_existing: bool,
+    ) -> None:
         checked_at = _checked_at(now)
         high_water: datetime | None = None
+        if require_existing and not self.clock_path.exists():
+            raise LeaseValidationError(
+                "ENTITLEMENT_CLOCK_INVALID",
+                "entitlement clock state is missing",
+            )
         if self.clock_path.exists():
             try:
                 high_water = datetime.fromisoformat(
@@ -309,7 +319,7 @@ class EntitlementLeaseStore:
             device_id=self._device_id,
             now=now,
         )
-        self._advance_clock(now)
+        self._advance_clock(now, require_existing=True)
         return claims
 
     def save(
@@ -323,7 +333,7 @@ class EntitlementLeaseStore:
             device_id=self._device_id,
             now=now,
         )
-        self._advance_clock(now)
+        self._advance_clock(now, require_existing=self.path.exists())
         _write_atomic(self.path, token)
         return claims
 

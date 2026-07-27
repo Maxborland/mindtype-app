@@ -190,6 +190,31 @@ def test_store_rejects_clock_rollback_after_prior_validation(
     assert store.clock_path.is_file()
 
 
+def test_store_rejects_missing_clock_for_an_adopted_lease(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    issued_at = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    path = tmp_path / "entitlement.lease"
+    store = EntitlementLeaseStore(path, verifier, device_id="device-123")
+    store.save(
+        _lease(
+            signing_key,
+            issued_at=issued_at,
+            expires_at=issued_at + timedelta(days=7),
+        ),
+        now=issued_at + timedelta(days=2),
+    )
+    store.clock_path.unlink()
+
+    with pytest.raises(LeaseValidationError) as exc:
+        store.load(now=issued_at + timedelta(hours=1))
+
+    assert exc.value.code == "ENTITLEMENT_CLOCK_INVALID"
+    assert not store.clock_path.exists()
+
+
 def test_license_manager_migrates_legacy_cache_to_signed_lease(
     tmp_path,
     signing_key: Ed25519PrivateKey,
