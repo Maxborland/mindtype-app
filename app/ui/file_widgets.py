@@ -344,6 +344,7 @@ class FileQueueItemWidget(QFrame):
         else:
             self._action_btn.setIcon(self._close_icon)
             self._action_btn.setToolTip(self._translate("remove_from_queue"))
+        self._action_btn.setEnabled(not self.task.cancellation_pending)
 
         # Прогресс-бар visibility
         self._progress.setVisible(self.task.status in (

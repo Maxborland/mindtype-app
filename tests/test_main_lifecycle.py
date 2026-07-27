@@ -255,6 +255,98 @@ def test_initial_projection_uses_operation_id_for_crash_safe_replay(
         "idempotency_key": operation.operation_id,
     }
 
+def test_recovered_cloud_file_is_removed_only_after_remote_cancel(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app.main import MainWindow
+    from app.operation_models import OperationStatus
+    from app.transcription_models import FileStatus, FileTask
+
+    created = []
+
+    class Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+        def emit(self, *args):
+            self.callback(*args)
+
+    class FakeWorker:
+        def __init__(self, executor, operation_id):
+            self.executor = executor
+            self.operation_id = operation_id
+            self.resolved = Signal()
+            self.failed = Signal()
+            self.finished = Signal()
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr("app.main.CloudCancellationWorker", FakeWorker)
+    task = FileTask(
+        file_path=tmp_path / "meeting.wav",
+        status=FileStatus.PENDING,
+        operation_id="cloud-recovery",
+    )
+    operation = SimpleNamespace(
+        status=OperationStatus.RETRYABLE,
+        server_job_ids={"transcription": "server-job"},
+    )
+    coordinator = MagicMock()
+    coordinator.store.get.return_value = operation
+    widget = MagicMock()
+    window = SimpleNamespace(
+        _operation_coordinator=coordinator,
+        _file_tasks=[task],
+        _file_widgets={str(task.file_path): widget},
+        _task_key=lambda path: str(path),
+        _init_mindtype_cloud=MagicMock(),
+        _cloud_executor=MagicMock(),
+        _cancellation_workers=set(),
+        _add_journal_entry=MagicMock(),
+        _update_file_queue_ui=MagicMock(),
+    )
+    window._discard_cloud_task = lambda current: (
+        MainWindow._discard_cloud_task(window, current)
+    )
+    window._retry_file_task_cancellation = lambda current: (
+        MainWindow._retry_file_task_cancellation(window, current)
+    )
+    window._on_file_task_cancellation_resolved = lambda current: (
+        MainWindow._on_file_task_cancellation_resolved(window, current)
+    )
+    window._on_file_task_cancellation_failed = (
+        lambda current, operation_id, error: (
+            MainWindow._on_file_task_cancellation_failed(
+                window,
+                current,
+                operation_id,
+                error,
+            )
+        )
+    )
+    window._remove_file_task_from_queue = lambda current: (
+        MainWindow._remove_file_task_from_queue(window, current)
+    )
+
+    MainWindow._on_remove_file_task(window, task)
+
+    coordinator.request_cancel.assert_called_once_with(task.operation_id)
+    assert task.cancellation_pending is True
+    assert task in window._file_tasks
+    widget.deleteLater.assert_not_called()
+    assert created[0].started is True
+
+    created[0].resolved.emit(task.operation_id)
+
+    assert task.cancellation_pending is False
+    assert task.status is FileStatus.CANCELLED
+    assert task not in window._file_tasks
+    widget.deleteLater.assert_called_once_with()
+
 
 def test_recovered_dictation_action_starts_the_preserved_operation(
     tmp_path,

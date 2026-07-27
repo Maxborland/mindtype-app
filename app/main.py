@@ -4846,13 +4846,13 @@ class MainWindow(QMainWindow):
             FileStatus.SUMMARIZING,
             FileStatus.GENERATING,
         )
+        retained_tasks = []
         for task in self._file_tasks:
-            if task.status not in retained_statuses:
-                self._discard_cloud_task(task)
-        self._file_tasks = [
-            t for t in self._file_tasks
-            if t.status in retained_statuses
-        ]
+            if task.status in retained_statuses:
+                retained_tasks.append(task)
+            elif not self._discard_cloud_task(task):
+                retained_tasks.append(task)
+        self._file_tasks = retained_tasks
         self._rebuild_file_queue_ui()
 
     def _check_cloud_credits_before_processing(self) -> bool:
@@ -5334,7 +5334,12 @@ class MainWindow(QMainWindow):
 
     def _on_remove_file_task(self, task: FileTask) -> None:
         """Удалить задачу из очереди."""
-        self._discard_cloud_task(task)
+        if not self._discard_cloud_task(task):
+            return
+        self._remove_file_task_from_queue(task)
+
+    def _remove_file_task_from_queue(self, task: FileTask) -> None:
+        """Удалить локальное представление завершённой отмены."""
         key = self._task_key(task.file_path)
         widget = self._file_widgets.pop(key, None)
         if widget:
@@ -5345,14 +5350,116 @@ class MainWindow(QMainWindow):
 
         self._update_file_queue_ui()
 
-    def _discard_cloud_task(self, task: FileTask) -> None:
-        """Не восстанавливать задачу, которую пользователь удалил из очереди."""
+    def _discard_cloud_task(self, task: FileTask) -> bool:
+        """Отменить durable-задачу; вернуть True, когда UI можно удалить."""
+        operation = None
+        if self._operation_coordinator:
+            operation = self._operation_coordinator.store.get(
+                task.operation_id
+            )
+        if (
+            operation is not None
+            and operation.server_job_ids
+            and operation.status
+            not in {
+                OperationStatus.CANCELLED,
+                OperationStatus.COMPLETED,
+                OperationStatus.FAILED,
+            }
+        ):
+            if operation.status is not OperationStatus.CANCEL_REQUESTED:
+                self._operation_coordinator.request_cancel(
+                    task.operation_id
+                )
+            task.cancellation_pending = True
+            widget = self._file_widgets.get(
+                self._task_key(task.file_path)
+            )
+            if widget:
+                widget.update_status()
+            self._retry_file_task_cancellation(task)
+            return False
+
         task.status = FileStatus.CANCELLED
         if self._operation_coordinator:
             try:
                 self._operation_coordinator.sync_file_task(task)
             except Exception:
                 logger.exception("Could not cancel durable file operation")
+        return True
+
+    def _retry_file_task_cancellation(self, task: FileTask) -> None:
+        """Отменить recovered cloud job до удаления его UI-записи."""
+        if not task.cancellation_pending:
+            return
+        self._init_mindtype_cloud()
+        if self._cloud_executor is None:
+            self._on_file_task_cancellation_failed(
+                task,
+                task.operation_id,
+                "MindType Cloud is unavailable",
+            )
+            return
+        worker = CloudCancellationWorker(
+            self._cloud_executor,
+            task.operation_id,
+        )
+        self._cancellation_workers.add(worker)
+        worker.resolved.connect(
+            lambda _identifier, current=task: (
+                self._on_file_task_cancellation_resolved(current)
+            )
+        )
+        worker.failed.connect(
+            lambda identifier, error, current=task: (
+                self._on_file_task_cancellation_failed(
+                    current,
+                    identifier,
+                    error,
+                )
+            )
+        )
+        worker.finished.connect(
+            lambda current=worker: self._cancellation_workers.discard(
+                current
+            )
+        )
+        worker.start()
+
+    def _on_file_task_cancellation_resolved(
+        self,
+        task: FileTask,
+    ) -> None:
+        task.cancellation_pending = False
+        task.status = FileStatus.CANCELLED
+        self._add_journal_entry(
+            "success",
+            "Cloud cancellation confirmed",
+            text=task.operation_id,
+            is_translatable=False,
+        )
+        self._remove_file_task_from_queue(task)
+
+    def _on_file_task_cancellation_failed(
+        self,
+        task: FileTask,
+        operation_id: str,
+        error: str,
+    ) -> None:
+        self._add_journal_entry(
+            "error",
+            "Cloud cancellation is pending",
+            text=f"{operation_id}: {error}",
+            is_translatable=False,
+        )
+        if task in self._file_tasks and task.cancellation_pending:
+            QTimer.singleShot(
+                60_000,
+                lambda current=task: (
+                    self._retry_file_task_cancellation(current)
+                ),
+            )
+
     def _restore_durable_operations(self) -> None:
         """Restore pending file work without starting it or spending BYOK."""
         from .recovery import project_completed_operation
