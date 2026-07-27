@@ -478,6 +478,62 @@ class OperationStore:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def recover_completed_result_loss(
+        self,
+        operation_id: str,
+        *,
+        retention_deadline: datetime,
+    ) -> OperationRecord:
+        """Reopen only a falsely terminal row whose durable result was lost."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(operation_id)
+            current = self._from_row(row)
+            if current.status is not OperationStatus.COMPLETED:
+                raise InvalidOperationTransition(
+                    "only a completed operation can be integrity-recovered"
+                )
+            if not current.source_asset_path.is_file():
+                raise IncompleteOperationError(
+                    "completed operation source is unavailable"
+                )
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE operations
+                SET status = ?,
+                    canonical_result_path = NULL,
+                    progress = 0,
+                    last_error_code = ?,
+                    retry_after = NULL,
+                    updated_at = ?,
+                    completed_at = NULL,
+                    retention_deadline = ?
+                WHERE operation_id = ? AND status = ?
+                """,
+                (
+                    OperationStatus.RETRYABLE.value,
+                    "CANONICAL_RESULT_INVALID",
+                    now.isoformat(),
+                    retention_deadline.isoformat(),
+                    operation_id,
+                    OperationStatus.COMPLETED.value,
+                ),
+            )
+        recovered = self.get(operation_id)
+        if recovered is None:
+            raise RuntimeError("operation disappeared during integrity recovery")
+        return recovered
+
+    def validate_completion_result(self, operation: OperationRecord) -> None:
+        """Validate the external artifact behind a completed database row."""
+        self._validate_completion_result(operation)
+
     def list_cancel_requested(self) -> list[OperationRecord]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -657,7 +713,12 @@ class OperationStore:
                 raise CanonicalResultError(
                     "canonical result belongs to a different source asset"
                 )
-        except (OSError, json.JSONDecodeError, CanonicalResultError) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            CanonicalResultError,
+        ) as exc:
             raise IncompleteOperationError(
                 "canonical result is invalid or belongs to another operation"
             ) from exc

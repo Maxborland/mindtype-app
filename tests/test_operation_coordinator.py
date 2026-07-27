@@ -771,6 +771,61 @@ def test_startup_repairs_stale_completed_retention_before_cleanup(
     assert completed.operation_id == recovered.operation_id
 
 
+def test_startup_reopens_completed_operation_with_corrupt_result(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage, OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from tests.test_result_schema import canonical_result
+
+    original = tmp_path / "corrupt-result.wav"
+    original.write_bytes(b"audio")
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.create_file_operation(
+        original,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="corrupt-result",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    payload = canonical_result(operation.operation_id)
+    payload["source"]["sha256"] = operation.source_sha256
+    completed = coordinator.save_canonical_result(
+        operation.operation_id,
+        payload,
+    )
+    completed.canonical_result_path.write_text(
+        "{broken",
+        encoding="utf-8",
+    )
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    recovery = reopened.restore_startup()
+    recovered = reopened.store.get(operation.operation_id)
+
+    assert recovered.status is OperationStatus.RETRYABLE
+    assert recovered.canonical_result_path is None
+    assert recovered.last_error_code == "CANONICAL_RESULT_INVALID"
+    assert recovered.retention_deadline is not None
+    assert recovered.source_asset_path.is_file()
+    assert [task.operation_id for task in recovery.retryable_files] == [
+        operation.operation_id
+    ]
+    assert recovery.completed_pending_ack == ()
+
+
 def test_startup_recovery_exposes_retryable_dictation(
     tmp_path: Path,
 ) -> None:

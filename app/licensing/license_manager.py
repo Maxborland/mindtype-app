@@ -388,6 +388,7 @@ class LicenseManager:
                 self._lease_marker_file,
                 "1",
             ),
+            authoritative_clock_rebuild=True,
         )
         self._lease_claims = claims
         self._lease_error_code = None

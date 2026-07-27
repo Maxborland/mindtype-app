@@ -18,7 +18,7 @@ from .operation_models import (
     OperationStatus,
     utc_now,
 )
-from .operation_store import OperationStore
+from .operation_store import IncompleteOperationError, OperationStore
 from .result_schema import (
     CanonicalResultError,
     validate_canonical_result,
@@ -581,13 +581,28 @@ class OperationCoordinator:
         from .transcription_models import FileStatus, FileTask
 
         self.store.recover_incomplete()
-        completed_operations = self.store.list_completed()
-        for recovered in completed_operations:
+        completed_operations = []
+        for recovered in self.store.list_completed():
+            try:
+                self.store.validate_completion_result(recovered)
+            except IncompleteOperationError:
+                if recovered.source_asset_path.is_file():
+                    deadline = utc_now() + timedelta(days=7)
+                    self.spool.write_operation_metadata(
+                        recovered.operation_id,
+                        retention_deadline=deadline,
+                    )
+                    self.store.recover_completed_result_loss(
+                        recovered.operation_id,
+                        retention_deadline=deadline,
+                    )
+                continue
             if self.spool.operation_dir(recovered.operation_id).is_dir():
                 self.spool.write_operation_metadata(
                     recovered.operation_id,
                     retention_deadline=None,
                 )
+            completed_operations.append(recovered)
         self.cleanup_expired(now=utc_now())
         retryable_files = []
         retryable_dictations = []

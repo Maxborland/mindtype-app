@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,14 @@ class FakeProcess:
             raise subprocess.TimeoutExpired(cmd="whisper-server", timeout=timeout)
         self.returncode = 0
         return 0
+
+
+class FakeGuard:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 def _config(tmp_path: Path, *, threads: int = 4):
@@ -266,6 +275,133 @@ def test_cancel_closes_active_connection_then_stops_server(tmp_path: Path) -> No
     assert active.closed
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
+
+
+def test_cancel_is_not_cleared_while_startup_waits_for_lifecycle_lock(
+    tmp_path: Path,
+) -> None:
+    from app.whisper_server import WhisperServerRuntime
+
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    validated = threading.Event()
+    processes: list[FakeProcess] = []
+    base_config = _config(tmp_path)
+
+    class SignalingConfig:
+        def validated(self):
+            validated.set()
+            return base_config.validated()
+
+    runtime = WhisperServerRuntime(
+        popen_factory=lambda *_args, **_kwargs: (
+            processes.append(FakeProcess()) or processes[-1]
+        ),
+        connection_factory=lambda *_args, **_kwargs: FakeConnection(
+            FakeResponse()
+        ),
+        port_factory=lambda: 43123,
+        token_factory=lambda: "secret-route",
+        sleep=lambda _: None,
+        startup_timeout=0.1,
+        log_path=tmp_path / "server.log",
+    )
+    errors: list[BaseException] = []
+    runtime._lifecycle_lock.acquire()
+
+    def capture_error():
+        try:
+            runtime.infer(SignalingConfig(), audio)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=capture_error)
+    worker.start()
+    assert validated.wait(timeout=1)
+    runtime.cancel()
+    runtime._lifecycle_lock.release()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], InterruptedError)
+    assert processes == []
+
+
+def test_runtime_closes_process_lifetime_guard(tmp_path: Path) -> None:
+    from app.whisper_server import WhisperServerRuntime
+
+    guard = FakeGuard()
+    runtime = WhisperServerRuntime(
+        popen_factory=lambda *_args, **_kwargs: FakeProcess(),
+        connection_factory=lambda *_args, **_kwargs: FakeConnection(
+            FakeResponse()
+        ),
+        port_factory=lambda: 43123,
+        token_factory=lambda: "secret-route",
+        sleep=lambda _: None,
+        startup_timeout=0.1,
+        log_path=tmp_path / "server.log",
+        lifetime_guard_factory=lambda _process: guard,
+    )
+
+    runtime.ensure_started(_config(tmp_path))
+    runtime.stop()
+
+    assert guard.close_calls == 1
+
+
+def test_windows_job_guard_enables_kill_on_close() -> None:
+    import ctypes
+
+    from app.whisper_server import (
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        _JobObjectExtendedLimitInformation,
+        _WindowsKillOnCloseJob,
+    )
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.limit_flags = 0
+            self.assigned = None
+            self.closed = []
+
+        def CreateJobObjectW(self, *_args):
+            return 123
+
+        def SetInformationJobObject(
+            self,
+            _handle,
+            _information_class,
+            information,
+            _size,
+        ):
+            value = ctypes.cast(
+                information,
+                ctypes.POINTER(_JobObjectExtendedLimitInformation),
+            ).contents
+            self.limit_flags = value.BasicLimitInformation.LimitFlags
+            return 1
+
+        def AssignProcessToJobObject(self, handle, process_handle):
+            self.assigned = (handle, process_handle)
+            return 1
+
+        def CloseHandle(self, handle):
+            self.closed.append(handle)
+            return 1
+
+    api = FakeKernel32()
+    guard = _WindowsKillOnCloseJob(
+        SimpleNamespace(_handle=456),
+        kernel32=api,
+    )
+    guard.close()
+    guard.close()
+
+    assert api.limit_flags == _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    assert api.assigned == (123, 456)
+    assert api.closed == [123]
 
 
 def test_concurrent_inference_is_rejected(tmp_path: Path) -> None:

@@ -280,10 +280,15 @@ class EntitlementLeaseStore:
         now: datetime | None,
         *,
         require_existing: bool,
+        allow_rebuild: bool = False,
     ) -> None:
         checked_at = _checked_at(now)
         high_water: datetime | None = None
-        if require_existing and not self.clock_path.exists():
+        if (
+            require_existing
+            and not self.clock_path.exists()
+            and not allow_rebuild
+        ):
             raise LeaseValidationError(
                 "ENTITLEMENT_CLOCK_INVALID",
                 "entitlement clock state is missing",
@@ -300,11 +305,16 @@ class EntitlementLeaseStore:
                     raise ValueError("timezone is missing")
                 high_water = high_water.astimezone(timezone.utc)
             except (OSError, UnicodeError, ValueError) as exc:
-                raise LeaseValidationError(
-                    "ENTITLEMENT_CLOCK_INVALID",
-                    "entitlement clock state is invalid",
-                ) from exc
-            if checked_at + LEASE_CLOCK_SKEW < high_water:
+                if allow_rebuild:
+                    high_water = None
+                else:
+                    raise LeaseValidationError(
+                        "ENTITLEMENT_CLOCK_INVALID",
+                        "entitlement clock state is invalid",
+                    ) from exc
+            if high_water is not None and (
+                checked_at + LEASE_CLOCK_SKEW < high_water
+            ):
                 raise LeaseValidationError(
                     "CLOCK_ROLLBACK",
                     "system clock moved backwards after lease validation",
@@ -328,13 +338,18 @@ class EntitlementLeaseStore:
         *,
         now: datetime | None = None,
         before_publish: Callable[[], None] | None = None,
+        authoritative_clock_rebuild: bool = False,
     ) -> EntitlementClaims:
         claims = self._verifier.verify(
             token,
             device_id=self._device_id,
             now=now,
         )
-        self._advance_clock(now, require_existing=self.path.exists())
+        self._advance_clock(
+            now,
+            require_existing=self.path.exists(),
+            allow_rebuild=authoritative_clock_rebuild,
+        )
         if before_publish is not None:
             before_publish()
         write_durable_text(self.path, token)

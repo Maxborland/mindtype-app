@@ -216,6 +216,50 @@ def test_store_rejects_missing_clock_for_an_adopted_lease(
     assert not store.clock_path.exists()
 
 
+def test_authoritative_lease_rebuilds_missing_clock(
+    tmp_path,
+    signing_key: Ed25519PrivateKey,
+    verifier: EntitlementLeaseVerifier,
+) -> None:
+    from app.licensing.license_manager import LicenseManager, LicenseStatus
+
+    data_dir = tmp_path / "MindType"
+    now = datetime.now(timezone.utc)
+    with (
+        patch(
+            "app.licensing.license_manager._get_data_dir",
+            return_value=data_dir,
+        ),
+        patch(
+            "app.licensing.trial._get_data_dir",
+            return_value=data_dir,
+        ),
+    ):
+        manager = LicenseManager(lease_verifier=verifier)
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now,
+                expires_at=now + timedelta(days=7),
+            ),
+            now=now,
+        )
+        manager._lease_store.clock_path.unlink()
+        manager.install_entitlement_lease(
+            _lease(
+                signing_key,
+                device_id=manager.get_device_id(),
+                issued_at=now + timedelta(minutes=1),
+                expires_at=now + timedelta(days=7),
+            ),
+            now=now + timedelta(minutes=1),
+        )
+
+    assert manager._lease_store.clock_path.is_file()
+    assert manager.get_license_info().status is LicenseStatus.VALID
+
+
 def test_license_manager_migrates_legacy_cache_to_signed_lease(
     tmp_path,
     signing_key: Ed25519PrivateKey,
