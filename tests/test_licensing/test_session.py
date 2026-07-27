@@ -727,6 +727,76 @@ def test_session_client_rotates_refresh_token_without_license_key() -> None:
     assert session.refresh_token == "new-refresh"
 
 
+def test_session_client_deactivates_with_bearer_without_license_key() -> None:
+    from app.licensing.session import LicenseSessionClient
+    from app.providers.mindtype_cloud import HTTPResponse
+
+    transport = ScriptedTransport(
+        response=HTTPResponse(
+            status=200,
+            headers={},
+            body=b'{"success":true}',
+        )
+    )
+    client = LicenseSessionClient(
+        "https://mindtype.space",
+        transport=transport,
+    )
+
+    client.deactivate_session(access_token="signed-access-token")
+
+    request = transport.requests[0]
+    assert request["url"].endswith("/api/license/deactivate")
+    assert request["headers"]["Authorization"] == (
+        "Bearer signed-access-token"
+    )
+    assert json.loads(request["body"]) == {}
+    assert b"license" not in request["body"].lower()
+
+
+def test_manager_refreshes_before_remote_deactivation(tmp_path: Path) -> None:
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    refresh_store = FakeRefreshStore()
+    refresh_store.token = "old-refresh"
+    response = LicenseSession(
+        access_token="new-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="new-refresh",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    client = FakeSessionClient()
+    client.refresh_session = lambda **request: (
+        client.calls.append(("refresh", request)) or response
+    )
+    client.deactivate_session = lambda **request: client.calls.append(
+        ("deactivate", request)
+    )
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+
+    manager.deactivate_remote(now=now)
+
+    assert client.calls == [
+        ("refresh", {"refresh_token": "old-refresh"}),
+        ("deactivate", {"access_token": "new-access"}),
+    ]
+    assert refresh_store.token == "new-refresh"
+
+
 def test_manager_refresh_rotates_credential_and_access_token(
     tmp_path: Path,
 ) -> None:

@@ -274,6 +274,7 @@ class LicenseManager:
         self._lease_claims: Optional[EntitlementClaims] = None
         self._lease_error_code: Optional[str] = None
         self._deactivation_cleanup: list[Callable[[], None]] = []
+        self._cloud_deactivator: Optional[Callable[[], None]] = None
         self._device_id = _get_device_id()
         self._device_name = _get_device_name()
         if lease_verifier is None:
@@ -359,6 +360,13 @@ class LicenseManager:
         """Register local cloud credentials that must follow deactivation."""
         if callback not in self._deactivation_cleanup:
             self._deactivation_cleanup.append(callback)
+
+    def set_cloud_deactivator(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """Use the signed cloud session when the legacy key is gone."""
+        self._cloud_deactivator = callback
 
     def install_entitlement_lease(
         self,
@@ -593,7 +601,19 @@ class LicenseManager:
             Tuple (success, message)
         """
         if self._license_data is None:
-            return False, "no_license"
+            if self._cloud_deactivator is None or self._lease_claims is None:
+                return False, "no_license"
+            try:
+                self._cloud_deactivator()
+            except Exception as exc:
+                code = str(getattr(exc, "code", "") or "")
+                if bool(getattr(exc, "authoritative", False)):
+                    self._finish_local_deactivation()
+                if code == "PROVIDER_UNAVAILABLE":
+                    return False, "network_error"
+                return False, code.lower() or "deactivation_failed"
+            self._finish_local_deactivation()
+            return True, "deactivation_success"
 
         formatted_key = KeyValidator.format_key(self._license_data.get("license_key", ""))
 
@@ -610,17 +630,20 @@ class LicenseManager:
             return False, error
 
         if response and response.get("success"):
-            self._clear_cached_license()
-            for cleanup in tuple(self._deactivation_cleanup):
-                try:
-                    cleanup()
-                except Exception:
-                    logger.exception(
-                        "Cloud session credentials could not be fully cleared"
-                    )
+            self._finish_local_deactivation()
             return True, "deactivation_success"
 
         return False, "deactivation_failed"
+
+    def _finish_local_deactivation(self) -> None:
+        self._clear_cached_license()
+        for cleanup in tuple(self._deactivation_cleanup):
+            try:
+                cleanup()
+            except Exception:
+                logger.exception(
+                    "Cloud session credentials could not be fully cleared"
+                )
 
     def needs_revalidation(self) -> bool:
         """Проверить, нужна ли ревалидация лицензии."""

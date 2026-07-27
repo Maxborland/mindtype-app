@@ -356,6 +356,62 @@ class LicenseSessionClient:
             )
         return self._parse_session_payload(payload)
 
+    def deactivate_session(self, *, access_token: str) -> None:
+        try:
+            response = self.transport.request(
+                "POST",
+                f"{self.base_url}/api/license/deactivate",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                body=b"{}",
+                timeout=self.timeout,
+            )
+        except ResponseTooLargeError as exc:
+            raise LicenseSessionError(
+                "SCHEMA_UNSUPPORTED",
+                str(exc),
+                retryable=False,
+                authoritative=False,
+            ) from exc
+        except TransportError as exc:
+            raise LicenseSessionError(
+                "PROVIDER_UNAVAILABLE",
+                str(exc),
+                retryable=True,
+                authoritative=False,
+            ) from exc
+        payload = self._payload(response.body)
+        if not 200 <= response.status < 300:
+            raw_error = payload.get("error")
+            error = raw_error if isinstance(raw_error, Mapping) else {}
+            code = str(error.get("code") or f"HTTP_{response.status}")
+            raise LicenseSessionError(
+                code,
+                str(error.get("message") or code),
+                retryable=bool(
+                    error.get(
+                        "retryable",
+                        response.status == 429 or response.status >= 500,
+                    )
+                ),
+                authoritative=bool(
+                    error.get(
+                        "authoritative",
+                        response.status in {401, 403, 404, 410},
+                    )
+                ),
+            )
+        if payload.get("success") is not True:
+            raise LicenseSessionError(
+                "SCHEMA_UNSUPPORTED",
+                "license deactivation response is invalid",
+                retryable=False,
+                authoritative=False,
+            )
+
 
 class CloudSessionManager:
     """Adopt a session without ever persisting access or license keys."""
@@ -393,6 +449,22 @@ class CloudSessionManager:
         with self._session_lock:
             self._clear_memory_and_lease()
             self.refresh_store.clear(self.device_id)
+
+    def deactivate_remote(self, *, now: Optional[datetime] = None) -> None:
+        """Deactivate the current device; local cleanup follows server ACK."""
+        with self._session_lock:
+            token = self.access_token(now=now)
+            if token is None:
+                self.refresh_access_token(now=now)
+                token = self.access_token(now=now)
+            if token is None:
+                raise LicenseSessionError(
+                    "AUTH_REQUIRED",
+                    "cloud access token is unavailable",
+                    retryable=False,
+                    authoritative=False,
+                )
+            self.client.deactivate_session(access_token=token)
 
     def activate(
         self,

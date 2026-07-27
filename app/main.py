@@ -718,6 +718,9 @@ class MainWindow(QMainWindow):
                 self.license_manager.add_deactivation_cleanup(
                     self._cloud_session_manager.clear
                 )
+                self.license_manager.set_cloud_deactivator(
+                    self._cloud_session_manager.deactivate_remote
+                )
         except Exception:
             logger.exception("MindType Cloud session boundary is unavailable")
         self.license_manager.revalidate_if_needed_async()

@@ -320,6 +320,57 @@ class TestLicenseManagerDeactivation:
         assert license_manager.get_license_info().status is not LicenseStatus.VALID
         cloud_session_cleanup.assert_called_once_with()
 
+    def test_signed_session_deactivation_does_not_require_legacy_key(
+        self,
+        license_manager,
+    ):
+        license_manager._lease_claims = MagicMock()
+        license_manager._lease_file.write_text("signed-lease")
+        license_manager._lease_marker_file.write_text("1")
+        remote_deactivation = MagicMock()
+        local_cleanup = MagicMock()
+        license_manager.set_cloud_deactivator(remote_deactivation)
+        license_manager.add_deactivation_cleanup(local_cleanup)
+
+        success, message = license_manager.deactivate_online()
+
+        assert (success, message) == (True, "deactivation_success")
+        remote_deactivation.assert_called_once_with()
+        local_cleanup.assert_called_once_with()
+        assert license_manager._lease_claims is None
+        assert not license_manager._lease_file.exists()
+        assert not license_manager._lease_marker_file.exists()
+
+    def test_signed_session_network_failure_preserves_credentials(
+        self,
+        license_manager,
+    ):
+        from app.licensing.session import LicenseSessionError
+
+        license_manager._lease_claims = MagicMock()
+        license_manager._lease_file.write_text("signed-lease")
+        license_manager._lease_marker_file.write_text("1")
+        local_cleanup = MagicMock()
+        license_manager.set_cloud_deactivator(
+            MagicMock(
+                side_effect=LicenseSessionError(
+                    "PROVIDER_UNAVAILABLE",
+                    "offline",
+                    retryable=True,
+                    authoritative=False,
+                )
+            )
+        )
+        license_manager.add_deactivation_cleanup(local_cleanup)
+
+        success, message = license_manager.deactivate_online()
+
+        assert (success, message) == (False, "network_error")
+        local_cleanup.assert_not_called()
+        assert license_manager._lease_claims is not None
+        assert license_manager._lease_file.exists()
+        assert license_manager._lease_marker_file.exists()
+
 
 class TestLicenseManagerRevalidation:
     """Тесты для ревалидации лицензии."""
