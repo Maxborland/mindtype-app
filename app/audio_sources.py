@@ -314,6 +314,20 @@ class SystemAudioRecorder:
             self._capture_thread is None
             and self._writer_thread is None
         )
+        valid_wav = False
+        validation_error: Optional[str] = None
+        if capture_finalized and path.is_file():
+            try:
+                with wave.open(str(path), "rb") as audio:
+                    valid_wav = audio.getnframes() > 0
+                if not valid_wav:
+                    validation_error = (
+                        "system audio WAV does not contain audio frames"
+                    )
+            except (OSError, EOFError, wave.Error) as exc:
+                validation_error = f"system audio WAV is invalid: {exc}"
+            if not valid_wav:
+                path.unlink(missing_ok=True)
         track = (
             RecordedTrack(
                 source=AudioSourceKind.SYSTEM,
@@ -323,10 +337,14 @@ class SystemAudioRecorder:
                 started_at_monotonic_ns=started_at,
                 ended_at_monotonic_ns=max(started_at, ended_at),
             )
-            if capture_finalized and path.is_file()
+            if capture_finalized and valid_wav
             else None
         )
-        error = self._capture_error or self._writer_error
+        error = (
+            self._capture_error
+            or self._writer_error
+            or validation_error
+        )
         status = (
             AudioCaptureStatus.INTERRUPTED
             if error is not None

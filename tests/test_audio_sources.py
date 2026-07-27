@@ -188,6 +188,28 @@ def test_device_disconnect_preserves_partial_system_recording(
         assert audio.getnframes() == 1
 
 
+def test_system_recorder_rejects_an_invalid_finalized_wav(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid.wav"
+    path.write_bytes(b"not a wav")
+    recorder = SystemAudioRecorder(
+        backend=_FakeSoundCard([]),
+        temp_dir=tmp_path,
+    )
+    recorder._path = path
+    recorder._started_at_ns = 1
+    recorder._ended_at_ns = 2
+
+    result = recorder.stop()
+
+    assert result.status is AudioCaptureStatus.INTERRUPTED
+    assert result.track is None
+    assert "WAV is invalid" in (result.error or "")
+    assert path.exists() is False
+    assert recorder.finalizing is False
+
+
 def test_stop_does_not_publish_track_while_capture_still_owns_wav(
     tmp_path: Path,
 ) -> None:
@@ -199,7 +221,7 @@ def test_stop_does_not_publish_track_while_capture_still_owns_wav(
             del numframes
             entered_record.set()
             release_record.wait(timeout=2)
-            return np.empty((0, 2), dtype=np.float32)
+            return np.ones((1, 2), dtype=np.float32)
 
     backend = _FakeSoundCard(
         [
@@ -256,6 +278,9 @@ def test_system_recorder_rejects_restart_until_previous_writer_finalizes(
         def writeframes(self, _value: bytes) -> None:
             writer_started.set()
             release_writer.wait(timeout=2)
+
+        def getnframes(self) -> int:
+            return 1
 
     monkeypatch.setattr(
         audio_sources.wave,
@@ -343,6 +368,9 @@ def test_bounded_queue_reports_overflow_and_preserves_wav(
             writer_started.set()
             release_writer.wait(timeout=2)
 
+        def getnframes(self) -> int:
+            return 1
+
     monkeypatch.setattr(
         audio_sources.wave,
         "open",
@@ -395,7 +423,11 @@ def test_stop_retries_a_wasapi_writer_sentinel_after_a_full_queue(
         queue_blocks=1,
     )
     path = tmp_path / "pending-system.wav"
-    path.write_bytes(b"partial")
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(2)
+        audio.setsampwidth(2)
+        audio.setframerate(48_000)
+        audio.writeframes(b"\0\0\0\0")
     recorder._path = path
     recorder._started_at_ns = 1
     recorder._ended_at_ns = 2
@@ -489,6 +521,46 @@ def test_multitrack_finalizes_microphone_error_without_a_track() -> None:
     assert session.recording is False
     session.start(AudioSourceKind.MICROPHONE)
     assert microphone.start.call_count == 2
+
+
+def test_multitrack_preserves_valid_microphone_when_system_wav_fails(
+    tmp_path: Path,
+) -> None:
+    microphone_path = tmp_path / "microphone.wav"
+    microphone_path.touch()
+    microphone_track = RecordedTrack(
+        source=AudioSourceKind.MICROPHONE,
+        path=microphone_path,
+        sample_rate=16_000,
+        channels=1,
+        started_at_monotonic_ns=10,
+        ended_at_monotonic_ns=20,
+    )
+    microphone = MagicMock()
+    microphone.finalizing = False
+    microphone.stop_capture.return_value = AudioCaptureResult(
+        status=AudioCaptureStatus.COMPLETED,
+        track=microphone_track,
+        error=None,
+    )
+    system = MagicMock()
+    system.finalizing = False
+    system.stop.return_value = AudioCaptureResult(
+        status=AudioCaptureStatus.INTERRUPTED,
+        track=None,
+        error="system audio WAV is invalid",
+    )
+    session = MultiTrackAudioRecorder(
+        microphone=microphone,
+        system=system,
+    )
+    session.start(AudioSourceKind.MICROPHONE_SYSTEM)
+
+    capture = session.stop()
+
+    assert capture.tracks == (microphone_track,)
+    assert capture.interrupted is True
+    assert session.recording is False
 
 
 def test_multitrack_keeps_session_owned_until_system_track_finalizes() -> None:
