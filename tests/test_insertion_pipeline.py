@@ -129,6 +129,28 @@ def test_clipboard_adapter_restores_opaque_multiformat_snapshot():
     assert restored == [snapshot]
 
 
+def test_clipboard_adapter_rechecks_target_immediately_before_paste():
+    snapshot = object()
+    restored = []
+    send_paste = Mock()
+    adapter = ClipboardPasteAdapter(
+        read_clipboard=lambda: snapshot,
+        write_clipboard=Mock(),
+        restore_clipboard=restored.append,
+        send_paste=send_paste,
+        release_modifiers=Mock(),
+        sleep=lambda _delay: None,
+        validate_target=lambda target: target == 7 and False,
+    )
+
+    result = adapter.attempt("secret", target=7, delay=0)
+
+    assert result.success is False
+    assert result.failure is InsertionFailure.TARGET_NOT_FOCUSED
+    send_paste.assert_not_called()
+    assert restored == [snapshot]
+
+
 def test_clipboard_adapter_never_mutates_when_snapshot_fails():
     write = Mock()
     adapter = ClipboardPasteAdapter(

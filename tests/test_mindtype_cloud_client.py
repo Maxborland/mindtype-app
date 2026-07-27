@@ -482,6 +482,68 @@ def test_existing_remote_job_is_polled_without_duplicate_post() -> None:
     assert [request["method"] for request in transport.requests] == ["GET"]
 
 
+def test_retry_after_is_bounded_before_retry() -> None:
+    from app.providers.mindtype_cloud import MindTypeCloudClient
+
+    waits = []
+    transport = ScriptedTransport(
+        [
+            response(
+                429,
+                {
+                    "error": {
+                        "code": "RATE_LIMITED",
+                        "retryable": True,
+                        "retry_after_seconds": 3600,
+                    }
+                },
+            ),
+            response(200, {"jobs": []}),
+        ]
+    )
+    client = MindTypeCloudClient(
+        "https://mindtype.space",
+        access_token="token",
+        transport=transport,
+        retry_delays=(1,),
+        retry_wait=lambda delay: waits.append(delay) or False,
+    )
+
+    client.get_usage()
+
+    assert waits == [30.0]
+    assert len(transport.requests) == 2
+
+
+def test_retry_wait_can_be_interrupted_without_second_request() -> None:
+    from app.providers.mindtype_cloud import (
+        CloudAPIError,
+        MindTypeCloudClient,
+    )
+
+    transport = ScriptedTransport(
+        [
+            response(
+                503,
+                {"error": {"code": "PROVIDER_UNAVAILABLE", "retryable": True}},
+            ),
+        ]
+    )
+    client = MindTypeCloudClient(
+        "https://mindtype.space",
+        access_token="token",
+        transport=transport,
+        retry_delays=(1,),
+        retry_wait=lambda _delay: True,
+    )
+
+    with pytest.raises(CloudAPIError, match="interrupted") as raised:
+        client.get_usage()
+
+    assert raised.value.retryable is True
+    assert len(transport.requests) == 1
+
+
 def test_transcription_result_requires_canonical_schema() -> None:
     from app.providers.mindtype_cloud import MindTypeCloudClient
     from app.result_schema import CanonicalResultError

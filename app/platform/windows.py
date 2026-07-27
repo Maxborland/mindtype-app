@@ -445,6 +445,7 @@ class WindowsTextInserter(BaseTextInserter):
                     send_paste=self._send_ctrl_v,
                     release_modifiers=self._release_modifiers,
                     sleep=sleep,
+                    validate_target=self._target_is_active,
                 ),
                 self._unicode_adapter,
                 UIAutomationValueAdapter(set_value=set_value_via_uia),

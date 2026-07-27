@@ -162,6 +162,7 @@ class ClipboardPasteAdapter:
         send_paste: Callable[[], None],
         release_modifiers: Callable[[], None],
         sleep: Callable[[float], None],
+        validate_target: Optional[Callable[[object], bool]] = None,
     ) -> None:
         self._read_clipboard = read_clipboard
         self._write_clipboard = write_clipboard
@@ -169,9 +170,9 @@ class ClipboardPasteAdapter:
         self._send_paste = send_paste
         self._release_modifiers = release_modifiers
         self._sleep = sleep
+        self._validate_target = validate_target
 
     def attempt(self, text: str, target: object, delay: float) -> AdapterAttempt:
-        del target
         try:
             previous = self._read_clipboard()
         except Exception as exc:
@@ -180,6 +181,7 @@ class ClipboardPasteAdapter:
         mutated = False
         committed = False
         operation_error: Optional[Exception] = None
+        operation_failure: Optional[InsertionFailure] = None
         restore_error: Optional[Exception] = None
         try:
             self._write_clipboard(text)
@@ -187,9 +189,18 @@ class ClipboardPasteAdapter:
             self._sleep(0.05)
             self._release_modifiers()
             self._sleep(0.05)
-            self._send_paste()
-            committed = True
-            self._sleep(delay)
+            if (
+                self._validate_target is not None
+                and not self._validate_target(target)
+            ):
+                operation_error = RuntimeError(
+                    "target lost focus before paste"
+                )
+                operation_failure = InsertionFailure.TARGET_NOT_FOCUSED
+            else:
+                self._send_paste()
+                committed = True
+                self._sleep(delay)
         except Exception as exc:
             operation_error = exc
         finally:
@@ -212,7 +223,9 @@ class ClipboardPasteAdapter:
                 str(operation_error),
                 committed=committed,
                 failure=(
-                    InsertionFailure.PARTIAL_INSERT if committed else None
+                    InsertionFailure.PARTIAL_INSERT
+                    if committed
+                    else operation_failure
                 ),
             )
         return AdapterAttempt.succeeded()

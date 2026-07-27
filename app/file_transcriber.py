@@ -165,9 +165,15 @@ class FileTranscriptionQueue:
         self._running = threading.Event()
         self._cancelled = threading.Event()
         self._shutdown_requested = threading.Event()
+        self._cloud_wait_interrupted = threading.Event()
         self._temp_files: List[Path] = []
         self._summarizer = None  # Ленивая инициализация
         self._text_processor = None  # Ленивая инициализация
+        for executor in (self.cloud_executor, self.cloud_summary_executor):
+            client = getattr(executor, "client", None)
+            set_retry_wait = getattr(client, "set_retry_wait", None)
+            if callable(set_retry_wait):
+                set_retry_wait(self._wait_for_cloud_retry)
 
     @property
     def tasks(self) -> List[FileTask]:
@@ -219,6 +225,7 @@ class FileTranscriptionQueue:
 
         self._running.set()
         self._cancelled.clear()
+        self._cloud_wait_interrupted.clear()
 
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
@@ -227,6 +234,7 @@ class FileTranscriptionQueue:
         """Отменить обработку."""
         self._cancelled.set()
         self._running.clear()
+        self._cloud_wait_interrupted.set()
         if self.uses_local_transcriber:
             cancel_current = getattr(
                 self.transcriber,
@@ -242,16 +250,15 @@ class FileTranscriptionQueue:
         cancelled_tasks = []
         for task in self._tasks:
             if task.status == FileStatus.PENDING:
-                task.status = FileStatus.CANCELLED
+                self._cancel_pending_task(task)
                 cancelled_tasks.append(task)
-                if self._on_completed:
-                    self._on_completed(task)
         return cancelled_tasks
 
     def stop_for_shutdown(self, timeout_seconds: float = 5.0) -> bool:
         """Stop and join work while preserving any durable cloud job."""
         self._shutdown_requested.set()
         self._running.clear()
+        self._cloud_wait_interrupted.set()
         if self.uses_local_transcriber:
             cancel_current = getattr(
                 self.transcriber,
@@ -288,9 +295,8 @@ class FileTranscriptionQueue:
                     continue
 
                 if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                    if task.status == FileStatus.PENDING:
+                        self._cancel_pending_task(task)
                     continue
 
                 try:
@@ -753,6 +759,8 @@ class FileTranscriptionQueue:
                     options=self.cloud_transcribe_options,
                     summary_options=self.cloud_summary_options,
                 )
+                if self._cancelled.is_set():
+                    continue
 
             if operation.status is OperationStatus.COMPLETED:
                 if (
@@ -836,6 +844,8 @@ class FileTranscriptionQueue:
                     canonical_transcript=canonical_transcript,
                     options=self.cloud_summary_options or {},
                 )
+                if self._cancelled.is_set():
+                    continue
             if operation.status is OperationStatus.COMPLETED:
                 result_path = operation.canonical_result_path
                 if result_path is None or not result_path.is_file():
@@ -875,10 +885,41 @@ class FileTranscriptionQueue:
     def _wait_for_cloud_poll(self) -> None:
         if self._shutdown_requested.is_set():
             return
-        if self._cancelled.is_set():
-            time.sleep(self.cloud_poll_interval)
+        self._cloud_wait_interrupted.clear()
+        if self._shutdown_requested.is_set():
             return
-        self._shutdown_requested.wait(self.cloud_poll_interval)
+        self._cloud_wait_interrupted.wait(self.cloud_poll_interval)
+
+    def _wait_for_cloud_retry(self, delay_seconds: float) -> bool:
+        """Return True when cancellation or shutdown interrupted a retry."""
+        return self._cloud_wait_interrupted.wait(max(0.0, delay_seconds))
+
+    def _cancel_pending_task(self, task: FileTask) -> None:
+        executor = None
+        if task.operation_id:
+            if self._has_persisted_cloud_summary(task):
+                executor = self.cloud_summary_executor
+            elif self.cloud_executor is not None:
+                executor = self.cloud_executor
+
+        task.cancellation_pending = False
+        if executor is not None:
+            try:
+                operation = executor.cancel(task.operation_id)
+                from .operation_models import OperationStatus
+
+                task.cancellation_pending = (
+                    operation.status is not OperationStatus.CANCELLED
+                )
+            except Exception:
+                task.cancellation_pending = True
+                logger.exception(
+                    "Could not confirm cancellation for cloud operation %s",
+                    task.operation_id,
+                )
+        task.status = FileStatus.CANCELLED
+        if self._on_completed:
+            self._on_completed(task)
 
     def _summarize_text(self, text: str, task: FileTask):
         """Выполнить суммаризацию текста."""

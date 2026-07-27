@@ -598,7 +598,6 @@ def test_failed_cloud_cancel_stays_durable_for_startup_recovery(
 
 def test_pending_cloud_cancel_respects_poll_interval(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     from app.file_transcriber import FileTranscriptionQueue
     from app.operation_models import OperationStage, OperationStatus
@@ -619,11 +618,6 @@ def test_pending_cloud_cancel_respects_poll_interval(
                 stage=OperationStage.TRANSCRIBE,
             )
 
-    sleeps = []
-    monkeypatch.setattr(
-        "app.file_transcriber.time.sleep",
-        sleeps.append,
-    )
     queue = FileTranscriptionQueue(
         transcriber=UnusedLocalTranscriber(),
         transcribe=TranscribeOptions(
@@ -638,13 +632,62 @@ def test_pending_cloud_cancel_respects_poll_interval(
         cloud_executor=Executor(),
         cloud_poll_interval=0.25,
     )
+    waits = []
+    queue._cloud_wait_interrupted.wait = waits.append
     queue._cancelled.set()
     task = FileTask(file_path=tmp_path / "meeting.wav")
 
     queue._process_cloud_task(task)
 
     assert calls == ["cancel", "cancel"]
-    assert sleeps == [0.25]
+    assert waits == [0.25]
+
+
+def test_cancel_pending_recovered_cloud_job_calls_remote_executor(
+    tmp_path: Path,
+) -> None:
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.operation_models import OperationStatus
+    from app.transcription_models import (
+        FileStatus,
+        FileTask,
+        TranscribeOptions,
+    )
+
+    cancelled = []
+
+    class Executor:
+        def cancel(self, operation_id):
+            cancelled.append(operation_id)
+            return SimpleNamespace(status=OperationStatus.CANCEL_REQUESTED)
+
+    completed = []
+    queue = FileTranscriptionQueue(
+        transcriber=UnusedLocalTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        cloud_executor=Executor(),
+        on_completed=completed.append,
+    )
+    task = FileTask(
+        file_path=tmp_path / "meeting.wav",
+        operation_id="recovered-cloud-job",
+    )
+    queue._tasks.append(task)
+
+    assert queue.cancel() == [task]
+
+    assert cancelled == ["recovered-cloud-job"]
+    assert completed == [task]
+    assert task.status is FileStatus.CANCELLED
+    assert task.cancellation_pending is True
 
 
 def test_shutdown_stops_cloud_polling_without_remote_cancel(

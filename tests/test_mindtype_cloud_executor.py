@@ -708,6 +708,38 @@ def test_cancel_stays_requested_while_server_is_cancelling(
     assert pending.status is OperationStatus.CANCEL_REQUESTED
 
 
+@pytest.mark.parametrize("remote_state", ["succeeded", "failed", "expired"])
+def test_cancel_race_with_terminal_remote_state_finishes_cancel(
+    tmp_path: Path,
+    remote_state: str,
+) -> None:
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+
+    coordinator, operation = operation_fixture(tmp_path)
+    running = coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    coordinator.store.transition(
+        running.operation_id,
+        OperationStatus.RUNNING,
+        server_job_ids={"transcription": "job-1"},
+    )
+    client = FakeCloudClient()
+    client.cancel_transcription = lambda job_id: {
+        "id": job_id,
+        "state": remote_state,
+    }
+    executor = MindTypeCloudExecutor(client=client, coordinator=coordinator)
+
+    cancelled = executor.cancel(operation.operation_id)
+
+    assert cancelled.status is OperationStatus.CANCELLED
+    if remote_state == "succeeded":
+        assert ("acknowledge_transcription", "job-1") in client.calls
+
+
 def test_summary_remains_durable_between_transcription_and_final_ack(
     tmp_path: Path,
 ) -> None:

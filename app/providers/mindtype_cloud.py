@@ -28,6 +28,7 @@ from ..result_schema import CanonicalResultError, validate_canonical_result
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
 DEFAULT_RETRY_DELAYS = (1, 2, 5, 15, 30)
 DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_RETRY_WAIT_SECONDS = 30.0
 
 
 class CloudErrorCode(str, Enum):
@@ -193,6 +194,7 @@ class MindTypeCloudClient:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS,
         sleep: Callable[[float], None] = time.sleep,
+        retry_wait: Optional[Callable[[float], bool]] = None,
         minimum_chunk_size: int = 64 * 1024,
     ):
         parsed = urlparse(base_url)
@@ -217,6 +219,31 @@ class MindTypeCloudClient:
         self.chunk_size = int(chunk_size)
         self._retry_delays = tuple(float(delay) for delay in retry_delays)
         self._sleep = sleep
+        self._retry_wait = retry_wait
+
+    def set_retry_wait(
+        self,
+        retry_wait: Optional[Callable[[float], bool]],
+    ) -> None:
+        """Install a bounded wait that may report cancellation or shutdown."""
+        self._retry_wait = retry_wait
+
+    def _wait_before_retry(self, requested_delay: float) -> None:
+        delay = min(
+            MAX_RETRY_WAIT_SECONDS,
+            max(0.0, float(requested_delay)),
+        )
+        if self._retry_wait is None:
+            self._sleep(delay)
+            interrupted = False
+        else:
+            interrupted = self._retry_wait(delay)
+        if interrupted:
+            raise CloudAPIError(
+                CloudErrorCode.PROVIDER_UNAVAILABLE,
+                "cloud retry wait was interrupted",
+                retryable=True,
+            )
 
     def _token(self) -> str:
         token = (
@@ -384,7 +411,9 @@ class MindTypeCloudClient:
                     retryable=True,
                 )
                 if retry_safe and retry_index < len(self._retry_delays):
-                    self._sleep(self._retry_delays[retry_index])
+                    self._wait_before_retry(
+                        self._retry_delays[retry_index]
+                    )
                     retry_index += 1
                     continue
                 raise error from exc
@@ -412,7 +441,7 @@ class MindTypeCloudClient:
                     if error.retry_after_seconds is not None
                     else self._retry_delays[retry_index]
                 )
-                self._sleep(delay)
+                self._wait_before_retry(delay)
                 retry_index += 1
                 continue
             raise error
@@ -1424,11 +1453,14 @@ class MindTypeCloudExecutor:
         }:
             return self.coordinator.store.get(operation_id) or operation
         if state in {"succeeded", "failed", "expired"}:
-            return self.coordinator.store.transition(
-                operation_id,
-                OperationStatus.FAILED,
-                last_error_code=f"REMOTE_{state.upper()}",
-            )
+            if state == "succeeded":
+                if summary_id:
+                    self.client.acknowledge_summary(summary_id)
+                elif transcription_id:
+                    self.client.acknowledge_transcription(transcription_id)
+            if summary_id and transcription_id:
+                self.client.acknowledge_transcription(transcription_id)
+            return self.coordinator.finish_cancel(operation_id)
         raise CloudAPIError(
             CloudErrorCode.SCHEMA_UNSUPPORTED,
             "cancellation response has no supported state",
