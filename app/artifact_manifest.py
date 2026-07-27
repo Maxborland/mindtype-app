@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -125,6 +127,27 @@ def _validate_verified_artifact(
         _validate_local_file(artifact, root=root, field_prefix=prefix)
 
 
+def _validate_source_archive(value: Any) -> tuple[str, str]:
+    if not isinstance(value, dict):
+        raise ManifestError("runtime source_archive must be an object")
+    url = _required_string(value.get("url"), "source_archive.url")
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ManifestError("source_archive.url must be an absolute HTTPS URL")
+    size = value.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ManifestError("source_archive.size must be a positive integer")
+    _validate_sha256(value.get("sha256"), "source_archive.sha256")
+    revision = _required_string(
+        value.get("source_revision"), "source_archive.source_revision"
+    ).lower()
+    if not _SOURCE_REVISION.fullmatch(revision):
+        raise ManifestError(
+            "source_archive source revision must be a 40-character commit"
+        )
+    return url, revision
+
+
 def verify_manifest(
     path: str | Path,
     *,
@@ -139,7 +162,8 @@ def verify_manifest(
 
     if manifest.get("schema_version") != "1.0":
         raise ManifestError("Unsupported artifact manifest schema version")
-    if manifest.get("manifest_kind") not in {"runtime", "model"}:
+    manifest_kind = manifest.get("manifest_kind")
+    if manifest_kind not in {"runtime", "model"}:
         raise ManifestError("manifest_kind must be runtime or model")
     if not isinstance(manifest.get("release_ready"), bool):
         raise ManifestError("release_ready must be a boolean")
@@ -149,8 +173,30 @@ def verify_manifest(
     if not isinstance(artifacts, list) or not isinstance(unverified, list):
         raise ManifestError("artifacts and unverified_artifacts must be arrays")
 
+    source_archive: tuple[str, str] | None = None
+    if manifest_kind == "runtime":
+        source_archive = _validate_source_archive(manifest.get("source_archive"))
+
+    seen_ids: set[str] = set()
+    seen_paths: set[str] = set()
     for index, artifact in enumerate(artifacts):
         _validate_verified_artifact(artifact, root=repository_root, index=index)
+        artifact_id = str(artifact["id"])
+        artifact_path = str(artifact.get("path", ""))
+        if artifact_id in seen_ids:
+            raise ManifestError(f"Duplicate artifact id: {artifact_id}")
+        seen_ids.add(artifact_id)
+        if artifact_path:
+            if artifact_path in seen_paths:
+                raise ManifestError(f"Duplicate artifact path: {artifact_path}")
+            seen_paths.add(artifact_path)
+        if source_archive is not None and (
+            artifact["url"] != source_archive[0]
+            or artifact["source_revision"].lower() != source_archive[1]
+        ):
+            raise ManifestError(
+                f"artifacts[{index}] does not match runtime source_archive"
+            )
 
     for index, record in enumerate(unverified):
         if not isinstance(record, dict):
@@ -172,3 +218,22 @@ def verify_manifest(
         ):
             raise ManifestError(f"{manifest_path.name} is not release-ready")
 
+
+def default_runtime_manifest_path() -> Path:
+    """Return the runtime manifest beside source files or frozen assets."""
+
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    root = Path(frozen_root) if frozen_root else Path(__file__).resolve().parents[1]
+    return root / "manifests" / "whisper-runtime.windows-x64.json"
+
+
+@lru_cache(maxsize=1)
+def verify_packaged_runtime() -> None:
+    """Authenticate all bundled native runtime files once per process."""
+
+    manifest = default_runtime_manifest_path()
+    verify_manifest(
+        manifest,
+        root=manifest.parent.parent,
+        require_release_ready=True,
+    )

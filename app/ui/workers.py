@@ -4,9 +4,10 @@
 Все QThread классы для асинхронных операций.
 """
 
+import json
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -121,6 +122,107 @@ class TranscribeWorker(QThread):
                 return
             err = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             self.finished.emit(last_text, detected_lang, detected_prob, err)
+
+
+class CloudDictationWorker(QThread):
+    """Poll one durable cloud dictation without loading a local model."""
+
+    progress = pyqtSignal(str, str, float)
+    status_update = pyqtSignal(str)
+    finished = pyqtSignal(str, str, float, str)
+    cancelled = pyqtSignal()
+
+    def __init__(
+        self,
+        executor,
+        operation_id: str,
+        *,
+        options: Mapping[str, object],
+        poll_interval_ms: int = 1_000,
+    ) -> None:
+        super().__init__()
+        self.executor = executor
+        self.operation_id = operation_id
+        self.options = dict(options)
+        self.poll_interval_ms = max(0, int(poll_interval_ms))
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        try:
+            self.executor.cancel(self.operation_id)
+        except Exception:
+            pass
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def run(self) -> None:
+        from ..operation_models import OperationStage, OperationStatus
+
+        try:
+            while True:
+                if self._cancelled:
+                    self.executor.cancel(self.operation_id)
+                    self.cancelled.emit()
+                    return
+                operation = self.executor.advance_transcription(
+                    self.operation_id,
+                    options=self.options,
+                )
+                if operation.status is OperationStatus.COMPLETED:
+                    result_path = operation.canonical_result_path
+                    if result_path is None or not result_path.is_file():
+                        raise RuntimeError(
+                            "Cloud dictation completed without a local result"
+                        )
+                    payload = json.loads(
+                        result_path.read_text(encoding="utf-8")
+                    )
+                    transcript = payload["transcript"]
+                    text = " ".join(
+                        str(segment.get("text") or "").strip()
+                        for segment in transcript["segments"]
+                        if str(segment.get("text") or "").strip()
+                    )
+                    confidence = transcript.get("confidence")
+                    self.finished.emit(
+                        text,
+                        str(transcript.get("language") or "und"),
+                        (
+                            float(confidence)
+                            if confidence is not None
+                            else 0.0
+                        ),
+                        "",
+                    )
+                    return
+                if operation.status is OperationStatus.CANCELLED:
+                    self.cancelled.emit()
+                    return
+                if operation.status in {
+                    OperationStatus.FAILED,
+                    OperationStatus.RETRYABLE,
+                }:
+                    self.finished.emit(
+                        "",
+                        "",
+                        0.0,
+                        operation.last_error_code
+                        or "CLOUD_TRANSCRIPTION_FAILED",
+                    )
+                    return
+                self.status_update.emit(
+                    "summarizing"
+                    if operation.stage is OperationStage.SUMMARIZE
+                    else "transcribing"
+                )
+                self.msleep(self.poll_interval_ms)
+        except Exception as error:
+            if self._cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit("", "", 0.0, str(error))
 
 
 class ModelDownloadWorker(QThread):

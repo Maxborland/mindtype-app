@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from .entitlement import EntitlementClaims, EntitlementLeaseStore
 from ..providers.mindtype_cloud import (
     HTTPTransport,
+    ResponseTooLargeError,
     TransportError,
     UrlLibTransport,
 )
@@ -206,6 +207,13 @@ class LicenseSessionClient:
                 body=body,
                 timeout=self.timeout,
             )
+        except ResponseTooLargeError as exc:
+            raise LicenseSessionError(
+                "SCHEMA_UNSUPPORTED",
+                str(exc),
+                retryable=False,
+                authoritative=False,
+            ) from exc
         except TransportError as exc:
             raise LicenseSessionError(
                 "PROVIDER_UNAVAILABLE",
@@ -236,6 +244,12 @@ class LicenseSessionClient:
                 authoritative=authoritative,
             )
 
+        return self._parse_session_payload(payload)
+
+    def _parse_session_payload(
+        self,
+        payload: Mapping[str, Any],
+    ) -> LicenseSession:
         expires_text = self._required_string(
             payload,
             "access_expires_at",
@@ -276,6 +290,61 @@ class LicenseSessionClient:
             ),
             claim_version=claim_version,
         )
+
+    def refresh_session(self, *, refresh_token: str) -> LicenseSession:
+        body = json.dumps(
+            {"refresh_token": refresh_token},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            response = self.transport.request(
+                "POST",
+                f"{self.base_url}/api/license/session/refresh",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                body=body,
+                timeout=self.timeout,
+            )
+        except ResponseTooLargeError as exc:
+            raise LicenseSessionError(
+                "SCHEMA_UNSUPPORTED",
+                str(exc),
+                retryable=False,
+                authoritative=False,
+            ) from exc
+        except TransportError as exc:
+            raise LicenseSessionError(
+                "PROVIDER_UNAVAILABLE",
+                str(exc),
+                retryable=True,
+                authoritative=False,
+            ) from exc
+        payload = self._payload(response.body)
+        if not 200 <= response.status < 300:
+            raw_error = payload.get("error")
+            error = raw_error if isinstance(raw_error, Mapping) else {}
+            code = str(error.get("code") or f"HTTP_{response.status}")
+            raise LicenseSessionError(
+                code,
+                str(error.get("message") or code),
+                retryable=bool(
+                    error.get(
+                        "retryable",
+                        response.status == 429 or response.status >= 500,
+                    )
+                ),
+                authoritative=bool(
+                    error.get(
+                        "authoritative",
+                        response.status in {401, 403, 404, 410},
+                    )
+                ),
+            )
+        return self._parse_session_payload(payload)
 
 
 class CloudSessionManager:
@@ -331,6 +400,14 @@ class CloudSessionManager:
                 self.refresh_store.clear(self.device_id)
             raise
 
+        return self._adopt_session(session, checked_at=checked_at)
+
+    def _adopt_session(
+        self,
+        session: LicenseSession,
+        *,
+        checked_at: datetime,
+    ) -> EntitlementClaims:
         expires_at = session.access_expires_at.astimezone(timezone.utc)
         if not checked_at < expires_at <= checked_at + timedelta(minutes=20):
             raise LicenseSessionError(
@@ -353,6 +430,36 @@ class CloudSessionManager:
         self._access_token = session.access_token
         self._access_expires_at = expires_at
         return claims
+
+    def refresh_access_token(
+        self,
+        *,
+        now: Optional[datetime] = None,
+    ) -> EntitlementClaims:
+        checked_at = now or datetime.now(timezone.utc)
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=timezone.utc)
+        else:
+            checked_at = checked_at.astimezone(timezone.utc)
+        refresh_token = self.refresh_store.load(self.device_id)
+        if not refresh_token:
+            self._clear_memory_and_lease()
+            raise LicenseSessionError(
+                "AUTH_REQUIRED",
+                "cloud refresh token is missing",
+                retryable=False,
+                authoritative=True,
+            )
+        try:
+            session = self.client.refresh_session(
+                refresh_token=refresh_token,
+            )
+        except LicenseSessionError as exc:
+            if exc.authoritative:
+                self._clear_memory_and_lease()
+                self.refresh_store.clear(self.device_id)
+            raise
+        return self._adopt_session(session, checked_at=checked_at)
 
     def access_token(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import subprocess
 import threading
 import urllib.error
@@ -23,6 +24,18 @@ def _write_pcm16_wav(
         output.setsampwidth(2)
         output.setframerate(sample_rate)
         output.writeframes(b"\0" * frames * channels * 2)
+
+
+def test_windows_transcriber_verifies_packaged_runtime(monkeypatch) -> None:
+    import app.transcriber_cpp as module
+
+    verify = MagicMock()
+    monkeypatch.setattr(module, "verify_packaged_runtime", verify)
+
+    transcriber = module.WhisperCppTranscriber()
+
+    verify.assert_called_once_with()
+    assert transcriber.gpu_backend == "cpu"
 
 
 def test_cancel_current_process_terminates_then_kills_after_grace_timeout():
@@ -83,7 +96,23 @@ def test_whisper_cpp_download_tries_sources_in_order(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
+    from app.model_manifest import ModelArtifact
     from app.transcriber_cpp import WhisperCppTranscriber
+
+    artifact = ModelArtifact(
+        model_id="small",
+        filename="ggml-small.bin",
+        version="test",
+        url="https://verified.example/ggml-small.bin",
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        license="MIT",
+        source_revision="a" * 40,
+    )
+    monkeypatch.setattr(
+        "app.transcriber_cpp.get_model_artifact",
+        lambda _model: artifact,
+    )
 
     tr = WhisperCppTranscriber()
     tr.set_download_sources(
@@ -101,6 +130,36 @@ def test_whisper_cpp_download_tries_sources_in_order(tmp_path: Path, monkeypatch
     assert path.stat().st_size == len(payload)
     assert calls[0].endswith("/ggml-small.bin")
     assert calls[1] == "https://good.example/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+
+
+def test_existing_model_with_wrong_hash_is_rejected(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.model_manifest import ModelArtifact, ModelManifestError
+    from app.transcriber_cpp import WhisperCppTranscriber
+
+    payload = b"expected model"
+    artifact = ModelArtifact(
+        model_id="small",
+        filename="ggml-small.bin",
+        version="test",
+        url="https://verified.example/ggml-small.bin",
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        license="MIT",
+        source_revision="a" * 40,
+    )
+    monkeypatch.setattr(
+        "app.transcriber_cpp.get_model_artifact",
+        lambda _model: artifact,
+    )
+    model = tmp_path / "ggml-small.bin"
+    model.write_bytes(b"tampered model")
+    transcriber = WhisperCppTranscriber()
+
+    with pytest.raises(ModelManifestError):
+        transcriber.load_model("small", models_dir=tmp_path)
 
 
 def test_persistent_server_result_is_mapped_without_cli_process(tmp_path: Path) -> None:

@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 from .accelerator import get_best_provider, get_provider_options
+from .artifact_manifest import verify_packaged_runtime
+from .model_manifest import (
+    ModelArtifact,
+    get_model_artifact,
+    verify_model_file,
+)
 from .vad import SUPPORTED_SAMPLE_RATES, WebRtcVadSegmenter
 from .whisper_server import WhisperServerConfig, WhisperServerRuntime
 
@@ -114,6 +120,8 @@ class WhisperCppTranscriber:
     """Транскрибер на основе whisper.cpp бинарника."""
 
     def __init__(self):
+        if sys.platform == "win32":
+            verify_packaged_runtime()
         self.model_path: Optional[Path] = None
         self.binary_path: Path = self._find_binary()
         self.server_path: Path = self._find_server_binary()
@@ -125,6 +133,7 @@ class WhisperCppTranscriber:
         self._process_lock = threading.Lock()
         self._current_process: Optional[subprocess.Popen] = None
         self._cancel_requested = threading.Event()
+        self._verified_models: Dict[Path, Tuple[int, int]] = {}
         # Preferred model download sources (CDN/mirrors). If empty, _download_model()
         # falls back to built-in defaults.
         self._download_sources: List[str] = []
@@ -417,13 +426,14 @@ class WhisperCppTranscriber:
         # Оставляем только безопасные символы
         model_name = "".join(c for c in model_name if c.isalnum() or c in ".-_")
 
-        model_filename = f"ggml-{model_name}.bin"
+        artifact = get_model_artifact(model_name)
+        model_filename = artifact.filename
 
         # Защита от path traversal
         try:
             target_path = (models_dir / model_filename).resolve()
             base_resolved = models_dir.resolve()
-            if not str(target_path).startswith(str(base_resolved)):
+            if not target_path.is_relative_to(base_resolved):
                 logger.error(f"Попытка выхода за пределы папки моделей: {target_path}")
                 raise ValueError("Некорректное имя модели")
             self.model_path = target_path
@@ -441,6 +451,7 @@ class WhisperCppTranscriber:
                 bundled_path = (BUNDLED_MODELS_DIR / model_filename)
                 if bundled_path.exists():
                     self.model_path = bundled_path
+                    self._verify_model_once(bundled_path, artifact)
                     logger.info(f"Используем встроенную модель: {self.model_path}")
                     if progress_callback:
                         progress_callback("model_loaded", 100, 100)
@@ -457,8 +468,10 @@ class WhisperCppTranscriber:
                 models_dir,
                 progress_callback,
                 sources=self._download_sources or None,
+                artifact=artifact,
             )
         else:
+            self._verify_model_once(self.model_path, artifact)
             logger.info(f"Файл модели уже существует.")
             if progress_callback:
                 progress_callback("model_loaded", 100, 100)
@@ -469,6 +482,7 @@ class WhisperCppTranscriber:
         models_dir: Path,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
         sources: Optional[List[str]] = None,
+        artifact: Optional[ModelArtifact] = None,
     ) -> None:
         """
         Скачать GGML модель.
@@ -485,17 +499,19 @@ class WhisperCppTranscriber:
         import urllib.request
         import urllib.error
 
+        artifact = artifact or get_model_artifact(model_name)
         repo_id = "ggerganov/whisper.cpp"
-        filename = f"ggml-{model_name}.bin"
+        filename = artifact.filename
         dest_path = models_dir / filename
 
         default_sources: List[str] = [
             # MindType CDN (if available)
             "https://cdn.mindtype.space/models/whispercpp",
             "https://mindtype.space/models/whispercpp",
-            # HF mirrors and HF
-            "https://hf-mirror.com/{repo_id}/resolve/main/{filename}",
-            "https://huggingface.co/{repo_id}/resolve/main/{filename}",
+            # Mirrors are accepted only when they serve the exact
+            # manifest-pinned bytes.
+            "https://hf-mirror.com/{repo_id}/resolve/{revision}/{filename}",
+            artifact.url,
         ]
 
         sources_to_try: List[str] = list(sources or default_sources)
@@ -510,9 +526,15 @@ class WhisperCppTranscriber:
         def _build_url(src: str) -> str:
             if "{" in src and "}" in src:
                 try:
-                    return src.format(repo_id=repo_id, filename=filename)
+                    return src.format(
+                        repo_id=repo_id,
+                        filename=filename,
+                        revision=artifact.source_revision,
+                    )
                 except Exception:
                     pass
+            if urllib.parse.urlparse(src).path.endswith(f"/{filename}"):
+                return src
             return src.rstrip("/") + "/" + filename
 
         def _download_url(url: str) -> None:
@@ -579,6 +601,10 @@ class WhisperCppTranscriber:
                     total = 0
                 if status == 206 and total > 0:
                     total += downloaded
+                if total > 0 and total != artifact.size:
+                    raise RuntimeError(
+                        "download size does not match the verified model manifest"
+                    )
 
                 # Sanity checks: protect against HTML error pages / wrong content.
                 ctype = ""
@@ -637,7 +663,8 @@ class WhisperCppTranscriber:
                 # If stat fails, treat as error.
                 raise
 
-            part_path.replace(dest_path)
+            verify_model_file(part_path, artifact)
+            os.replace(part_path, dest_path)
 
         part_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
@@ -662,7 +689,7 @@ class WhisperCppTranscriber:
             for src in sources_to_try:
                 url = _build_url(src)
                 parsed = urllib.parse.urlparse(url)
-                if parsed.scheme not in ("https", "http"):
+                if parsed.scheme != "https":
                     errors_by_url[url] = "unsupported scheme"
                     continue
 
@@ -671,6 +698,11 @@ class WhisperCppTranscriber:
                     logger.info(f"Скачивание {filename} из {url}...")
                     _download_url(url)
                     self.model_path = dest_path
+                    stat = dest_path.stat()
+                    self._verified_models[dest_path.resolve()] = (
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    )
                     logger.info(f"Модель успешно скачана: {self.model_path}")
                     return
                 except InterruptedError:
@@ -706,6 +738,19 @@ class WhisperCppTranscriber:
             f"Не удалось скачать модель {model_name}."
             f" partial={_part_size()} bytes. {err_summary}"
         )
+
+    def _verify_model_once(
+        self,
+        path: Path,
+        artifact: ModelArtifact,
+    ) -> None:
+        resolved = Path(path).resolve(strict=True)
+        stat = resolved.stat()
+        fingerprint = (stat.st_size, stat.st_mtime_ns)
+        if self._verified_models.get(resolved) == fingerprint:
+            return
+        verify_model_file(resolved, artifact)
+        self._verified_models[resolved] = fingerprint
 
     def download_model(
         self,

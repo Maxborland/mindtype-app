@@ -26,6 +26,22 @@ def test_operation_store_persists_provider_neutral_record(tmp_path: Path) -> Non
     assert store.schema_version == 2
 
 
+def test_operation_store_releases_windows_database_handle(
+    tmp_path: Path,
+) -> None:
+    from app.operation_store import OperationStore
+
+    database = tmp_path / "operations.sqlite3"
+    store = OperationStore(database)
+    assert store.schema_version == 2
+
+    moved = tmp_path / "operations-moved.sqlite3"
+    database.replace(moved)
+    moved.unlink()
+
+    assert not moved.exists()
+
+
 def test_operation_store_transition_persists_attempt_and_recovery_metadata(
     tmp_path: Path,
 ) -> None:
@@ -144,6 +160,17 @@ def test_legacy_cloud_jobs_migrate_once_with_backup_and_state_mapping(
     assert migrated.get("operation-completed").status is OperationStatus.COMPLETED
     assert reopened.count() == 2
     assert len(list(tmp_path.glob("cloud_jobs.v1-backup-*.sqlite3"))) == 1
+
+
+def test_desktop_runtime_uses_only_operation_store_for_lifecycle() -> None:
+    """Legacy cloud_jobs may be read by migrations, but never written by the UI."""
+    main_source = (
+        Path(__file__).resolve().parents[1] / "app" / "main.py"
+    ).read_text(encoding="utf-8")
+
+    assert "CloudJobStore" not in main_source
+    assert "FileCloudJobTracker" not in main_source
+    assert "_cloud_job_tracker" not in main_source
 
 
 def test_completed_requires_matching_persisted_canonical_result(

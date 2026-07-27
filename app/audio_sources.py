@@ -176,6 +176,10 @@ class SystemAudioRecorder:
     def start(self, device_id: Optional[str] = None) -> None:
         if self._active.is_set():
             return
+        if self._capture_thread is not None or self._writer_thread is not None:
+            raise RuntimeError(
+                "previous system-audio capture has not finished finalizing"
+            )
         device = self._resolve_device(device_id)
         temporary = tempfile.NamedTemporaryFile(
             delete=False,
@@ -191,16 +195,18 @@ class SystemAudioRecorder:
         self._started_at_ns = time.monotonic_ns()
         self._ended_at_ns = None
         self._active.set()
+        session_path = self._path
+        session_queue = self._queue
 
         def write_wav() -> None:
-            assert self._path is not None
+            assert session_path is not None
             try:
-                with wave.open(str(self._path), "wb") as output:
+                with wave.open(str(session_path), "wb") as output:
                     output.setnchannels(self.channels)
                     output.setsampwidth(2)
                     output.setframerate(self.sample_rate)
                     while True:
-                        block = self._queue.get()
+                        block = session_queue.get()
                         if block is None:
                             break
                         output.writeframes(block)
@@ -232,7 +238,7 @@ class SystemAudioRecorder:
                             np.clip(frames, -1.0, 1.0) * 32767.0
                         ).astype("<i2", copy=False)
                         try:
-                            self._queue.put_nowait(pcm.tobytes(order="C"))
+                            session_queue.put_nowait(pcm.tobytes(order="C"))
                         except queue.Full:
                             self._capture_error = (
                                 "system audio buffer overflowed; partial audio preserved"
@@ -245,7 +251,7 @@ class SystemAudioRecorder:
                 self._ended_at_ns = time.monotonic_ns()
                 self._active.clear()
                 try:
-                    self._queue.put(None, timeout=2.0)
+                    session_queue.put(None, timeout=2.0)
                 except queue.Full:
                     if self._capture_error is None:
                         self._capture_error = (
@@ -331,6 +337,9 @@ class MultiTrackAudioRecorder:
         self.microphone = microphone
         self.system = system
         self._source: Optional[AudioSourceKind] = None
+        self._results: list[AudioCaptureResult] = []
+        self._microphone_finalized = False
+        self._system_finalized = False
 
     def start(
         self,
@@ -341,9 +350,12 @@ class MultiTrackAudioRecorder:
         level_callback: Any = None,
     ) -> None:
         if self._source is not None:
-            return
+            raise RuntimeError("audio session is still finalizing or recording")
         normalized_source = AudioSourceKind(source)
         self._source = normalized_source
+        self._results = []
+        self._microphone_finalized = False
+        self._system_finalized = False
         system_started = False
         try:
             if normalized_source in {
@@ -372,19 +384,36 @@ class MultiTrackAudioRecorder:
         source = self._source
         if source is None:
             return MultiTrackCapture(results=())
-        results: list[AudioCaptureResult] = []
         if source in {
             AudioSourceKind.MICROPHONE,
             AudioSourceKind.MICROPHONE_SYSTEM,
-        }:
-            results.append(self.microphone.stop_capture())
+        } and not self._microphone_finalized:
+            microphone_result = self.microphone.stop_capture()
+            if microphone_result.track is not None:
+                self._results.append(microphone_result)
+                self._microphone_finalized = True
         if source in {
             AudioSourceKind.SYSTEM,
             AudioSourceKind.MICROPHONE_SYSTEM,
-        }:
-            results.append(self.system.stop())
+        } and not self._system_finalized:
+            system_result = self.system.stop()
+            if system_result.track is not None:
+                self._results.append(system_result)
+                self._system_finalized = True
+
+        microphone_done = (
+            source is AudioSourceKind.SYSTEM or self._microphone_finalized
+        )
+        system_done = (
+            source is AudioSourceKind.MICROPHONE or self._system_finalized
+        )
+        if not (microphone_done and system_done):
+            return MultiTrackCapture(results=())
+
+        capture = MultiTrackCapture(results=tuple(self._results))
         self._source = None
-        return MultiTrackCapture(results=tuple(results))
+        self._results = []
+        return capture
 
     @property
     def recording(self) -> bool:

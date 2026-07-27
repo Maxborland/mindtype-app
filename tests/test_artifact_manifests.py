@@ -32,6 +32,12 @@ def _write_manifest(path: Path, artifact_path: Path, **overrides) -> None:
                 "schema_version": "1.0",
                 "manifest_kind": "runtime",
                 "release_ready": True,
+                "source_archive": {
+                    "url": artifact["url"],
+                    "size": 100,
+                    "sha256": "b" * 64,
+                    "source_revision": artifact["source_revision"],
+                },
                 "artifacts": [artifact],
                 "unverified_artifacts": [],
             }
@@ -74,12 +80,30 @@ def test_verified_manifest_rejects_incomplete_trust_metadata(
         verify_manifest(manifest, root=tmp_path, require_release_ready=True)
 
 
-def test_checked_in_manifests_record_current_quarantine_and_block_release():
-    for name in ["whisper-runtime.windows-x64.json", "models.json"]:
-        manifest = ROOT / "manifests" / name
-        verify_manifest(manifest, root=ROOT)
-        with pytest.raises(ManifestError, match="not release-ready"):
-            verify_manifest(manifest, root=ROOT, require_release_ready=True)
+def test_checked_in_runtime_manifest_is_release_ready():
+    manifest = ROOT / "manifests" / "whisper-runtime.windows-x64.json"
+    verify_manifest(manifest, root=ROOT, require_release_ready=True)
+
+
+def test_packaged_runtime_verification_uses_release_ready_manifest(monkeypatch):
+    import app.artifact_manifest as artifact_manifest
+
+    artifact_manifest.verify_packaged_runtime.cache_clear()
+    monkeypatch.setattr(
+        artifact_manifest,
+        "default_runtime_manifest_path",
+        lambda: ROOT / "manifests" / "whisper-runtime.windows-x64.json",
+    )
+
+    artifact_manifest.verify_packaged_runtime()
+
+
+def test_checked_in_downloadable_model_manifest_is_release_ready():
+    verify_manifest(
+        ROOT / "manifests" / "models.json",
+        root=ROOT,
+        require_release_ready=True,
+    )
 
 
 def test_pyinstaller_bundles_only_the_declared_whisper_runtime_files():
@@ -91,11 +115,25 @@ def test_pyinstaller_bundles_only_the_declared_whisper_runtime_files():
         "whisper-server.exe",
         "whisper.dll",
         "ggml-base.dll",
-        "ggml-cpu.dll",
-        "ggml-vulkan.dll",
         "ggml.dll",
+        "ggml-cpu-alderlake.dll",
+        "ggml-cpu-cannonlake.dll",
+        "ggml-cpu-cascadelake.dll",
+        "ggml-cpu-haswell.dll",
+        "ggml-cpu-icelake.dll",
+        "ggml-cpu-sandybridge.dll",
+        "ggml-cpu-skylakex.dll",
+        "ggml-cpu-sse42.dll",
+        "ggml-cpu-x64.dll",
     ]:
         assert name in spec
+    assert "ggml-vulkan.dll" not in spec
+    assert '"ggml-cpu.dll"' not in spec
+    assert 'ROOT / "manifests" / "models.json"' in spec
+    assert (
+        'ROOT / "manifests" / "whisper-runtime.windows-x64.json"'
+        in spec
+    )
 
 
 def test_base_installer_excludes_optional_local_diarization_stack():

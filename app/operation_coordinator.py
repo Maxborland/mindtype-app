@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -23,6 +24,13 @@ from .spool import SpoolAsset, SpoolManager
 
 class StaleOperationCallback(RuntimeError):
     """Raised when a terminal or cancelling operation receives late success."""
+
+
+@dataclass(frozen=True)
+class StartupRecovery:
+    retryable_files: tuple[Any, ...]
+    retryable_dictations: tuple[OperationRecord, ...]
+    completed_pending_ack: tuple[OperationRecord, ...]
 
 
 class OperationCoordinator:
@@ -319,6 +327,52 @@ class OperationCoordinator:
         )
         return completed
 
+    def save_canonical_checkpoint(
+        self,
+        operation_id: str,
+        payload: Mapping[str, Any],
+        *,
+        stage: OperationStage,
+        name: str = "transcript",
+    ) -> Path:
+        """Atomically preserve a validated intermediate result without completing."""
+        operation = self.store.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status is not OperationStatus.RUNNING:
+            raise StaleOperationCallback(
+                "checkpoint ignored for non-running operation"
+            )
+        result_source = payload.get("source")
+        result_sha256 = (
+            result_source.get("sha256")
+            if isinstance(result_source, Mapping)
+            else None
+        )
+        if (
+            operation.source_sha256 is not None
+            and result_sha256 != operation.source_sha256
+        ):
+            raise CanonicalResultError(
+                "canonical checkpoint belongs to a different source asset"
+            )
+        checkpoint_dir = (
+            self.spool.operation_dir(operation_id) / "checkpoints"
+        )
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / f"{name}.json"
+        write_canonical_result(
+            checkpoint_path,
+            payload,
+            expected_operation_id=operation_id,
+        )
+        self.store.transition(
+            operation_id,
+            OperationStatus.RUNNING,
+            stage=stage,
+        )
+        return checkpoint_path
+
     def complete_dictation(
         self,
         operation_id: str,
@@ -394,8 +448,11 @@ class OperationCoordinator:
             canonical.append(item)
         return canonical
 
-    def complete_file_task(self, task: Any) -> OperationRecord:
-        """Persist the worker result as canonical JSON before publishing success."""
+    def canonical_payload_for_file_task(
+        self,
+        task: Any,
+    ) -> dict[str, Any]:
+        """Project a local worker result into the canonical cloud-safe schema."""
         operation = self.store.get(task.operation_id)
         if operation is None:
             raise KeyError(task.operation_id)
@@ -468,10 +525,15 @@ class OperationCoordinator:
                 "created_at": utc_now().isoformat(),
             },
         }
-        return self.save_canonical_result(operation.operation_id, payload)
+        return payload
 
-    def restore_retryable_file_tasks(self) -> list[Any]:
-        """Expose interrupted file work as pending UI tasks without starting it."""
+    def complete_file_task(self, task: Any) -> OperationRecord:
+        """Persist the worker result as canonical JSON before publishing success."""
+        payload = self.canonical_payload_for_file_task(task)
+        return self.save_canonical_result(task.operation_id, payload)
+
+    def restore_startup(self) -> StartupRecovery:
+        """Recover durable work without starting processing or spending money."""
         from .transcription_models import FileStatus, FileTask
 
         running_before_recovery = self.store.list_running()
@@ -487,13 +549,15 @@ class OperationCoordinator:
                     retention_deadline=None,
                 )
         self.cleanup_expired(now=utc_now())
-        restored = []
+        retryable_files = []
+        retryable_dictations = []
         for operation in self.store.list_retryable():
-            if operation.kind is not OperationKind.FILE:
+            if operation.kind is OperationKind.DICTATION:
+                retryable_dictations.append(operation)
                 continue
             metadata = self.spool.read_operation_metadata(operation.operation_id)
             display_name = metadata.get("display_name")
-            restored.append(
+            retryable_files.append(
                 FileTask(
                     file_path=operation.source_asset_path,
                     source_asset_path=operation.source_asset_path,
@@ -506,7 +570,22 @@ class OperationCoordinator:
                     operation_id=operation.operation_id,
                 )
             )
-        return restored
+        completed_pending_ack = tuple(
+            operation
+            for operation in self.store.list_completed()
+            if operation.source_asset_path.is_file()
+            and operation.canonical_result_path is not None
+            and operation.canonical_result_path.is_file()
+        )
+        return StartupRecovery(
+            retryable_files=tuple(retryable_files),
+            retryable_dictations=tuple(retryable_dictations),
+            completed_pending_ack=completed_pending_ack,
+        )
+
+    def restore_retryable_file_tasks(self) -> list[Any]:
+        """Compatibility wrapper for callers not yet consuming recovery details."""
+        return list(self.restore_startup().retryable_files)
 
     def cleanup_expired(self, *, now: datetime) -> list[str]:
         removed = self.spool.cleanup_expired(now=now)

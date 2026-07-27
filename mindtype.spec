@@ -13,6 +13,11 @@ datas = []
 for source, destination in [
     (ROOT / "app" / "ui" / "fonts", "app/ui/fonts"),
     (ROOT / "assets", "assets"),
+    (ROOT / "manifests" / "models.json", "manifests"),
+    (
+        ROOT / "manifests" / "whisper-runtime.windows-x64.json",
+        "manifests",
+    ),
 ]:
     if source.exists():
         datas.append((str(source), destination))
@@ -22,9 +27,16 @@ for filename in [
     "whisper-server.exe",
     "whisper.dll",
     "ggml-base.dll",
-    "ggml-cpu.dll",
-    "ggml-vulkan.dll",
     "ggml.dll",
+    "ggml-cpu-alderlake.dll",
+    "ggml-cpu-cannonlake.dll",
+    "ggml-cpu-cascadelake.dll",
+    "ggml-cpu-haswell.dll",
+    "ggml-cpu-icelake.dll",
+    "ggml-cpu-sandybridge.dll",
+    "ggml-cpu-skylakex.dll",
+    "ggml-cpu-sse42.dll",
+    "ggml-cpu-x64.dll",
 ]:
     source = ROOT / "bin" / "win-x64" / filename
     if source.exists():

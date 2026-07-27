@@ -2,6 +2,8 @@
 
 import re
 from pathlib import Path
+import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,10 +34,25 @@ def test_release_runs_tests_and_uses_existing_build_spec():
     workflow = CANONICAL.read_text(encoding="utf-8")
     build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
 
+    assert "python -m ruff check app tests --select F821,F601" in workflow
     assert "python -m pytest -q" in workflow
     assert "build_windows.ps1" in workflow
     assert 'Join-Path $RootDir "mindtype.spec"' in build_script
     assert (ROOT / "mindtype.spec").is_file()
+
+
+def test_release_smoke_tests_the_frozen_application_before_signing():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    build_position = workflow.index("- name: Build application")
+    signing_position = workflow.index(
+        "- name: Require signing secrets for tag releases"
+    )
+    frozen_smoke_position = workflow.index(
+        'dist\\MindType\\MindType.exe" --smoke-test'
+    )
+
+    assert build_position < frozen_smoke_position < signing_position
 
 
 def test_tag_release_requires_signing_and_publishes_checksum():
@@ -160,6 +177,7 @@ def test_release_installs_hashed_locks_and_publishes_validated_sbom():
     assert "--require-hashes" in workflow
     assert "-r requirements/base.lock" in workflow
     assert "-r requirements/dev.lock" in workflow
+    assert "-r requirements/local-diarization.lock" in workflow
     assert "pip install -r requirements.txt" not in workflow
     assert "python -m cyclonedx_py requirements" in workflow
     assert "--validate" in workflow
@@ -200,3 +218,52 @@ def test_base_pyinstaller_excludes_optional_ml_runtimes():
     assert 'ROOT / "hooks"' in spec
     assert (ROOT / "hooks" / "hook-webrtcvad.py").is_file()
     assert '"app" / "assets"' not in spec
+
+
+def test_local_windows_build_never_installs_an_unpinned_builder():
+    build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert "pip install pyinstaller" not in build_script.lower()
+    assert "requirements\\base.lock" in build_script
+    assert "requirements\\dev.lock" in build_script
+    assert "--require-hashes" in build_script
+    assert "3.11" in build_script
+
+
+def test_local_windows_build_isolates_dependencies_from_base_python():
+    build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert '".venv-build"' in build_script
+    assert "-m venv" in build_script
+    assert "sys.prefix != sys.base_prefix" in build_script
+    assert "$BuildPythonExe -m pip install --require-hashes" in build_script
+
+
+def test_tag_release_requires_and_publishes_signed_update_manifest():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    assert "MINDTYPE_UPDATE_PRIVATE_KEY" in workflow
+    assert "scripts/create_update_manifest.py" in workflow
+    assert 'dist\\MindType-update-manifest.json' in workflow
+    assert "--rollout-percentage 10" in workflow
+
+
+def test_base_desktop_import_does_not_load_assistant_model_runtimes():
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import app.main, sys;"
+                "assert 'openwakeword' not in sys.modules;"
+                "assert 'onnxruntime' not in sys.modules"
+            ),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert process.returncode == 0, process.stderr

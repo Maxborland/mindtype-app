@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -69,6 +70,7 @@ class CanonicalExporter:
         output_dir: Path,
         *,
         formats: Iterable[ExportFormat] = formats,
+        idempotency_key: str | None = None,
     ) -> dict[ExportFormat, Path]:
         result = validate_canonical_result(payload)
         selected = tuple(dict.fromkeys(ExportFormat(item) for item in formats))
@@ -76,11 +78,14 @@ class CanonicalExporter:
             raise ValueError("At least one export format is required")
         destination = Path(output_dir)
         destination.mkdir(parents=True, exist_ok=True)
-        stem = self._unique_stem(
-            destination,
-            _safe_stem(result["source"]["display_name"]),
-            selected,
-        )
+        base_stem = _safe_stem(result["source"]["display_name"])
+        if idempotency_key is None:
+            stem = self._unique_stem(destination, base_stem, selected)
+        else:
+            digest = hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest()[:12]
+            stem = f"{base_stem}_{digest}"
         final_paths = {
             format_: destination / f"{stem}.{format_.value}"
             for format_ in selected
@@ -98,7 +103,9 @@ class CanonicalExporter:
                 self._write_projection(
                     format_, result, path, html_content=html_content
                 )
-            if any(path.exists() for path in final_paths.values()):
+            if idempotency_key is None and any(
+                path.exists() for path in final_paths.values()
+            ):
                 raise FileExistsError("Export destination appeared during rendering")
             for format_, staged_path in staged_paths.items():
                 os.replace(staged_path, final_paths[format_])

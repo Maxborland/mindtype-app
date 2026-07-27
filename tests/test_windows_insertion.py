@@ -1,8 +1,10 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PyQt6.QtCore import QByteArray, QMimeData
 
 from app.insertion import AdapterAttempt, InsertionMethod, InsertionResult
+from app.insertion.qt_clipboard import clone_mime_data
 from app.insertion.uia_windows import set_value_via_uia
 from app.platform.windows import WindowsHotkeyListener, WindowsTextInserter
 
@@ -30,6 +32,27 @@ class FakeWindowManager:
 
     def get_foreground_window(self):
         return self.foreground
+
+
+def test_qt_clipboard_snapshot_clones_text_html_and_custom_formats():
+    source = QMimeData()
+    source.setData("text/plain", QByteArray(b"plain"))
+    source.setData("text/html", QByteArray(b"<b>rich</b>"))
+    source.setData(
+        'application/x-qt-windows-mime;value="Custom Format"',
+        QByteArray(b"\x00\x01custom"),
+    )
+
+    snapshot = clone_mime_data(source)
+    source.setData("text/plain", QByteArray(b"changed"))
+
+    assert bytes(snapshot.data("text/plain")) == b"plain"
+    assert bytes(snapshot.data("text/html")) == b"<b>rich</b>"
+    assert bytes(
+        snapshot.data(
+            'application/x-qt-windows-mime;value="Custom Format"'
+        )
+    ) == b"\x00\x01custom"
 
 
 def test_windows_inserter_rejects_stale_target_before_adapter_calls():

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from app.audio_sources import (
+    AudioCaptureResult,
     AudioCaptureStatus,
     AudioDevice,
     AudioSourceKind,
@@ -227,6 +228,72 @@ def test_stop_does_not_publish_track_while_capture_still_owns_wav(
     assert finalized.track.path.is_file()
 
 
+def test_system_recorder_rejects_restart_until_previous_writer_finalizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.audio_sources as audio_sources
+
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+
+    class _BlockedWave:
+        def __enter__(self) -> "_BlockedWave":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def setnchannels(self, _value: int) -> None:
+            return None
+
+        def setsampwidth(self, _value: int) -> None:
+            return None
+
+        def setframerate(self, _value: int) -> None:
+            return None
+
+        def writeframes(self, _value: bytes) -> None:
+            writer_started.set()
+            release_writer.wait(timeout=2)
+
+    monkeypatch.setattr(
+        audio_sources.wave,
+        "open",
+        lambda *_args, **_kwargs: _BlockedWave(),
+    )
+    native = _FakeRecorder(
+        [np.ones((1, 2), dtype=np.float32)]
+    )
+    backend = _FakeSoundCard(
+        [
+            _FakeMicrophone(
+                identifier="speaker-1",
+                name="Speakers",
+                isloopback=True,
+                recorder=native,
+            )
+        ]
+    )
+    recorder = SystemAudioRecorder(
+        backend=backend,
+        temp_dir=tmp_path,
+        block_frames=1,
+    )
+
+    recorder.start(device_id="speaker-1")
+    assert writer_started.wait(timeout=1)
+    unfinished = recorder.stop(timeout=0.01)
+    assert unfinished.track is None
+
+    try:
+        with pytest.raises(RuntimeError, match="previous system-audio capture"):
+            recorder.start(device_id="speaker-1")
+    finally:
+        release_writer.set()
+        recorder.stop(timeout=1)
+
+
 def test_device_is_rediscovered_when_capture_starts(tmp_path: Path) -> None:
     backend = _FakeSoundCard(
         [
@@ -358,3 +425,43 @@ def test_multitrack_stop_keeps_each_source_result() -> None:
     assert capture.interrupted is True
     microphone.start.assert_called_once()
     system.start.assert_called_once()
+
+
+def test_multitrack_keeps_session_owned_until_system_track_finalizes() -> None:
+    microphone = MagicMock()
+    system = MagicMock()
+    finalized_track = RecordedTrack(
+        source=AudioSourceKind.SYSTEM,
+        path=Path("system.wav"),
+        sample_rate=48_000,
+        channels=2,
+        started_at_monotonic_ns=10,
+        ended_at_monotonic_ns=20,
+    )
+    system.stop.side_effect = [
+        AudioCaptureResult(
+            status=AudioCaptureStatus.INTERRUPTED,
+            track=None,
+            error="system audio WAV writer did not finish",
+        ),
+        AudioCaptureResult(
+            status=AudioCaptureStatus.INTERRUPTED,
+            track=finalized_track,
+            error="system audio WAV writer did not finish",
+        ),
+    ]
+    session = MultiTrackAudioRecorder(microphone=microphone, system=system)
+    session.start(AudioSourceKind.SYSTEM)
+
+    unfinished = session.stop()
+
+    assert unfinished.tracks == ()
+    assert session.recording is True
+    with pytest.raises(RuntimeError, match="still finalizing"):
+        session.start(AudioSourceKind.SYSTEM)
+
+    finalized = session.stop()
+
+    assert finalized.tracks == (finalized_track,)
+    assert session.recording is False
+    assert system.stop.call_count == 2

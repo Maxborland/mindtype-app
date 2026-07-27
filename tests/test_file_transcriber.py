@@ -14,6 +14,15 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
+def test_windows_ga_media_limit_rejects_more_than_eight_hours() -> None:
+    from app.media_io import MediaDurationTooLong, enforce_media_duration_limit
+
+    enforce_media_duration_limit(8 * 60 * 60)
+
+    with pytest.raises(MediaDurationTooLong, match="8 hours"):
+        enforce_media_duration_limit(8 * 60 * 60 + 0.001)
+
+
 class TestIsSupportedFile:
     """Тесты для is_supported_file."""
 

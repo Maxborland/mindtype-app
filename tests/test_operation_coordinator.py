@@ -655,6 +655,45 @@ def test_restart_adopts_result_saved_before_database_transition(
     )["retention_deadline"] is None
 
 
+def test_startup_recovery_exposes_retryable_dictation(
+    tmp_path: Path,
+) -> None:
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+
+    database = tmp_path / "operations.sqlite3"
+    spool_root = tmp_path / "spool"
+    recorder_path = tmp_path / "recording.wav"
+    recorder_path.write_bytes(b"dictation-audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    operation = coordinator.adopt_recorded_dictation(
+        recorder_path,
+        route={"transcription": {"provider": "local", "model": "tiny"}},
+        operation_id="recover-dictation",
+    )
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+
+    reopened = OperationCoordinator(
+        store=OperationStore(database),
+        spool=SpoolManager(spool_root),
+    )
+    recovery = reopened.restore_startup()
+
+    assert recovery.retryable_files == ()
+    assert [item.operation_id for item in recovery.retryable_dictations] == [
+        operation.operation_id
+    ]
+    assert recovery.completed_pending_ack == ()
+
+
 def test_file_task_progress_and_error_are_persisted_without_source_loss(
     tmp_path: Path,
 ) -> None:

@@ -4,6 +4,21 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 
+def test_cloud_job_store_releases_windows_database_handle(
+    tmp_path: Path,
+) -> None:
+    from app.cloud_jobs import CloudJobStore
+
+    database = tmp_path / "cloud-jobs.sqlite3"
+    CloudJobStore(database)
+
+    moved = tmp_path / "cloud-jobs-moved.sqlite3"
+    database.replace(moved)
+    moved.unlink()
+
+    assert not moved.exists()
+
+
 def test_create_or_get_persists_one_job_per_idempotency_key(tmp_path: Path) -> None:
     from app.cloud_jobs import CloudJobState, CloudJobStore
 

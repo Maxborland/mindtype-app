@@ -39,6 +39,23 @@ def test_fully_local_route_is_identified():
     assert route.uses_cloud is False
 
 
+def test_mindtype_cloud_default_routes_heavy_laptop_stages_to_cloud():
+    route = resolve_processing_route(
+        {
+            "use_mindtype_cloud": True,
+            "transcriber_backend": "whisper_cpp",
+            "llm_provider": "mindtype_cloud",
+            "postprocessing_diarization": True,
+        },
+        summary_enabled=True,
+        diarization_backend="local",
+    )
+
+    assert route.audio == "MindType Cloud"
+    assert route.diarization == "MindType Cloud"
+    assert route.summary == "MindType Cloud"
+
+
 def test_unavailable_auto_diarization_is_reported_as_off():
     with patch("app.optional_features.local_diarization_available", return_value=False):
         route = resolve_processing_route(

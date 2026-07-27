@@ -19,6 +19,18 @@ logger = logging.getLogger("file_transcriber")
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus'}
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.flv', '.m4v'}
 ALL_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+MAX_MEDIA_DURATION_SECONDS = 8 * 60 * 60
+
+
+class MediaDurationTooLong(ValueError):
+    """Raised before processing media outside the Windows GA limit."""
+
+
+def enforce_media_duration_limit(duration_seconds: float) -> None:
+    if duration_seconds > MAX_MEDIA_DURATION_SECONDS:
+        raise MediaDurationTooLong(
+            "media duration exceeds the 8 hours Windows GA limit"
+        )
 
 
 def is_supported_file(path: Path) -> bool:

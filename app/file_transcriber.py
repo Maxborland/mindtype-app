@@ -5,6 +5,7 @@
 
 import logging
 import os
+import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 import threading
@@ -82,6 +83,11 @@ class FileTranscriptionQueue:
         on_progress: Optional[ProgressCallback] = None,
         on_completed: Optional[CompletedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,  # Callback для AI thinking
+        cloud_executor=None,
+        cloud_summary_executor=None,
+        cloud_transcribe_options: Optional[Dict] = None,
+        cloud_summary_options: Optional[Dict] = None,
+        cloud_poll_interval: float = 1.0,
     ):
         summary = summary or SummaryOptions()
         postprocess = postprocess or PostProcessOptions()
@@ -138,6 +144,17 @@ class FileTranscriptionQueue:
         self._on_progress = on_progress
         self._on_completed = on_completed
         self._on_thinking = on_thinking
+        self.cloud_executor = cloud_executor
+        self.cloud_summary_executor = cloud_summary_executor
+        self.cloud_transcribe_options = dict(
+            cloud_transcribe_options or {}
+        )
+        self.cloud_summary_options = (
+            dict(cloud_summary_options)
+            if cloud_summary_options is not None
+            else None
+        )
+        self.cloud_poll_interval = max(0.0, float(cloud_poll_interval))
 
         self._tasks: List[FileTask] = []
         self._queue: queue.Queue = queue.Queue()
@@ -222,29 +239,36 @@ class FileTranscriptionQueue:
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""
         try:
-            try:
-                prepare_operation = getattr(self.transcriber, "prepare_operation", None)
-                if callable(prepare_operation):
-                    prepare_operation()
-                self.transcriber.load_model(
-                    model_size=self.model_size,
-                    compute_type=self.compute_type,
-                    device=self.device,
-                    models_dir=str(self.models_dir),
-                )
-            except Exception as e:
-                for task in self._tasks:
-                    if task.status == FileStatus.PENDING:
-                        task.status = (
-                            FileStatus.CANCELLED
-                            if self._cancelled.is_set()
-                            else FileStatus.ERROR
-                        )
-                        if task.status is FileStatus.ERROR:
-                            task.error_message = f"Ошибка загрузки модели: {e}"
-                        if self._on_completed:
-                            self._on_completed(task)
-                return
+            if self.cloud_executor is None:
+                try:
+                    prepare_operation = getattr(
+                        self.transcriber,
+                        "prepare_operation",
+                        None,
+                    )
+                    if callable(prepare_operation):
+                        prepare_operation()
+                    self.transcriber.load_model(
+                        model_size=self.model_size,
+                        compute_type=self.compute_type,
+                        device=self.device,
+                        models_dir=str(self.models_dir),
+                    )
+                except Exception as e:
+                    for task in self._tasks:
+                        if task.status == FileStatus.PENDING:
+                            task.status = (
+                                FileStatus.CANCELLED
+                                if self._cancelled.is_set()
+                                else FileStatus.ERROR
+                            )
+                            if task.status is FileStatus.ERROR:
+                                task.error_message = (
+                                    f"Ошибка загрузки модели: {e}"
+                                )
+                            if self._on_completed:
+                                self._on_completed(task)
+                    return
 
             while self._running.is_set():
                 try:
@@ -286,6 +310,9 @@ class FileTranscriptionQueue:
 
     def _process_task(self, task: FileTask) -> None:
         """Обработать одну задачу."""
+        if self.cloud_executor is not None:
+            self._process_cloud_task(task)
+            return
         processing_path = task.processing_path
         audio_path = processing_path
 
@@ -486,14 +513,35 @@ class FileTranscriptionQueue:
                     self._on_progress(task)
 
                 try:
-                    summary, metrics = self._summarize_text(task.result.text_for_summary, task)
-                    if finish_cancelled():
-                        return
-                    if not summary or len(summary) < 10:
-                        raise ValueError("Суммаризация вернула пустой или слишком короткий результат")
-                    task.result.summary = summary
-                    task.result.summary_metrics = metrics.to_dict() if metrics else None
-                    task.result.summary_preset_name = self.summary_preset_name or None
+                    if (
+                        self.summary_provider == "mindtype_cloud"
+                        and self.cloud_summary_executor is not None
+                    ):
+                        if not self._summarize_local_result_in_cloud(task):
+                            if finish_cancelled():
+                                return
+                            raise RuntimeError(
+                                "MindType Cloud summary did not complete"
+                            )
+                    else:
+                        summary, metrics = self._summarize_text(
+                            task.result.text_for_summary,
+                            task,
+                        )
+                        if finish_cancelled():
+                            return
+                        if not summary or len(summary) < 10:
+                            raise ValueError(
+                                "Суммаризация вернула пустой или слишком "
+                                "короткий результат"
+                            )
+                        task.result.summary = summary
+                        task.result.summary_metrics = (
+                            metrics.to_dict() if metrics else None
+                        )
+                        task.result.summary_preset_name = (
+                            self.summary_preset_name or None
+                        )
                 except Exception as e:
                     if finish_cancelled():
                         return
@@ -520,6 +568,186 @@ class FileTranscriptionQueue:
 
         if self._on_completed:
             self._on_completed(task)
+
+    @staticmethod
+    def _result_from_canonical(
+        payload: Dict,
+        *,
+        fallback_path: Path,
+    ) -> TranscriptionResult:
+        transcript = payload["transcript"]
+        source = payload["source"]
+        route = payload.get("route", {})
+        segments = [
+            TranscriptionSegment(
+                start=float(segment["start_ms"]) / 1000,
+                end=float(segment["end_ms"]) / 1000,
+                text=str(segment["text"]),
+                speaker=segment.get("speaker_id"),
+                words=list(segment.get("words") or []),
+            )
+            for segment in transcript["segments"]
+        ]
+        speaker_stats = [
+            SpeakerStats(
+                speaker_id=str(speaker["speaker_id"]),
+                speaker_name=str(
+                    speaker.get("display_name") or speaker["speaker_id"]
+                ),
+                total_duration=float(
+                    speaker.get("total_duration_ms", 0)
+                )
+                / 1000,
+                segment_count=int(speaker.get("segment_count", 0)),
+                word_count=int(speaker.get("word_count", 0)),
+            )
+            for speaker in payload.get("speakers", [])
+        ]
+        summary = payload.get("summary")
+        transcription_route = route.get("transcription", {})
+        result = TranscriptionResult(
+            file_path=Path(source.get("display_name") or fallback_path),
+            segments=segments,
+            detected_language=str(transcript.get("language") or "und"),
+            language_probability=float(
+                transcript.get("confidence")
+                if transcript.get("confidence") is not None
+                else 0.0
+            ),
+            duration=float(source.get("duration_ms", 0)) / 1000,
+            model_used=str(transcription_route.get("model") or "auto"),
+            summary=(
+                str(summary.get("text"))
+                if isinstance(summary, dict) and summary.get("text")
+                else None
+            ),
+            processed_text=transcript.get("processed_text"),
+            speaker_stats=speaker_stats or None,
+            num_speakers=len(speaker_stats),
+            speaker_names={
+                item.speaker_id: item.speaker_name
+                for item in speaker_stats
+            },
+            summary_preset_name=(
+                str(summary.get("preset"))
+                if isinstance(summary, dict) and summary.get("preset")
+                else None
+            ),
+        )
+        return result
+
+    def _process_cloud_task(self, task: FileTask) -> None:
+        from .operation_models import OperationStage, OperationStatus
+
+        while True:
+            if self._cancelled.is_set():
+                operation = self.cloud_executor.cancel(task.operation_id)
+            else:
+                operation = self.cloud_executor.advance_transcription(
+                    task.operation_id,
+                    options=self.cloud_transcribe_options,
+                    summary_options=self.cloud_summary_options,
+                )
+
+            if operation.status is OperationStatus.COMPLETED:
+                if (
+                    operation.canonical_result_path is None
+                    or not operation.canonical_result_path.is_file()
+                ):
+                    raise RuntimeError(
+                        "Cloud operation completed without a local result"
+                    )
+                payload = json.loads(
+                    operation.canonical_result_path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+                task.result = self._result_from_canonical(
+                    payload,
+                    fallback_path=task.file_path,
+                )
+                task.status = FileStatus.COMPLETED
+                task.progress = 100
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+            if operation.status is OperationStatus.CANCELLED:
+                task.status = FileStatus.CANCELLED
+                task.progress = 0
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+            if operation.status in {
+                OperationStatus.FAILED,
+                OperationStatus.RETRYABLE,
+            }:
+                task.status = FileStatus.ERROR
+                task.error_message = (
+                    operation.last_error_code or "CLOUD_PROCESSING_FAILED"
+                )
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+
+            if operation.stage is OperationStage.SUMMARIZE:
+                task.status = FileStatus.SUMMARIZING
+                task.progress = max(task.progress, 70)
+            else:
+                task.status = FileStatus.TRANSCRIBING
+                task.progress = max(task.progress, 25)
+            if self._on_progress:
+                self._on_progress(task)
+            if self._cancelled.wait(self.cloud_poll_interval):
+                continue
+
+    def _summarize_local_result_in_cloud(self, task: FileTask) -> bool:
+        """Poll one idempotent summary job without repeating local STT."""
+        from .operation_models import OperationStage, OperationStatus
+
+        canonical_transcript = (
+            self.cloud_summary_executor.coordinator
+            .canonical_payload_for_file_task(task)
+        )
+        while True:
+            if self._cancelled.is_set():
+                operation = self.cloud_summary_executor.cancel(
+                    task.operation_id
+                )
+            else:
+                operation = self.cloud_summary_executor.advance_summary(
+                    task.operation_id,
+                    canonical_transcript=canonical_transcript,
+                    options=self.cloud_summary_options or {},
+                )
+            if operation.status is OperationStatus.COMPLETED:
+                result_path = operation.canonical_result_path
+                if result_path is None or not result_path.is_file():
+                    raise RuntimeError(
+                        "Cloud summary completed without a local result"
+                    )
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                task.result = self._result_from_canonical(
+                    payload,
+                    fallback_path=task.file_path,
+                )
+                return True
+            if operation.status is OperationStatus.CANCELLED:
+                return False
+            if operation.status in {
+                OperationStatus.FAILED,
+                OperationStatus.RETRYABLE,
+            }:
+                raise RuntimeError(
+                    operation.last_error_code or "CLOUD_SUMMARY_FAILED"
+                )
+            task.status = FileStatus.SUMMARIZING
+            task.progress = max(task.progress, 70)
+            if operation.stage is OperationStage.SUMMARIZE:
+                task.progress = max(task.progress, 75)
+            if self._on_progress:
+                self._on_progress(task)
+            if self._cancelled.wait(self.cloud_poll_interval):
+                continue
 
     def _summarize_text(self, text: str, task: FileTask):
         """Выполнить суммаризацию текста."""

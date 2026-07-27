@@ -101,11 +101,15 @@ def resolve_processing_route(
     diarization_backend: str,
 ) -> ProcessingRoute:
     """Resolve destinations from the effective settings shown to the user."""
-    audio = (
-        "OpenRouter"
-        if config.get("transcriber_backend") == "openrouter"
-        else "Local"
-    )
+    if (
+        config.get("use_mindtype_cloud")
+        or config.get("transcriber_backend") == "mindtype_cloud"
+    ):
+        audio = "MindType Cloud"
+    elif config.get("transcriber_backend") == "openrouter":
+        audio = "OpenRouter"
+    else:
+        audio = "Local"
 
     effective_backend = effective_diarization_backend(
         diarization_backend,
@@ -113,6 +117,8 @@ def resolve_processing_route(
     )
     if not config.get("postprocessing_diarization", True):
         diarization = "Off"
+    elif audio == "MindType Cloud":
+        diarization = "MindType Cloud"
     elif effective_backend == "openrouter":
         diarization = "OpenRouter"
     elif effective_backend == "local":

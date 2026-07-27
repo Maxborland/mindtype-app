@@ -24,6 +24,16 @@ _SCHEMA_VERSION = 2
 _UNSET = object()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Make ``with connection`` close the Windows file handle as well."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class IncompleteOperationError(ValueError):
     """Raised when completion is attempted before durable result persistence."""
 
@@ -37,7 +47,11 @@ class OperationStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=5)
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=5,
+            factory=_ClosingConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -462,6 +476,18 @@ class OperationStore:
                 ORDER BY created_at
                 """,
                 (OperationStatus.RUNNING.value,),
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def list_completed(self) -> list[OperationRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM operations
+                WHERE status = ?
+                ORDER BY created_at
+                """,
+                (OperationStatus.COMPLETED.value,),
             ).fetchall()
         return [self._from_row(row) for row in rows]
 

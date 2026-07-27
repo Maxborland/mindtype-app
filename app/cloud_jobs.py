@@ -79,6 +79,16 @@ _ALLOWED_TRANSITIONS = {
 }
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Make ``with connection`` release the database handle immediately."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 @dataclass(frozen=True)
 class CloudJob:
     job_id: str
@@ -106,7 +116,11 @@ class CloudJobStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=5)
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=5,
+            factory=_ClosingConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection

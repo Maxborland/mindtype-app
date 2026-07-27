@@ -196,7 +196,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Загрузка модели...",
         "error": "Ошибка",
         "success": "Успешно",
-        "cancelled": "Отменено",
 
         # Журнал
         "transcription": "Транскрипция",
@@ -213,9 +212,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Кнопки
         "record_hotkey": "Записать",
         "refresh": "Обновить",
-        "download_model": "Скачать модель",
         "skip": "Пропустить",
-        "cancel": "Отмена",
         "cancelled": "Отменено",
         "first_run_title": "Добро пожаловать в MindType",
         "first_run_welcome": "Для работы приложения необходимо скачать модель распознавания речи. Выберите модель в зависимости от ваших потребностей:",
@@ -320,7 +317,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "downloading_update": "Загрузка обновления...",
         "update_ready": "Обновление готово к установке",
         "update_error": "Ошибка обновления",
-        "automatic_update_disabled": "Автоматическое обновление временно отключено. Установите новую версию вручную из официального источника.",
+        "automatic_update_disabled": "Установщик не запущен: не удалось подтвердить полную цепочку доверия обновления.",
         "current_version": "Текущая версия",
 
         # Новые ключи для покупки и поддержки
@@ -622,7 +619,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Loading model...",
         "error": "Error",
         "success": "Success",
-        "cancelled": "Cancelled",
 
         # Journal
         "transcription": "Transcription",
@@ -639,9 +635,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Buttons
         "record_hotkey": "Record",
         "refresh": "Refresh",
-        "download_model": "Download Model",
         "skip": "Skip",
-        "cancel": "Cancel",
         "cancelled": "Cancelled",
         "first_run_title": "Welcome to MindType",
         "first_run_welcome": "To use the application, you need to download a speech recognition model. Choose a model based on your needs:",
@@ -746,7 +740,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "downloading_update": "Downloading update...",
         "update_ready": "Update ready to install",
         "update_error": "Update error",
-        "automatic_update_disabled": "Automatic updates are temporarily disabled. Install the new version manually from the official source.",
+        "automatic_update_disabled": "The installer was not launched because the complete update trust chain could not be verified.",
         "current_version": "Current version",
 
         # New keys for purchase and support
@@ -986,7 +980,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Modell laden...",
         "error": "Fehler",
         "success": "Erfolg",
-        "cancelled": "Abgebrochen",
         "transcription": "Transkription",
         "auto_insert_done": "Auto-Einfügen abgeschlossen",
         "saved_window": "Fenster gespeichert",
@@ -1174,7 +1167,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Chargement du modèle...",
         "error": "Erreur",
         "success": "Succès",
-        "cancelled": "Annulé",
         "transcription": "Transcription",
         "auto_insert_done": "Insertion auto terminée",
         "saved_window": "Fenêtre sauvegardée",
@@ -1362,7 +1354,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Cargando modelo...",
         "error": "Error",
         "success": "Éxito",
-        "cancelled": "Cancelado",
         "transcription": "Transcripción",
         "auto_insert_done": "Auto-inserción completada",
         "saved_window": "Ventana guardada",
@@ -1550,7 +1541,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Caricamento modello...",
         "error": "Errore",
         "success": "Successo",
-        "cancelled": "Annullato",
         "transcription": "Trascrizione",
         "auto_insert_done": "Auto-inserimento completato",
         "saved_window": "Finestra salvata",
@@ -1738,7 +1728,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Carregando modelo...",
         "error": "Erro",
         "success": "Sucesso",
-        "cancelled": "Cancelado",
         "transcription": "Transcrição",
         "auto_insert_done": "Auto-inserção concluída",
         "saved_window": "Janela salva",
@@ -1926,7 +1915,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "加载模型...",
         "error": "错误",
         "success": "成功",
-        "cancelled": "已取消",
         "transcription": "转录",
         "auto_insert_done": "自动插入完成",
         "saved_window": "窗口已保存",
@@ -2114,7 +2102,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "モデル読み込み中...",
         "error": "エラー",
         "success": "成功",
-        "cancelled": "キャンセル",
         "transcription": "文字起こし",
         "auto_insert_done": "自動挿入完了",
         "saved_window": "ウィンドウ保存済み",
@@ -2302,7 +2289,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "모델 로딩 중...",
         "error": "오류",
         "success": "성공",
-        "cancelled": "취소됨",
         "transcription": "전사",
         "auto_insert_done": "자동 삽입 완료",
         "saved_window": "창 저장됨",

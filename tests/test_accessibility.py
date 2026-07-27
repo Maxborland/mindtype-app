@@ -80,3 +80,22 @@ def test_overlay_exposes_text_status_and_reduced_motion() -> None:
 
     overlay.hide_overlay()
     assert not overlay.isVisible()
+
+
+def test_windows_high_contrast_uses_native_system_flag() -> None:
+    from app.accessibility import windows_high_contrast_enabled
+
+    def query(_action, _size, pointer, _flags):
+        pointer._obj.dwFlags = 1
+        return 1
+
+    assert windows_high_contrast_enabled(query=query) is True
+
+
+def test_failed_high_contrast_query_falls_back_without_crashing() -> None:
+    from app.accessibility import windows_high_contrast_enabled
+
+    def query(*_args):
+        raise OSError("system setting unavailable")
+
+    assert windows_high_contrast_enabled(query=query) is False

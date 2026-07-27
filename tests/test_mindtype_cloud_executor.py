@@ -14,7 +14,9 @@ class FakeCloudClient:
             "uploaded_parts": [],
         }
         self.job = {"id": "job-1", "state": "queued"}
+        self.summary_job = {"id": "summary-1", "state": "queued"}
         self.result = None
+        self.summary_result = None
         self.ack_error = None
         self.on_ack = None
 
@@ -67,6 +69,42 @@ class FakeCloudClient:
 
     def cancel_transcription(self, job_id):
         self.calls.append(("cancel_transcription", job_id))
+        return {"id": job_id, "state": "cancelled"}
+
+    def create_summary(
+        self,
+        *,
+        operation_id,
+        transcript_artifact_id=None,
+        canonical_transcript=None,
+        options,
+    ):
+        self.calls.append(
+            (
+                "create_summary",
+                operation_id,
+                transcript_artifact_id,
+                canonical_transcript,
+                dict(options),
+            )
+        )
+        return self.summary_job
+
+    def get_summary(self, job_id):
+        self.calls.append(("get_summary", job_id))
+        return self.summary_job
+
+    def get_summary_result(self, job_id, *, expected_operation_id=None):
+        self.calls.append(
+            ("get_summary_result", job_id, expected_operation_id)
+        )
+        return self.summary_result
+
+    def acknowledge_summary(self, job_id):
+        self.calls.append(("acknowledge_summary", job_id))
+
+    def cancel_summary(self, job_id):
+        self.calls.append(("cancel_summary", job_id))
         return {"id": job_id, "state": "cancelled"}
 
 
@@ -166,6 +204,8 @@ def test_executor_restart_polls_existing_job_without_upload_or_post(
 def test_success_is_saved_before_ack_and_then_source_is_cleaned(
     tmp_path: Path,
 ) -> None:
+    import json
+
     from app.operation_models import OperationStatus
     from app.providers.mindtype_cloud import MindTypeCloudExecutor
     from tests.test_result_schema import canonical_result
@@ -193,6 +233,10 @@ def test_success_is_saved_before_ack_and_then_source_is_cleaned(
 
     assert completed.status is OperationStatus.COMPLETED
     assert completed.canonical_result_path.is_file()
+    saved_result = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+    assert saved_result["source"]["display_name"] == "meeting.wav"
     assert operation.source_asset_path.exists() is False
     assert client.calls[-2:] == [
         (
@@ -339,3 +383,172 @@ def test_cancel_uses_existing_job_and_finishes_only_after_response(
 
     assert cancelled.status is OperationStatus.CANCELLED
     assert client.calls == [("cancel_transcription", "job-1")]
+
+
+def test_summary_remains_durable_between_transcription_and_final_ack(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+    from tests.test_result_schema import canonical_result
+
+    coordinator, operation = operation_fixture(tmp_path)
+    client = FakeCloudClient()
+    client.job = {
+        "id": "job-1",
+        "state": "succeeded",
+        "result_artifact_id": "transcript-result-1",
+    }
+    client.result = canonical_result(operation.operation_id)
+    client.result["source"]["sha256"] = operation.source_sha256
+    executor = MindTypeCloudExecutor(
+        client=client,
+        coordinator=coordinator,
+    )
+
+    summarizing = executor.advance_transcription(
+        operation.operation_id,
+        options={},
+        summary_options={
+            "preset": "pm",
+            "input_token_estimate": 1200,
+            "max_output_tokens": 800,
+        },
+    )
+
+    assert summarizing.status is OperationStatus.RUNNING
+    assert summarizing.stage is OperationStage.SUMMARIZE
+    assert summarizing.canonical_result_path is None
+    assert summarizing.source_asset_path.is_file()
+    assert summarizing.server_job_ids["summary"] == "summary-1"
+    checkpoint = (
+        coordinator.spool.operation_dir(operation.operation_id)
+        / "checkpoints"
+        / "transcript.json"
+    )
+    assert checkpoint.is_file()
+    assert (
+        "acknowledge_transcription",
+        "job-1",
+    ) not in client.calls
+
+    final = canonical_result(operation.operation_id)
+    final["source"]["sha256"] = operation.source_sha256
+    final["summary"] = {
+        "text": "Итог",
+        "preset": "pm",
+        "generated": True,
+        "source_segment_ids": [],
+    }
+    client.summary_job = {
+        "id": "summary-1",
+        "state": "succeeded",
+        "result_artifact_id": "summary-result-1",
+    }
+    client.summary_result = final
+
+    completed = executor.advance_transcription(
+        operation.operation_id,
+        options={},
+        summary_options={
+            "preset": "pm",
+            "input_token_estimate": 1200,
+            "max_output_tokens": 800,
+        },
+    )
+
+    assert completed.status is OperationStatus.COMPLETED
+    assert completed.canonical_result_path.is_file()
+    saved_result = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+    assert saved_result["source"]["display_name"] == "meeting.wav"
+    assert completed.source_asset_path.exists() is False
+    assert ("get_summary", "summary-1") in client.calls
+    assert ("acknowledge_summary", "summary-1") in client.calls
+    assert ("acknowledge_transcription", "job-1") in client.calls
+
+
+def test_local_transcript_can_use_durable_cloud_summary_without_cloud_stt(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from app.operation_models import OperationStage, OperationStatus
+    from app.providers.mindtype_cloud import MindTypeCloudExecutor
+    from tests.test_result_schema import canonical_result
+
+    coordinator, operation = operation_fixture(tmp_path)
+    coordinator.begin_attempt(
+        operation.operation_id,
+        stage=OperationStage.TRANSCRIBE,
+    )
+    transcript = canonical_result(operation.operation_id)
+    transcript["source"]["sha256"] = operation.source_sha256
+    transcript["route"]["transcription"] = {
+        "provider": "local",
+        "model": "whisper",
+    }
+    client = FakeCloudClient()
+    executor = MindTypeCloudExecutor(
+        client=client,
+        coordinator=coordinator,
+    )
+
+    summarizing = executor.advance_summary(
+        operation.operation_id,
+        canonical_transcript=transcript,
+        options={
+            "preset": "pm",
+            "input_token_estimate": 100,
+            "max_output_tokens": 800,
+        },
+    )
+
+    assert summarizing.status is OperationStatus.RUNNING
+    assert summarizing.stage is OperationStage.SUMMARIZE
+    create_call = next(
+        call for call in client.calls if call[0] == "create_summary"
+    )
+    assert create_call[2] is None
+    assert create_call[3] == transcript
+    assert not any(
+        call[0] == "create_upload" for call in client.calls
+    )
+
+    final = dict(transcript)
+    final["summary"] = {
+        "text": "Локальная транскрипция, облачный итог",
+        "preset": "pm",
+        "generated": True,
+        "source_segment_ids": [],
+    }
+    client.summary_job = {
+        "id": "summary-1",
+        "state": "succeeded",
+        "result_artifact_id": "summary-result-1",
+    }
+    client.summary_result = final
+
+    completed = executor.advance_summary(
+        operation.operation_id,
+        canonical_transcript=transcript,
+        options={
+            "preset": "pm",
+            "input_token_estimate": 100,
+            "max_output_tokens": 800,
+        },
+    )
+
+    assert completed.status is OperationStatus.COMPLETED
+    saved = json.loads(
+        completed.canonical_result_path.read_text(encoding="utf-8")
+    )
+    assert saved["route"]["transcription"]["provider"] == "local"
+    assert saved["summary"]["generated"] is True
+    assert ("acknowledge_summary", "summary-1") in client.calls
+    assert not any(
+        call[0] == "acknowledge_transcription" for call in client.calls
+    )

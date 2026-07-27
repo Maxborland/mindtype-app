@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from app.ui.workers import TranscribeWorker
+from app.ui.workers import CloudDictationWorker, TranscribeWorker
 
 
 class CompletingTranscriber:
@@ -52,3 +52,55 @@ def test_cancel_after_final_stream_item_emits_only_cancelled():
     assert cancelled == [True]
     assert finished == []
     assert transcriber.cancel_calls == 1
+
+
+def test_cloud_dictation_worker_returns_saved_canonical_text(tmp_path):
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStage
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from tests.test_result_schema import canonical_result
+
+    source = tmp_path / "dictation.wav"
+    source.write_bytes(b"audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    operation = coordinator.create_file_operation(
+        source,
+        route={
+            "transcription": {
+                "provider": "mindtype_cloud",
+                "model": "auto",
+            }
+        },
+        operation_id="cloud-dictation",
+    )
+
+    class Executor:
+        def advance_transcription(self, operation_id, *, options):
+            coordinator.begin_attempt(
+                operation_id,
+                stage=OperationStage.TRANSCRIBE,
+            )
+            payload = canonical_result(operation_id)
+            payload["source"]["sha256"] = operation.source_sha256
+            return coordinator.save_canonical_result(operation_id, payload)
+
+        def cancel(self, operation_id):
+            raise AssertionError(operation_id)
+
+    worker = CloudDictationWorker(
+        Executor(),
+        operation.operation_id,
+        options={"language": "ru"},
+        poll_interval_ms=0,
+    )
+    finished = []
+    worker.finished.connect(lambda *args: finished.append(args))
+
+    worker.run()
+
+    assert len(finished) == 1
+    assert finished[0][1:] == ("ru", 0.94, "")

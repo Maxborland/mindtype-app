@@ -1469,7 +1469,11 @@ class SetupWizard(QWizard):
             return PAGE_LICENSE_KEY
 
         if current == PAGE_LICENSE_KEY:
-            return PAGE_MODEL_DOWNLOAD
+            return (
+                PAGE_COMPLETION
+                if self.use_mindtype_cloud
+                else PAGE_MODEL_DOWNLOAD
+            )
 
         if current == PAGE_MODEL_DOWNLOAD:
             return PAGE_COMPLETION
@@ -1489,9 +1493,9 @@ class SetupWizard(QWizard):
         # Demo mode: do not touch AI summary provider/settings. User can configure later in Settings.
         if self.use_mindtype_cloud:
             self.config.update(llm_provider="mindtype_cloud")
-
-        model = self.model_page.get_selected_model()
-        self.config.update(model_size=model)
+        else:
+            model = self.model_page.get_selected_model()
+            self.config.update(model_size=model)
 
         logger.info(
             f"Setup wizard completed: language={ui_language}, "

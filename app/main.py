@@ -64,8 +64,8 @@ from .audio_sources import (
     SystemAudioRecorder,
 )
 from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
-from .cloud_jobs import CloudJobStore, FileCloudJobTracker
 from .operation_coordinator import OperationCoordinator
+from .operation_ack import acknowledge_completed_operation
 from .operation_models import OperationStage, OperationStatus, utc_now
 from .operation_store import OperationStore
 from .spool import SpoolManager
@@ -80,7 +80,11 @@ from .file_transcriber import (
     SummaryOptions,
     PostProcessOptions,
 )
-from .media_io import get_file_duration
+from .media_io import (
+    MediaDurationTooLong,
+    enforce_media_duration_limit,
+    get_file_duration,
+)
 from .hotkeys import HotkeyListener, HotkeyRecorder
 from .inserter import insert_text_result, focus_manager
 from .licensing import LicenseManager, LicenseStatus
@@ -89,7 +93,10 @@ from .ui.setup_wizard import SetupWizard
 from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, CreditsHistoryDialog, CreditsHistoryWorker
 from .overlay import OverlayWidget
 from .exporters import CanonicalExporter
-from .accessibility import configure_accessibility
+from .accessibility import (
+    configure_accessibility,
+    windows_high_contrast_enabled,
+)
 from .optional_features import local_diarization_available
 from .transcriber import (
     Transcriber,
@@ -103,11 +110,14 @@ from .translations import (
     UI_LANGUAGES,
     WHISPER_LANGUAGES,
 )
-# Импорты ассистента (условные)
+# Импорты ассистента (условные). Heavy optional runtimes must not be imported
+# by the base desktop when the feature is excluded.
 if ASSISTANT_FEATURE_ENABLED:
     from .assistant import VoiceAssistant, AssistantConfig, AssistantState, PERSONALITY_TEMPLATES
     from .assistant_overlay import AssistantOverlayWidget
     from .dialog_history import get_dialog_history_manager, Dialog
+    from .tts import get_tts_engine, is_edge_tts_available, RUSSIAN_VOICES
+    from .wake_word import is_openwakeword_available, WakeWordDetector
 else:
     # Заглушки для типов
     VoiceAssistant = None  # type: ignore
@@ -117,8 +127,18 @@ else:
     AssistantOverlayWidget = None  # type: ignore
     get_dialog_history_manager = None  # type: ignore
     Dialog = None  # type: ignore
-from .tts import get_tts_engine, is_edge_tts_available, RUSSIAN_VOICES
-from .wake_word import is_openwakeword_available, WakeWordDetector
+    RUSSIAN_VOICES = []
+    WakeWordDetector = None  # type: ignore
+
+    def is_edge_tts_available() -> bool:
+        return False
+
+    def is_openwakeword_available() -> bool:
+        return False
+
+    def get_tts_engine():
+        raise RuntimeError("Voice assistant is not included in this build")
+
 from .updater import Updater, UpdateInfo
 
 # Импорты из UI модуля
@@ -127,6 +147,7 @@ from .ui.tokens import COLORS, SPACING, TYPOGRAPHY
 from .ui.icons import create_app_icon
 from .ui.components import apply_system7_titlebar
 from .ui.workers import (
+    CloudDictationWorker,
     TranscribeWorker,
     ModelDownloadWorker,
     UpdateCheckWorker,
@@ -574,8 +595,10 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("MindType")
         self.setWindowIcon(create_app_icon(64))
-        # Frameless: своя полосатая System-7 рамка вместо нативной.
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self._high_contrast = windows_high_contrast_enabled()
+        # Native chrome is required for the Windows High Contrast contract.
+        if not self._high_contrast:
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(980, 520)
         self.resize(1060, 600)
 
@@ -591,17 +614,6 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             logger.exception("Could not initialize durable operation coordinator")
-        try:
-            self._cloud_job_tracker: Optional[FileCloudJobTracker] = (
-                FileCloudJobTracker(
-                    CloudJobStore(
-                        self.config.config_dir / "cloud_jobs.sqlite3"
-                    )
-                )
-            )
-        except Exception:
-            logger.exception("Could not initialize durable cloud job store")
-            self._cloud_job_tracker = None
         self.audio = AudioRecorder()
         self.system_audio = SystemAudioRecorder()
         self.audio_session = MultiTrackAudioRecorder(
@@ -658,7 +670,7 @@ class MainWindow(QMainWindow):
                 self.models_dir = desired_models_dir
         else:
             self.models_dir = desired_models_dir
-        self._transcribe_thread: Optional[TranscribeWorker] = None
+        self._transcribe_thread: Optional[QThread] = None
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
@@ -673,6 +685,29 @@ class MainWindow(QMainWindow):
 
         # Система лицензирования
         self.license_manager = LicenseManager()
+        self._cloud_session_manager = None
+        self._cloud_client = None
+        self._cloud_executor = None
+        try:
+            from .env import API_BASE_URL
+            from .licensing.session import (
+                CloudSessionManager,
+                KeyringRefreshTokenStore,
+                LicenseSessionClient,
+            )
+
+            lease_store = (
+                self.license_manager.get_entitlement_lease_store()
+            )
+            if lease_store is not None:
+                self._cloud_session_manager = CloudSessionManager(
+                    client=LicenseSessionClient(API_BASE_URL),
+                    lease_store=lease_store,
+                    refresh_store=KeyringRefreshTokenStore(),
+                    device_id=self.license_manager.get_device_id(),
+                )
+        except Exception:
+            logger.exception("MindType Cloud session boundary is unavailable")
         self.license_manager.revalidate_if_needed_async()
         self._license_revalidation_timer = QTimer(self)
         self._license_revalidation_timer.timeout.connect(
@@ -730,7 +765,7 @@ class MainWindow(QMainWindow):
         configure_accessibility(self)
         self._connect_signals()
         self._load_initial_state()
-        self._restore_retryable_cloud_tasks()
+        self._restore_durable_operations()
         self._spool_cleanup_timer = QTimer(self)
         self._spool_cleanup_timer.setInterval(24 * 60 * 60 * 1000)
         self._spool_cleanup_timer.timeout.connect(self._cleanup_expired_spool)
@@ -749,7 +784,10 @@ class MainWindow(QMainWindow):
         if not setup_completed:
             # Show full setup wizard for new users
             self._show_setup_wizard()
-        elif not self._has_any_model():
+        elif (
+            not self.config.config.get("use_mindtype_cloud", False)
+            and not self._has_any_model()
+        ):
             # Setup done but no models - show model download only
             self._show_first_run_dialog()
 
@@ -800,12 +838,40 @@ class MainWindow(QMainWindow):
     def _init_mindtype_cloud(self) -> None:
         """Initialize MindType Cloud provider."""
         try:
+            if self._cloud_session_manager is None:
+                raise RuntimeError(
+                    "MindType Cloud session boundary is unavailable"
+                )
+            from .llm import configure_mindtype_cloud_session
             from .llm.mindtype_cloud import MindTypeCloudProvider
 
-            # Получить лицензионный ключ из LicenseManager
-            license_info = self.license_manager.get_license_info()
-            license_key = license_info.license_key or ""
-            self._cloud_provider = MindTypeCloudProvider(license_key=license_key)
+            configure_mindtype_cloud_session(
+                self._cloud_session_manager.access_token,
+                self._refresh_mindtype_cloud_session,
+            )
+            self._cloud_provider = MindTypeCloudProvider(
+                access_token=self._cloud_session_manager.access_token,
+                refresh_access_token=self._refresh_mindtype_cloud_session,
+            )
+            if self._operation_coordinator is None:
+                raise RuntimeError(
+                    "Durable operation storage is unavailable"
+                )
+            from .env import API_BASE_URL
+            from .providers.mindtype_cloud import (
+                MindTypeCloudClient,
+                MindTypeCloudExecutor,
+            )
+
+            self._cloud_client = MindTypeCloudClient(
+                API_BASE_URL,
+                access_token=self._cloud_session_manager.access_token,
+                refresh_access_token=self._refresh_mindtype_cloud_session,
+            )
+            self._cloud_executor = MindTypeCloudExecutor(
+                client=self._cloud_client,
+                coordinator=self._operation_coordinator,
+            )
 
             # Update credits balance widget if exists
             if hasattr(self, '_credits_widget'):
@@ -814,6 +880,43 @@ class MainWindow(QMainWindow):
             logger.info("MindType Cloud provider initialized")
         except Exception as e:
             logger.error(f"Failed to initialize MindType Cloud: {e}")
+
+    def _refresh_mindtype_cloud_session(self) -> None:
+        """Refresh or create a short-lived session without persisting access."""
+        if self._cloud_session_manager is None:
+            raise RuntimeError(
+                "MindType Cloud session boundary is unavailable"
+            )
+        from .licensing.session import LicenseSessionError
+
+        try:
+            self._cloud_session_manager.refresh_access_token()
+            return
+        except LicenseSessionError as error:
+            if error.code != "AUTH_REQUIRED":
+                if error.authoritative:
+                    self.license_manager.clear_authoritative_cache()
+                raise
+
+        license_info = self.license_manager.get_license_info()
+        license_key = license_info.license_key or ""
+        if not license_key:
+            raise LicenseSessionError(
+                "AUTH_REQUIRED",
+                "MindType Cloud requires an activated license",
+                retryable=False,
+                authoritative=True,
+            )
+        try:
+            self._cloud_session_manager.activate(
+                license_key=license_key,
+                desktop_version=APP_VERSION,
+                platform="win32",
+            )
+        except LicenseSessionError as error:
+            if error.authoritative:
+                self.license_manager.clear_authoritative_cache()
+            raise
 
     def _refresh_credits_balance(self) -> None:
         """Refresh credits balance from server."""
@@ -1518,8 +1621,8 @@ class MainWindow(QMainWindow):
         return get_text(key, self._ui_lang)
 
     def _build_ui(self) -> None:
-        # Применяем стиль Classic Mac OS
-        self.setStyleSheet(STYLESHEET)
+        if not self._high_contrast:
+            self.setStyleSheet(STYLESHEET)
 
         # Главный контейнер: рамка окна (frameless) = полосатый title bar + контент.
         central = QWidget()
@@ -1528,8 +1631,10 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self._title_bar = AppTitleBar(self, "MindType")
-        outer.addWidget(self._title_bar)
+        self._title_bar = None
+        if not self._high_contrast:
+            self._title_bar = AppTitleBar(self, "MindType")
+            outer.addWidget(self._title_bar)
 
         content = QWidget()
         main_layout = QVBoxLayout(content)
@@ -3525,11 +3630,20 @@ class MainWindow(QMainWindow):
 
         cfg = self.config.config
         backend = cfg.get("transcriber_backend", "whisper_cpp")
-        provider = "openrouter" if backend == "openrouter" else "local"
+        if cfg.get("use_mindtype_cloud", False):
+            provider = "mindtype_cloud"
+        elif backend == "openrouter":
+            provider = "openrouter"
+        else:
+            provider = "local"
         model = (
             cfg.get("openrouter_transcribe_model") or "auto"
             if provider == "openrouter"
-            else cfg.get("model_size", "large-v3")
+            else (
+                "auto"
+                if provider == "mindtype_cloud"
+                else cfg.get("model_size", "large-v3")
+            )
         )
         route = {
             "transcription": {
@@ -3595,19 +3709,52 @@ class MainWindow(QMainWindow):
 
     def _run_transcription(self, audio_path: Path, operation_token: int) -> None:
         cfg = self.config.config
-        worker = TranscribeWorker(
-            self.transcriber,
-            audio_path,
-            model_size=cfg.get("model_size", "large-v3"),
-            compute_type=cfg.get("compute_type", "int8"),
-            device=cfg.get("device", "auto"),
-            cpu_threads=int(cfg.get("cpu_threads", 4)),
-            num_workers=int(cfg.get("num_workers", 1)),
-            language=cfg.get("language", "ru"),
-            beam_size=int(cfg.get("beam_size", 5)),
-            vad_filter=bool(cfg.get("vad_filter", True)),
-            models_dir=self.models_dir,
+        operation_id = self._dictation_operation_ids.get(operation_token)
+        operation = (
+            self._operation_coordinator.store.get(operation_id)
+            if operation_id and self._operation_coordinator
+            else None
         )
+        cloud_route = bool(
+            operation
+            and operation.route.get("transcription", {}).get("provider")
+            == "mindtype_cloud"
+        )
+        if cloud_route:
+            self._init_mindtype_cloud()
+            if self._cloud_executor is None or operation_id is None:
+                self._on_transcribed(
+                    operation_token,
+                    "",
+                    "",
+                    0.0,
+                    "MindType Cloud session could not be initialized.",
+                )
+                return
+            worker = CloudDictationWorker(
+                self._cloud_executor,
+                operation_id,
+                options={
+                    "language": cfg.get("language", "ru"),
+                    "word_timestamps": True,
+                    "diarization": False,
+                    "quality_profile": "fast",
+                },
+            )
+        else:
+            worker = TranscribeWorker(
+                self.transcriber,
+                audio_path,
+                model_size=cfg.get("model_size", "large-v3"),
+                compute_type=cfg.get("compute_type", "int8"),
+                device=cfg.get("device", "auto"),
+                cpu_threads=int(cfg.get("cpu_threads", 4)),
+                num_workers=int(cfg.get("num_workers", 1)),
+                language=cfg.get("language", "ru"),
+                beam_size=int(cfg.get("beam_size", 5)),
+                vad_filter=bool(cfg.get("vad_filter", True)),
+                models_dir=self.models_dir,
+            )
         worker.progress.connect(
             lambda text, lang, prob: self._on_transcribe_progress(
                 operation_token,
@@ -3696,7 +3843,9 @@ class MainWindow(QMainWindow):
                             0,
                         ),
                     )
-                    self._operation_coordinator.acknowledge_result(operation_id)
+                    self._operation_coordinator.acknowledge_result(
+                        operation_id
+                    )
             except Exception as exc:
                 logger.exception("Could not persist canonical dictation result")
                 err = str(exc)
@@ -3999,12 +4148,15 @@ class MainWindow(QMainWindow):
             details = self._t("update_version").replace("{version}", info.version)
             if info.release_notes:
                 details += f"\n\n{info.release_notes}"
-            details += f"\n\n{self._t('automatic_update_disabled')}"
-            QMessageBox.information(
+            reply = QMessageBox.question(
                 self,
                 self._t("update_available"),
                 details,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._download_update()
         else:
             self.update_status_label.setText(self._t("no_updates"))
             self.update_status_label.setObjectName("updateStatusNeutral")
@@ -4067,7 +4219,14 @@ class MainWindow(QMainWindow):
 
             if reply == QMessageBox.StandardButton.Yes:
                 self._add_journal_entry("success", "update_ready", is_translatable=True)
-                self.updater.install_update()
+                if self.updater.install_update():
+                    QApplication.quit()
+                else:
+                    QMessageBox.critical(
+                        self,
+                        self._t("update_error"),
+                        self._t("automatic_update_disabled"),
+                    )
         else:
             self.update_status_label.setText(f"{self._t('update_error')}: {error}")
             self.update_status_label.setObjectName("updateStatusError")
@@ -4412,29 +4571,32 @@ class MainWindow(QMainWindow):
 
     def _update_data_route_disclosure(self, *_args) -> None:
         """Показать эффективный маршрут данных до запуска обработки."""
-        audio_destination = (
-            "OpenRouter"
-            if self.config.config.get("transcriber_backend") == "openrouter"
-            else self._t("route_local")
-        )
-        if hasattr(self, "dictation_route_label"):
-            self.dictation_route_label.setText(
-                self._t("dictation_data_route").format(
-                    audio=audio_destination,
-                )
-            )
-        if not hasattr(self, "data_route_label"):
-            return
         route = resolve_processing_route(
             self.config.config,
-            summary_enabled=self.enable_summary_checkbox.isChecked(),
-            diarization_backend=self.diarization_backend_combo.currentData(),
+            summary_enabled=(
+                self.enable_summary_checkbox.isChecked()
+                if hasattr(self, "enable_summary_checkbox")
+                else False
+            ),
+            diarization_backend=(
+                self.diarization_backend_combo.currentData()
+                if hasattr(self, "diarization_backend_combo")
+                else "auto"
+            ),
         )
         def display(value: str) -> str:
             return {
                 "Local": self._t("route_local"),
                 "Off": self._t("route_off"),
             }.get(value, value)
+        if hasattr(self, "dictation_route_label"):
+            self.dictation_route_label.setText(
+                self._t("dictation_data_route").format(
+                    audio=display(route.audio),
+                )
+            )
+        if not hasattr(self, "data_route_label"):
+            return
         self.data_route_label.setText(
             self._t("data_route_disclosure").format(
                 audio=display(route.audio),
@@ -4592,7 +4754,19 @@ class MainWindow(QMainWindow):
         estimated_seconds = 0.0
         for task in pending_tasks:
             try:
-                estimated_seconds += max(0.0, get_file_duration(task.file_path))
+                duration_seconds = max(
+                    0.0,
+                    get_file_duration(task.file_path),
+                )
+                enforce_media_duration_limit(duration_seconds)
+                estimated_seconds += duration_seconds
+            except MediaDurationTooLong as exc:
+                QMessageBox.warning(
+                    self,
+                    self._t("error"),
+                    f"{task.file_name}: {exc}",
+                )
+                return
             except Exception as exc:
                 logger.warning(
                     "Could not estimate duration for %s: %s",
@@ -4646,9 +4820,9 @@ class MainWindow(QMainWindow):
         summary_reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
 
         if llm_provider == "mindtype_cloud":
-            # MindType Cloud: используем лицензионный ключ
-            license_info = self.license_manager.get_license_info()
-            summary_api_key = license_info.license_key or ""
+            # MindType Cloud uses the configured in-memory cloud session.
+            self._init_mindtype_cloud()
+            summary_api_key = ""
             summary_model = "auto"
             summary_reasoning = False  # Cloud не поддерживает reasoning
         elif llm_provider == "ollama":
@@ -4662,12 +4836,7 @@ class MainWindow(QMainWindow):
             summary_reasoning = bool(cfg.get("llm_reasoning_enabled", True))
             summary_reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
 
-        # Pre-flight проверка кредитов для MindType Cloud
         enable_summary = self.enable_summary_checkbox.isChecked()
-        if enable_summary and llm_provider == "mindtype_cloud":
-            if not self._check_cloud_credits_before_processing():
-                return
-
         processing_route = resolve_processing_route(
             cfg,
             summary_enabled=enable_summary,
@@ -4676,6 +4845,34 @@ class MainWindow(QMainWindow):
                 "auto",
             ),
         )
+        cloud_transcription = (
+            processing_route.audio == "MindType Cloud"
+        )
+        # Credit checks belong only to routes the current client can execute.
+        if enable_summary and llm_provider == "mindtype_cloud":
+            if not self._check_cloud_credits_before_processing():
+                return
+
+        if cloud_transcription:
+            self._init_mindtype_cloud()
+            if self._cloud_executor is None:
+                QMessageBox.critical(
+                    self,
+                    self._t("error"),
+                    "MindType Cloud session could not be initialized.",
+                )
+                return
+            if (
+                enable_summary
+                and processing_route.summary != "MindType Cloud"
+            ):
+                QMessageBox.warning(
+                    self,
+                    self._t("error"),
+                    "Cloud transcription currently requires MindType Cloud "
+                    "summary or summary disabled.",
+                )
+                return
         if self._operation_coordinator is None:
             QMessageBox.critical(
                 self,
@@ -4695,33 +4892,6 @@ class MainWindow(QMainWindow):
             logger.exception("Could not persist files before processing")
             QMessageBox.critical(self, self._t("error"), str(exc))
             return
-
-        if processing_route.uses_cloud:
-            if self._cloud_job_tracker is None:
-                QMessageBox.critical(
-                    self,
-                    self._t("error"),
-                    "Cloud processing is unavailable because its durable job "
-                    "store could not be opened.",
-                )
-                return
-            route_snapshot = {
-                "audio": processing_route.audio,
-                "diarization": processing_route.diarization,
-                "summary": processing_route.summary,
-            }
-            try:
-                for task in pending_tasks:
-                    if not task.cloud_job_id:
-                        self._cloud_job_tracker.register(
-                            task,
-                            route=route_snapshot,
-                        )
-                    self._cloud_job_tracker.begin(task)
-            except Exception as exc:
-                logger.exception("Could not persist cloud processing jobs")
-                QMessageBox.critical(self, self._t("error"), str(exc))
-                return
 
         self._file_queue = FileTranscriptionQueue(
             transcriber=self.transcriber,
@@ -4769,6 +4939,43 @@ class MainWindow(QMainWindow):
             ),
             on_thinking=lambda text: self.thinking_signal.emit(text),
             on_completed=self._on_file_task_completed,
+            cloud_executor=(
+                self._cloud_executor if cloud_transcription else None
+            ),
+            cloud_summary_executor=(
+                self._cloud_executor
+                if (
+                    not cloud_transcription
+                    and enable_summary
+                    and processing_route.summary == "MindType Cloud"
+                )
+                else None
+            ),
+            cloud_transcribe_options=(
+                {
+                    "language": cfg.get("language", "ru"),
+                    "word_timestamps": True,
+                    "diarization": (
+                        processing_route.diarization
+                        == "MindType Cloud"
+                    ),
+                    "quality_profile": "balanced",
+                }
+                if cloud_transcription
+                else None
+            ),
+            cloud_summary_options=(
+                {
+                    "preset": preset_id,
+                    "input_token_estimate": 0,
+                    "max_output_tokens": 2_000,
+                }
+                if (
+                    enable_summary
+                    and processing_route.summary == "MindType Cloud"
+                )
+                else None
+            ),
         )
 
         # Добавляем файлы
@@ -4809,11 +5016,6 @@ class MainWindow(QMainWindow):
                 self._operation_coordinator.sync_file_task(task)
             except Exception:
                 logger.exception("Could not persist durable file progress")
-        if self._cloud_job_tracker and task.cloud_job_id:
-            try:
-                self._cloud_job_tracker.sync(task)
-            except Exception:
-                logger.exception("Could not persist cloud task progress")
         key = self._task_key(task.file_path)
         widget = self._file_widgets.get(key)
         if widget:
@@ -4886,18 +5088,6 @@ class MainWindow(QMainWindow):
                         )
                 except Exception:
                     logger.exception("Could not mark failed canonical save retryable")
-        if (
-            self._cloud_job_tracker
-            and task.cloud_job_id
-            and not (
-                self._preserve_cloud_jobs_on_shutdown
-                and task.status is FileStatus.CANCELLED
-            )
-        ):
-            try:
-                self._cloud_job_tracker.sync(task)
-            except Exception:
-                logger.exception("Could not persist cloud task completion")
         key = self._task_key(task.file_path)
         widget = self._file_widgets.get(key)
         if widget:
@@ -4999,56 +5189,88 @@ class MainWindow(QMainWindow):
                 self._operation_coordinator.sync_file_task(task)
             except Exception:
                 logger.exception("Could not cancel durable file operation")
-        if not self._cloud_job_tracker or not task.cloud_job_id:
-            return
-        try:
-            self._cloud_job_tracker.sync(task)
-        except Exception:
-            logger.exception("Could not cancel durable cloud task")
-
-    def _restore_retryable_cloud_tasks(self) -> None:
+    def _restore_durable_operations(self) -> None:
         """Restore pending file work without starting it or spending BYOK."""
-        legacy_tasks: list[FileTask] = []
-        if self._cloud_job_tracker is not None:
-            try:
-                legacy_tasks = (
-                    self._cloud_job_tracker.restore_retryable_tasks()
-                )
-            except Exception:
-                logger.exception("Could not recover legacy cloud tasks")
+        from .recovery import project_completed_operation
 
         durable_tasks: list[FileTask] = []
+        durable_recovery = None
         if self._operation_coordinator is not None:
             try:
-                durable_tasks = (
-                    self._operation_coordinator.restore_retryable_file_tasks()
+                durable_recovery = (
+                    self._operation_coordinator.restore_startup()
                 )
+                durable_tasks = list(durable_recovery.retryable_files)
             except Exception:
                 logger.exception("Could not recover durable file operations")
-
-        restored_by_operation = {
-            task.operation_id: task
-            for task in legacy_tasks
-        }
-        for durable in durable_tasks:
-            existing = restored_by_operation.get(durable.operation_id)
-            if existing is None:
-                restored_by_operation[durable.operation_id] = durable
-                continue
-            existing.source_asset_path = durable.source_asset_path
-            existing.display_name = durable.display_name
 
         existing_operation_ids = {
             task.operation_id
             for task in self._file_tasks
         }
-        for task in restored_by_operation.values():
+        for task in durable_tasks:
             if task.operation_id in existing_operation_ids:
                 continue
             self._file_tasks.append(task)
             self._add_file_widget(task)
             existing_operation_ids.add(task.operation_id)
+
+        if durable_recovery is not None and self._operation_coordinator is not None:
+            for operation in durable_recovery.completed_pending_ack:
+                try:
+                    projection = project_completed_operation(
+                        operation,
+                        output_dir=self._output_dir,
+                    )
+                    if projection.file_task is not None:
+                        recovered_task = projection.file_task
+                        if recovered_task.operation_id not in existing_operation_ids:
+                            self._file_tasks.append(recovered_task)
+                            self._add_file_widget(recovered_task)
+                            existing_operation_ids.add(
+                                recovered_task.operation_id
+                            )
+                        self._last_completed_task = recovered_task
+                    elif projection.dictation_text:
+                        self.last_text = projection.dictation_text
+                        if self.tray_icon:
+                            self.tray_repeat_insert_action.setEnabled(True)
+                        if hasattr(self, "transcription_history"):
+                            self.transcription_history.add_transcription(
+                                projection.dictation_text
+                            )
+                    self._acknowledge_completed_operation(
+                        operation.operation_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not project recovered completed operation %s",
+                        operation.operation_id,
+                    )
+
+            for operation in durable_recovery.retryable_dictations:
+                self._add_journal_entry(
+                    "error",
+                    "Recovered dictation requires retry",
+                    text=str(operation.source_asset_path),
+                    is_translatable=False,
+                )
         self._update_file_queue_ui()
+
+    def _acknowledge_completed_operation(self, operation_id: str) -> None:
+        """ACK remote artifacts before removing the durable local source."""
+        if self._operation_coordinator is None:
+            raise RuntimeError("Durable operation storage is unavailable")
+
+        def cloud_executor():
+            self._init_mindtype_cloud()
+            return self._cloud_executor
+
+        acknowledge_completed_operation(
+            self._operation_coordinator,
+            operation_id,
+            cloud_executor_factory=cloud_executor,
+        )
 
     def _cleanup_expired_spool(self) -> None:
         if self._operation_coordinator is None:
@@ -5141,6 +5363,15 @@ class MainWindow(QMainWindow):
             self.transcriber.shutdown()
         except Exception:
             logger.exception("Не удалось остановить transcriber backend")
+        if self._transcribe_thread and self._transcribe_thread.isRunning():
+            cancel_worker = getattr(self._transcribe_thread, "cancel", None)
+            if callable(cancel_worker):
+                try:
+                    cancel_worker()
+                except Exception:
+                    logger.exception(
+                        "Could not request dictation worker cancellation"
+                    )
 
         # Останавливаем QThread воркеры
         for worker in [
@@ -5202,23 +5433,23 @@ def main() -> None:
     _ui_font.setPixelSize(13)
     app.setFont(_ui_font)
 
-    # Force light theme (System 7 style)
-    app.setStyle("Fusion")
-    from PyQt6.QtGui import QPalette
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(221, 221, 221))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.Button, QColor(221, 221, 221))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
-    app.setPalette(palette)
+    if not windows_high_contrast_enabled():
+        app.setStyle("Fusion")
+        from PyQt6.QtGui import QPalette
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(221, 221, 221))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
+        palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Button, QColor(221, 221, 221))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
+        palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 255, 255))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+        app.setPalette(palette)
 
     # Проверяем лицензию перед запуском
     license_manager = LicenseManager()

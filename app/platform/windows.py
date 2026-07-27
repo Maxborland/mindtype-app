@@ -4,14 +4,13 @@ Windows-специфичная реализация платформенного
 """
 
 import ctypes
+import logging
 import time
 from ctypes import wintypes
 from typing import Callable, Optional, Set, List
 
 from PyQt6.QtCore import QAbstractNativeEventFilter, QObject, QTimer, Qt, QEvent
 from PyQt6.QtWidgets import QApplication
-
-import pyperclip
 
 from .base import (
     BasePlatform,
@@ -28,7 +27,14 @@ from ..insertion import (
     UIAutomationValueAdapter,
     UnicodeInputAdapter,
 )
+from ..insertion.qt_clipboard import (
+    capture_clipboard,
+    restore_clipboard,
+    write_clipboard_text,
+)
 from ..insertion.uia_windows import set_value_via_uia
+
+logger = logging.getLogger(__name__)
 
 
 # Windows API
@@ -438,8 +444,9 @@ class WindowsTextInserter(BaseTextInserter):
         self._pipeline = pipeline or InsertionPipeline(
             [
                 ClipboardPasteAdapter(
-                    read_clipboard=pyperclip.paste,
-                    write_clipboard=pyperclip.copy,
+                    read_clipboard=capture_clipboard,
+                    write_clipboard=write_clipboard_text,
+                    restore_clipboard=restore_clipboard,
                     send_paste=self._send_ctrl_v,
                     release_modifiers=self._release_modifiers,
                     sleep=sleep,
@@ -497,8 +504,7 @@ class WindowsTextInserter(BaseTextInserter):
             )
             return self.last_result
         except Exception as e:
-            if 'logger' in globals():
-                logger.error(f"Ошибка вставки текста: {e}")
+            logger.error("Ошибка вставки текста: %s", e)
             self.last_result = InsertionResult.failed(
                 InsertionFailure.ALL_METHODS_FAILED,
                 error=str(e),

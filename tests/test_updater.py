@@ -140,34 +140,16 @@ class TestUpdaterCheckForUpdates:
         assert info.version == "1.2.0"
         assert info.error is None
 
-    def test_check_updates_fallback_on_primary_failure(self):
-        """Fallback на GitHub при недоступности основного сервера."""
+    def test_check_updates_does_not_fall_back_to_untrusted_source(self):
+        """A network failure must not downgrade to stale unsigned metadata."""
         from app.updater import Updater
 
         call_count = [0]
-
-        payload, public_key = signed_update_payload(
-            version="1.1.0",
-            release_notes="Fallback release",
-        )
+        _, public_key = signed_update_payload(version="1.1.0")
 
         def mock_urlopen(request, timeout=None):
             call_count[0] += 1
-            url = request.full_url if hasattr(request, 'full_url') else str(request)
-
-            # Первый вызов (primary) - ошибка
-            if call_count[0] == 1:
-                raise urllib.error.URLError("Connection refused")
-
-            # Второй вызов (fallback) - успех
-            mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.read.return_value = json.dumps(payload).encode(
-                "utf-8"
-            )
-            mock_response.__enter__ = MagicMock(return_value=mock_response)
-            mock_response.__exit__ = MagicMock(return_value=False)
-            return mock_response
+            raise urllib.error.URLError("Connection refused")
 
         updater = Updater(
             current_version="1.0.0",
@@ -179,10 +161,9 @@ class TestUpdaterCheckForUpdates:
         with patch('urllib.request.urlopen', side_effect=mock_urlopen):
             info = updater.check_for_updates()
 
-        assert call_count[0] == 2  # Оба URL были опробованы
-        assert info.available is True
-        assert info.version == "1.1.0"
-        assert info.error is None
+        assert call_count[0] == 1
+        assert info.available is False
+        assert "Connection refused" in (info.error or "")
 
     def test_check_updates_all_sources_fail(self):
         """Ошибка когда все источники недоступны."""
@@ -265,58 +246,146 @@ class TestUpdaterCheckForUpdates:
         assert info.available is False
         assert "Недоверенный manifest" in info.error
 
+    def test_oversized_manifest_response_is_rejected(self):
+        from app.updater import MAX_UPDATE_MANIFEST_BYTES, Updater
+
+        _, public_key = signed_update_payload()
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = b"x" * (
+            MAX_UPDATE_MANIFEST_BYTES + 1
+        )
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+
+        with patch(
+            "urllib.request.urlopen",
+            return_value=mock_response,
+        ):
+            info = updater.check_for_updates()
+
+        assert info.available is False
+        assert "too large" in (info.error or "")
+
 
 class TestUpdaterDownloadValidation:
     """Тесты для валидации скачивания."""
 
-    def test_download_is_disabled_before_any_network_or_file_access(self):
-        """Отключённый updater не должен даже начинать загрузку."""
-        from app.updater import AUTOMATIC_UPDATE_DISABLED_MESSAGE, Updater
+    def test_download_requires_a_verified_manifest(self, tmp_path):
+        from app.updater import AUTOMATIC_UPDATE_DISABLED_MESSAGE
 
-        updater = Updater(current_version="1.0.0")
-        updater.latest_info = {
-            "version": "1.1.0",
-            "platforms": {
-                "windows": {
-                    "url": "https://mindtype.space/MindType_Setup.exe",
-                    "sha256": "a" * 64,
-                }
-            },
-        }
+        updater = trusted_updater(
+            current_version="1.0.0",
+            update_directory=tmp_path,
+        )
 
-        with (
-            patch.object(updater, "get_download_info") as get_download_info,
-            patch("urllib.request.urlretrieve") as urlretrieve,
-        ):
-            success, path, error = updater.download_update()
+        with patch(
+            "app.updater.download_verified_installer"
+        ) as download:
+            result = updater.download_update()
 
-        assert (success, path, error) == (
+        assert result == (
             False,
             None,
             AUTOMATIC_UPDATE_DISABLED_MESSAGE,
         )
-        get_download_info.assert_not_called()
-        urlretrieve.assert_not_called()
+        download.assert_not_called()
 
-class TestUpdaterInstallationDisabled:
-    """Автоматический запуск установщика закрыт до появления корня доверия."""
+    def test_download_uses_only_the_verified_manifest(self, tmp_path):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import Updater
 
-    def test_install_is_disabled_without_process_or_exit(self, tmp_path):
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            update_directory=tmp_path,
+        )
+        updater.verified_manifest = manifest
+        expected = tmp_path / "MindType-1.2.0-Setup.exe"
+        callback = MagicMock()
+
+        with patch(
+            "app.updater.download_verified_installer",
+            return_value=expected,
+        ) as download:
+            result = updater.download_update(callback)
+
+        assert result == (True, expected, None)
+        assert updater._temp_path == expected
+        download.assert_called_once_with(
+            manifest,
+            expected,
+            allowed_hosts=updater._allowed_download_hosts,
+            progress_callback=callback,
+        )
+
+
+class TestUpdaterInstallation:
+    """The installer is authenticated again immediately before execution."""
+
+    def test_install_fails_closed_without_verified_manifest(self, tmp_path):
         from app.updater import Updater
 
         updater = Updater(current_version="1.0.0")
         updater._temp_path = tmp_path / "MindType_Setup.exe"
         updater._temp_path.write_bytes(b"untrusted installer")
 
-        with (
-            patch("subprocess.Popen") as popen,
-            patch("sys.exit") as exit_app,
-        ):
+        with patch("subprocess.Popen") as popen:
             installed = updater.install_update()
 
         assert installed is False
         popen.assert_not_called()
-        exit_app.assert_not_called()
+
+    def test_install_reverifies_and_launches_without_shell(self, tmp_path):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import Updater
+
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        installer = tmp_path / "MindType-1.2.0-Setup.exe"
+        installer.write_bytes(b"signed installer")
+        updater = Updater(
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+        updater.verified_manifest = manifest
+        updater._temp_path = installer
+
+        with (
+            patch("app.updater.verify_downloaded_installer") as verify,
+            patch("app.updater.subprocess.Popen") as popen,
+        ):
+            installed = updater.install_update()
+
+        assert installed is True
+        verify.assert_called_once_with(installer, manifest)
+        args, kwargs = popen.call_args
+        assert args[0] == [str(installer.resolve())]
+        assert kwargs.get("shell", False) is False
 
 
 class TestUpdaterGetDownloadInfo:
@@ -399,11 +468,11 @@ class TestUpdaterConstants:
     """Тесты для констант и конфигурации."""
 
     def test_version_urls_defined(self):
-        """VERSION_URLS должен быть определён."""
-        from app.updater import VERSION_URLS
+        """Only endpoints serving the signed envelope belong in the trust chain."""
+        from app.updater import PRIMARY_VERSION_URL, VERSION_URLS
 
         assert isinstance(VERSION_URLS, list)
-        assert len(VERSION_URLS) >= 2  # Primary + fallback
+        assert VERSION_URLS == [PRIMARY_VERSION_URL]
 
     def test_primary_url_is_own_api(self):
         """Основной URL должен быть своим API."""
@@ -411,8 +480,8 @@ class TestUpdaterConstants:
 
         assert "mindtype" in PRIMARY_VERSION_URL.lower() or "localhost" in PRIMARY_VERSION_URL.lower()
 
-    def test_fallback_url_is_github(self):
-        """Fallback URL должен быть GitHub."""
-        from app.updater import FALLBACK_VERSION_URL
+    def test_broken_unsigned_github_fallback_is_not_configured(self):
+        from app import updater
 
-        assert "github" in FALLBACK_VERSION_URL.lower()
+        assert not hasattr(updater, "FALLBACK_VERSION_URL")
+        assert "raw.githubusercontent.com" not in "\n".join(updater.VERSION_URLS)

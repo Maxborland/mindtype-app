@@ -53,7 +53,7 @@ def test_url_transport_wraps_success_response_read_timeout(
         def __exit__(self, *_args):
             return None
 
-        def read(self):
+        def read(self, _size=-1):
             raise TimeoutError("response body stalled")
 
     monkeypatch.setattr(
@@ -77,7 +77,7 @@ def test_url_transport_wraps_error_response_read_failure(
     from app.providers.mindtype_cloud import TransportError, UrlLibTransport
 
     class StalledErrorBody:
-        def read(self):
+        def read(self, _size=-1):
             raise OSError("error body stalled")
 
         def close(self):
@@ -98,6 +98,42 @@ def test_url_transport_wraps_error_response_read_failure(
 
     with pytest.raises(TransportError, match="error body stalled"):
         UrlLibTransport().request(
+            "GET",
+            "https://mindtype.space/v1/usage",
+            headers={},
+            body=None,
+            timeout=1,
+        )
+
+
+def test_url_transport_rejects_oversized_response_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.providers.mindtype_cloud import (
+        ResponseTooLargeError,
+        UrlLibTransport,
+    )
+
+    class OversizedResponse:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size=-1):
+            return b"12345"
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: OversizedResponse(),
+    )
+
+    with pytest.raises(ResponseTooLargeError):
+        UrlLibTransport(max_response_bytes=4).request(
             "GET",
             "https://mindtype.space/v1/usage",
             headers={},
@@ -138,6 +174,32 @@ def test_401_refreshes_once_and_preserves_idempotency_key() -> None:
         for request in transport.requests
     } == {"operation-1:transcription"}
     assert transport.requests[1]["headers"]["Authorization"] == "Bearer fresh"
+    assert json.loads(transport.requests[1]["body"]) == {
+        "operation_id": "operation-1",
+        "upload_id": "upload-1",
+        "options": {"language": "ru"},
+    }
+
+
+def test_missing_in_memory_access_token_refreshes_before_request() -> None:
+    from app.providers.mindtype_cloud import MindTypeCloudClient
+
+    transport = ScriptedTransport([response(200, {"usage": []})])
+    current = [""]
+
+    def refresh() -> None:
+        current[0] = "fresh"
+
+    client = MindTypeCloudClient(
+        "https://mindtype.space",
+        access_token=lambda: current[0],
+        refresh_access_token=refresh,
+        transport=transport,
+    )
+
+    client.get_usage()
+
+    assert transport.requests[0]["headers"]["Authorization"] == "Bearer fresh"
 
 
 def test_provider_error_preserves_retry_after_and_job_id() -> None:
@@ -219,6 +281,14 @@ def test_resumable_upload_skips_existing_part_and_retries_identical_chunk(
         sleep=sleeps.append,
         minimum_chunk_size=1,
     )
+    hash_calls = []
+    original_sha256 = client._sha256
+
+    def counted_sha256(path):
+        hash_calls.append(path)
+        return original_sha256(path)
+
+    client._sha256 = counted_sha256
 
     completed = client.upload_file(source, operation_id="operation-upload")
 
@@ -233,6 +303,7 @@ def test_resumable_upload_skips_existing_part_and_retries_identical_chunk(
     ).hexdigest()
     assert puts[0]["headers"]["Authorization"] == "Bearer part-token"
     assert sleeps == [1]
+    assert hash_calls == [source]
 
 
 def test_existing_upload_is_recovered_without_duplicate_create(
@@ -437,3 +508,47 @@ def test_ack_and_cancel_are_explicit_existing_job_calls() -> None:
         ("POST", "/v1/transcriptions/job-1/ack"),
         ("DELETE", "/v1/transcriptions/job-1"),
     ]
+
+
+def test_summary_uses_server_artifact_and_canonical_contract() -> None:
+    from app.providers.mindtype_cloud import MindTypeCloudClient
+    from tests.test_result_schema import canonical_result
+
+    expected = canonical_result("operation-summary")
+    transport = ScriptedTransport(
+        [
+            response(202, {"id": "summary-1", "state": "queued"}),
+            response(200, {"result": expected}),
+        ]
+    )
+    client = MindTypeCloudClient(
+        "https://mindtype.space",
+        access_token="token",
+        transport=transport,
+    )
+
+    job = client.create_summary(
+        operation_id="operation-summary",
+        transcript_artifact_id="transcript-result-1",
+        options={
+            "preset": "pm",
+            "input_token_estimate": 1200,
+            "max_output_tokens": 800,
+        },
+    )
+    result = client.get_summary_result(
+        job["id"],
+        expected_operation_id="operation-summary",
+    )
+
+    assert result["operation_id"] == "operation-summary"
+    assert json.loads(transport.requests[0]["body"]) == {
+        "operation_id": "operation-summary",
+        "source_artifact_id": "transcript-result-1",
+        "preset": "pm",
+        "input_token_estimate": 1200,
+        "max_output_tokens": 800,
+    }
+    assert transport.requests[0]["headers"]["Idempotency-Key"] == (
+        "operation-summary:summary"
+    )

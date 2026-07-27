@@ -111,6 +111,24 @@ def test_clipboard_adapter_restores_snapshot_when_paste_raises():
     assert writes == ["new text", "previous"]
 
 
+def test_clipboard_adapter_restores_opaque_multiformat_snapshot():
+    snapshot = object()
+    restored = []
+    adapter = ClipboardPasteAdapter(
+        read_clipboard=lambda: snapshot,
+        write_clipboard=Mock(),
+        restore_clipboard=restored.append,
+        send_paste=Mock(),
+        release_modifiers=Mock(),
+        sleep=lambda _delay: None,
+    )
+
+    result = adapter.attempt("new text", target=42, delay=0)
+
+    assert result.success is True
+    assert restored == [snapshot]
+
+
 def test_clipboard_adapter_never_mutates_when_snapshot_fails():
     write = Mock()
     adapter = ClipboardPasteAdapter(

@@ -456,3 +456,77 @@ def test_session_client_network_failure_is_not_authoritative() -> None:
     assert raised.value.code == "PROVIDER_UNAVAILABLE"
     assert raised.value.authoritative is False
     assert raised.value.retryable is True
+
+
+def test_session_client_rotates_refresh_token_without_license_key() -> None:
+    from app.licensing.session import LicenseSessionClient
+    from app.providers.mindtype_cloud import HTTPResponse
+
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    transport = ScriptedTransport(
+        response=HTTPResponse(
+            status=200,
+            headers={},
+            body=json.dumps(
+                {
+                    "access_token": "new-access",
+                    "access_expires_at": expires_at.isoformat(),
+                    "refresh_token": "new-refresh",
+                    "entitlement_lease": "lease.signature",
+                    "claim_version": 1,
+                }
+            ).encode("utf-8"),
+        )
+    )
+    client = LicenseSessionClient(
+        "https://mindtype.space",
+        transport=transport,
+    )
+
+    session = client.refresh_session(refresh_token="old-refresh")
+
+    request = transport.requests[0]
+    assert request["url"].endswith("/api/license/session/refresh")
+    assert json.loads(request["body"]) == {"refresh_token": "old-refresh"}
+    assert session.access_token == "new-access"
+    assert session.refresh_token == "new-refresh"
+
+
+def test_manager_refresh_rotates_credential_and_access_token(
+    tmp_path: Path,
+) -> None:
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    refresh_store = FakeRefreshStore()
+    refresh_store.token = "old-refresh"
+    response = LicenseSession(
+        access_token="new-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="new-refresh",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    client = FakeSessionClient(response=response)
+    client.refresh_session = lambda **request: (
+        client.calls.append(request) or response
+    )
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+
+    manager.refresh_access_token(now=now)
+
+    assert client.calls == [{"refresh_token": "old-refresh"}]
+    assert refresh_store.token == "new-refresh"
+    assert manager.access_token(now=now) == "new-access"

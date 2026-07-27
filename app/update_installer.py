@@ -186,6 +186,7 @@ def download_verified_installer(
     authenticode_checker: Callable[
         [Path, str], AuthenticodeIdentity
     ] = verify_windows_authenticode,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
     timeout: float = 60,
 ) -> Path:
     """Download into a side file and publish only fully authenticated bytes."""
@@ -221,6 +222,8 @@ def download_verified_installer(
                         "download Content-Length does not match manifest"
                     )
             received = 0
+            if progress_callback is not None:
+                progress_callback(0, manifest.size)
             with part.open("xb") as stream:
                 while chunk := response.read(1024 * 1024):
                     received += len(chunk)
@@ -229,6 +232,8 @@ def download_verified_installer(
                             "download exceeded manifest size"
                         )
                     stream.write(chunk)
+                    if progress_callback is not None:
+                        progress_callback(received, manifest.size)
                 stream.flush()
                 os.fsync(stream.fileno())
             if received != manifest.size:

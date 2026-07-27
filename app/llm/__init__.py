@@ -18,7 +18,7 @@ LLM провайдеры для MindType.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 from .base import (
     LLMProvider,
@@ -83,6 +83,19 @@ PROVIDER_REGISTRY = {
     "mindtype_cloud": ProviderDescriptor("mindtype_cloud", "MindType Cloud", False, False, ""),
 }
 
+_cloud_token_source: Optional[Callable[[], Optional[str]]] = None
+_cloud_refresh: Optional[Callable[[], None]] = None
+
+
+def configure_mindtype_cloud_session(
+    token_source: Callable[[], Optional[str]],
+    refresh: Callable[[], None],
+) -> None:
+    """Configure the process-wide short-lived session used by cloud LLM calls."""
+    global _cloud_token_source, _cloud_refresh
+    _cloud_token_source = token_source
+    _cloud_refresh = refresh
+
 
 def get_provider_descriptor(name: str) -> Optional[ProviderDescriptor]:
     """Дескриптор провайдера по строковому id (или None)."""
@@ -134,7 +147,13 @@ def get_provider(
         return OpenRouterProvider(api_key=api_key, timeout=timeout)
 
     elif provider_type == ProviderType.MINDTYPE_CLOUD:
-        return MindTypeCloudProvider(license_key=api_key, timeout=timeout)
+        if _cloud_token_source is None or _cloud_refresh is None:
+            raise RuntimeError("MindType Cloud session is not configured")
+        return MindTypeCloudProvider(
+            access_token=_cloud_token_source,
+            refresh_access_token=_cloud_refresh,
+            timeout=timeout,
+        )
 
     else:
         raise ValueError(f"Неизвестный тип провайдера: {provider_type}")
@@ -236,6 +255,7 @@ __all__ = [
     "PROVIDER_REGISTRY",
     "ProviderDescriptor",
     "get_provider_descriptor",
+    "configure_mindtype_cloud_session",
 
     # SSL
     "get_ssl_context",

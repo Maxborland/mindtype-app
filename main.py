@@ -235,6 +235,43 @@ def focus_existing_window() -> bool:
     return False
 
 
+def run_smoke_test() -> int:
+    """Verify frozen imports and bundled native assets without user side effects."""
+
+    import importlib
+
+    from app.artifact_manifest import verify_packaged_runtime
+
+    verify_packaged_runtime()
+
+    # Import the critical frozen boundaries without importing app.main, whose
+    # compatibility globals intentionally initialize per-user caches.
+    for module_name in [
+        "app.audio_sources",
+        "app.insertion.pipeline",
+        "app.licensing.session",
+        "app.operation_coordinator",
+        "app.platform.windows",
+        "app.providers.mindtype_cloud",
+    ]:
+        importlib.import_module(module_name)
+
+    from app.licensing.session import KeyringRefreshTokenStore
+    from PyQt6.QtWidgets import QApplication
+
+    # Backend discovery is read-only and catches a frozen build that cannot
+    # reach Windows Credential Manager before real refresh tokens are involved.
+    KeyringRefreshTokenStore()
+
+    application = QApplication.instance()
+    owns_application = application is None
+    if owns_application:
+        application = QApplication(["MindType", "-platform", "offscreen"])
+    if owns_application:
+        application.quit()
+    return 0
+
+
 def run_app():
     """Запуск приложения с проверкой single instance."""
     import atexit
@@ -269,4 +306,6 @@ def run_app():
 
 
 if __name__ == "__main__":
+    if "--smoke-test" in sys.argv[1:]:
+        sys.exit(run_smoke_test())
     run_app()

@@ -25,12 +25,15 @@ model and is reused by sequential operations.
   transcriber facade.
 - `transcribe_stream()` exposes only the final result. It does not present
   already-recorded file processing as live streaming.
-- Windows GPU terminology matches the bundled Vulkan runtime.
+- The Windows GA bundle uses the official whisper.cpp v1.9.1 CPU archive and
+  verifies every native file against the release-ready runtime manifest before
+  local processing.
 - Application shutdown releases the persistent native process.
 
 ## Deliberate exclusions
 
-- No model is downloaded only to exercise this change.
+- Vulkan acceleration is excluded until MindType has a reproducible build from
+  the pinned upstream commit. An unverified GPU DLL must never be packaged.
 - No quality or latency claim is made without a verified GGML model benchmark.
 - The existing unverified Silero ONNX speech-presence gate is not represented
   as segmentation and is not passed to whisper-server as a VAD model.

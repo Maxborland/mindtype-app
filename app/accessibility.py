@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import re
+import sys
 from typing import Optional
 
 from PyQt6.QtCore import Qt
@@ -29,6 +31,39 @@ _CONTROL_TYPES = (
     QTextEdit,
 )
 _SPACE_RE = re.compile(r"\s+")
+_SPI_GETHIGHCONTRAST = 0x0042
+_HCF_HIGHCONTRASTON = 0x00000001
+
+
+class _HighContrast(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("dwFlags", ctypes.c_uint),
+        ("lpszDefaultScheme", ctypes.c_wchar_p),
+    ]
+
+
+def windows_high_contrast_enabled(query=None) -> bool:
+    """Read the native Windows accessibility setting and fail safely."""
+    if sys.platform != "win32":
+        return False
+    if query is None:
+        try:
+            query = ctypes.windll.user32.SystemParametersInfoW
+        except (AttributeError, OSError):
+            return False
+    state = _HighContrast()
+    state.cbSize = ctypes.sizeof(state)
+    try:
+        succeeded = query(
+            _SPI_GETHIGHCONTRAST,
+            state.cbSize,
+            ctypes.byref(state),
+            0,
+        )
+    except (OSError, ValueError):
+        return False
+    return bool(succeeded and state.dwFlags & _HCF_HIGHCONTRASTON)
 
 
 def _clean_text(value: str) -> str:
@@ -104,4 +139,7 @@ def configure_accessibility(root: QWidget) -> None:
         _configure_form_row(row)
 
 
-__all__ = ["configure_accessibility"]
+__all__ = [
+    "configure_accessibility",
+    "windows_high_contrast_enabled",
+]

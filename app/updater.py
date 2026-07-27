@@ -4,6 +4,8 @@ import json
 import logging
 import platform
 import struct
+import subprocess
+import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, Callable, List, Iterable
@@ -18,6 +20,11 @@ from .update_manifest import (
     device_is_in_rollout,
     verify_update_manifest,
 )
+from .update_installer import (
+    InstallerVerificationError,
+    download_verified_installer,
+    verify_downloaded_installer,
+)
 from .version import __version__, __channel__
 
 logger = logging.getLogger("mindtype.updater")
@@ -29,12 +36,9 @@ try:
 except ImportError:
     PRIMARY_VERSION_URL = "https://mindtype.space/api/updates/latest"
 
-# Fallback URL на GitHub (если основной сервер недоступен)
-GITHUB_REPO = "wispr-flow-clone/mindtype"
-FALLBACK_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
-
-# Список URL для проверки (в порядке приоритета)
-VERSION_URLS: List[str] = [PRIMARY_VERSION_URL, FALLBACK_VERSION_URL]
+# A fallback is allowed only when it serves the same signed-envelope contract.
+# The former raw GitHub version.json URL was stale and unsigned.
+VERSION_URLS: List[str] = [PRIMARY_VERSION_URL]
 UPDATE_DOWNLOAD_HOSTS = {
     "mindtype.space",
     "releases.mindtype.space",
@@ -42,12 +46,10 @@ UPDATE_DOWNLOAD_HOSTS = {
     "objects.githubusercontent.com",
 }
 
-# Artifact download and execution stay disabled until the update channel has a
-# signed manifest, mandatory hashes, redirect checks, and platform signatures.
 AUTOMATIC_UPDATE_DISABLED_MESSAGE = (
-    "Автоматическое обновление временно отключено. "
-    "Установите новую версию вручную из официального источника."
+    "Безопасное обновление недоступно: цепочка доверия не подтверждена."
 )
+MAX_UPDATE_MANIFEST_BYTES = 64 * 1024
 
 class UpdateStatus(Enum):
     IDLE = auto()
@@ -78,6 +80,7 @@ class Updater:
         expected_signer: str = UPDATE_AUTHENTICODE_SIGNER,
         rollout_device_id: str = "",
         allowed_download_hosts: Iterable[str] = UPDATE_DOWNLOAD_HOSTS,
+        update_directory: Optional[Path] = None,
     ):
         self.current_version = current_version
         self.channel = channel
@@ -88,6 +91,15 @@ class Updater:
         self._expected_signer = expected_signer
         self._rollout_device_id = rollout_device_id
         self._allowed_download_hosts = set(allowed_download_hosts)
+        self._update_directory = (
+            Path(update_directory)
+            if update_directory is not None
+            else Path(
+                os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+            )
+            / "MindType"
+            / "updates"
+        )
 
     @staticmethod
     def _architecture() -> str:
@@ -143,7 +155,14 @@ class Updater:
                         logger.warning(f"{base_url}: {last_error}")
                         continue
 
-                    envelope = json.loads(response.read().decode('utf-8'))
+                    raw_envelope = response.read(
+                        MAX_UPDATE_MANIFEST_BYTES + 1
+                    )
+                    if len(raw_envelope) > MAX_UPDATE_MANIFEST_BYTES:
+                        raise UpdateManifestError(
+                            "update manifest response is too large"
+                        )
+                    envelope = json.loads(raw_envelope.decode('utf-8'))
                     manifest = verify_update_manifest(
                         envelope,
                         public_key=self._update_public_key,
@@ -261,10 +280,49 @@ class Updater:
         return data, None
 
     def download_update(self, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Optional[Path], Optional[str]]:
-        """Fail closed until the complete update trust chain is implemented."""
-        return False, None, AUTOMATIC_UPDATE_DISABLED_MESSAGE
+        """Download and authenticate the installer without executing it."""
+        manifest = self.verified_manifest
+        if manifest is None or not self._update_public_key or not self._expected_signer:
+            return False, None, AUTOMATIC_UPDATE_DISABLED_MESSAGE
+        if sys.platform != "win32" or manifest.platform != "windows":
+            return False, None, "Обновление поддерживается только в Windows."
+        destination = (
+            self._update_directory
+            / f"MindType-{manifest.version}-Setup.exe"
+        )
+        try:
+            downloaded = download_verified_installer(
+                manifest,
+                destination,
+                allowed_hosts=self._allowed_download_hosts,
+                progress_callback=progress_callback,
+            )
+        except (InstallerVerificationError, OSError, urllib.error.URLError) as exc:
+            logger.warning("Безопасная загрузка обновления отклонена: %s", exc)
+            return False, None, str(exc)
+        self._temp_path = downloaded
+        return True, downloaded, None
 
     def install_update(self) -> bool:
-        """Fail closed until downloaded artifacts can be authenticated."""
-        logger.warning(AUTOMATIC_UPDATE_DISABLED_MESSAGE)
-        return False
+        """Re-verify and launch the installer without shell interpolation."""
+        manifest = self.verified_manifest
+        installer = self._temp_path
+        if (
+            sys.platform != "win32"
+            or manifest is None
+            or installer is None
+        ):
+            logger.warning(AUTOMATIC_UPDATE_DISABLED_MESSAGE)
+            return False
+        try:
+            verify_downloaded_installer(installer, manifest)
+            subprocess.Popen(
+                [str(installer.resolve(strict=True))],
+                cwd=str(installer.parent.resolve()),
+                close_fds=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (InstallerVerificationError, OSError) as exc:
+            logger.warning("Запуск обновления отклонён: %s", exc)
+            return False
+        return True

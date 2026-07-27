@@ -156,14 +156,16 @@ class ClipboardPasteAdapter:
     def __init__(
         self,
         *,
-        read_clipboard: Callable[[], str],
+        read_clipboard: Callable[[], object],
         write_clipboard: Callable[[str], None],
+        restore_clipboard: Optional[Callable[[object], None]] = None,
         send_paste: Callable[[], None],
         release_modifiers: Callable[[], None],
         sleep: Callable[[float], None],
     ) -> None:
         self._read_clipboard = read_clipboard
         self._write_clipboard = write_clipboard
+        self._restore_clipboard = restore_clipboard or write_clipboard
         self._send_paste = send_paste
         self._release_modifiers = release_modifiers
         self._sleep = sleep
@@ -193,7 +195,7 @@ class ClipboardPasteAdapter:
         finally:
             if mutated:
                 try:
-                    self._write_clipboard(previous)
+                    self._restore_clipboard(previous)
                 except Exception as exc:
                     restore_error = exc
 

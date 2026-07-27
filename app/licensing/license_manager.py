@@ -856,6 +856,23 @@ class LicenseManager:
         """Получить ID текущего устройства."""
         return self._device_id
 
+    def get_entitlement_lease_store(
+        self,
+    ) -> Optional[EntitlementLeaseStore]:
+        """Verified lease store shared with the cloud session boundary."""
+        return self._lease_store
+
+    def clear_authoritative_cache(self) -> None:
+        """Fail closed after the server authoritatively rejects entitlement."""
+        self._lease_claims = None
+        self._license_data = None
+        self._lease_error_code = "ENTITLEMENT_REQUIRED"
+        if self._lease_store is not None:
+            self._lease_store.clear()
+        self._license_file.unlink(missing_ok=True)
+        self._lease_marker_file.parent.mkdir(parents=True, exist_ok=True)
+        self._lease_marker_file.touch(exist_ok=True)
+
     def get_device_name(self) -> str:
         """Получить имя текущего устройства."""
         return self._device_name
