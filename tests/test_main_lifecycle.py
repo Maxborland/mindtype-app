@@ -87,6 +87,59 @@ def test_interrupted_capture_is_immediately_exposed_for_retry(
     window._update_recovered_dictation_actions.assert_called_once_with()
 
 
+def test_dictation_ack_is_scheduled_after_result_delivery() -> None:
+    from app.dictation_state import DictationState
+    from app.main import MainWindow
+    from app.operation_models import OperationStatus
+
+    state = DictationState()
+    token = state.begin_recovery(auto_insert=False)
+    coordinator = MagicMock()
+    coordinator.store.get.return_value = SimpleNamespace(
+        status=OperationStatus.COMPLETED
+    )
+    window = SimpleNamespace(
+        _dictation=state,
+        _dictation_operation_ids={token: "operation-1"},
+        _dictation_durations_ms={token: 1000},
+        _operation_coordinator=coordinator,
+        _retryable_dictation_ids=[],
+        _update_recovered_dictation_actions=MagicMock(),
+        _update_tray_icon=MagicMock(),
+        _add_journal_entry=MagicMock(),
+        _acknowledge_completed_operation=MagicMock(),
+        overlay=MagicMock(),
+        tray_icon=None,
+        last_text="",
+        _t=lambda key: key,
+    )
+    window._acknowledge_completed_operation.side_effect = (
+        lambda _operation_id: (
+            None
+            if window.last_text == "Готовый текст"
+            else (_ for _ in ()).throw(
+                AssertionError("result was not delivered before ACK")
+            )
+        )
+    )
+
+    MainWindow._on_transcribed(
+        window,
+        token,
+        "Готовый текст",
+        "ru",
+        0.9,
+        "",
+    )
+
+    coordinator.complete_dictation.assert_called_once()
+    coordinator.acknowledge_result.assert_not_called()
+    assert window.last_text == "Готовый текст"
+    window._acknowledge_completed_operation.assert_called_once_with(
+        "operation-1"
+    )
+
+
 def test_unfinished_multitrack_stop_can_be_retried() -> None:
     from app.audio_sources import MultiTrackCapture
     from app.dictation_state import DictationPhase, DictationState

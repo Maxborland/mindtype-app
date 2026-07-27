@@ -3965,9 +3965,6 @@ class MainWindow(QMainWindow):
                             0,
                         ),
                     )
-                    self._operation_coordinator.acknowledge_result(
-                        operation_id
-                    )
             except Exception as exc:
                 logger.exception("Could not persist canonical dictation result")
                 err = str(exc)
@@ -4017,12 +4014,28 @@ class MainWindow(QMainWindow):
         if self._dictation.auto_insert_pending and text:
             QTimer.singleShot(
                 150,
-                lambda: self._do_auto_insert(operation_token, text),
+                lambda: self._do_auto_insert(
+                    operation_token,
+                    text,
+                    operation_id,
+                ),
             )
         else:
             self.overlay.show_success()
+            if operation_id:
+                try:
+                    self._acknowledge_completed_operation(operation_id)
+                except Exception:
+                    logger.exception(
+                        "Could not schedule delivered dictation acknowledgement"
+                    )
 
-    def _do_auto_insert(self, operation_token: int, text: str) -> None:
+    def _do_auto_insert(
+        self,
+        operation_token: int,
+        text: str,
+        operation_id: Optional[str] = None,
+    ) -> None:
         """Автовставка после транскрипции с восстановлением фокуса."""
         if not text:
             self.overlay.show_success()
@@ -4043,6 +4056,13 @@ class MainWindow(QMainWindow):
                 is_translatable=True,
             )
             self.overlay.show_error(self._t("error"))
+        if operation_id:
+            try:
+                self._acknowledge_completed_operation(operation_id)
+            except Exception:
+                logger.exception(
+                    "Could not schedule delivered dictation acknowledgement"
+                )
 
     def _cancel_transcription(self) -> None:
         """Отменить текущую транскрипцию."""
