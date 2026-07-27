@@ -12,7 +12,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -3696,6 +3696,7 @@ class MainWindow(QMainWindow):
             "transcription": {
                 "provider": provider,
                 "model": str(model),
+                **({"backend": backend} if provider == "local" else {}),
             }
         }
         try:
@@ -3754,6 +3755,26 @@ class MainWindow(QMainWindow):
         """Обновить waveform в overlay (Qt thread)."""
         self.overlay.update_waveform(levels)
 
+    def _transcriber_for_operation(
+        self,
+        operation: Any,
+    ) -> tuple["Transcriber", bool]:
+        transcription_route = operation.route.get("transcription", {})
+        provider = transcription_route.get("provider")
+        if provider == "openrouter":
+            backend = "openrouter"
+        elif provider == "local":
+            backend = str(
+                transcription_route.get("backend") or "whisper_cpp"
+            )
+        else:
+            raise RuntimeError(
+                f"Unsupported durable transcription provider: {provider}"
+            )
+        if backend == self._transcriber_backend:
+            return self.transcriber, False
+        return self._build_transcriber(backend), True
+
     def _run_transcription(self, audio_path: Path, operation_token: int) -> None:
         cfg = self.config.config
         operation_id = self._dictation_operation_ids.get(operation_token)
@@ -3789,10 +3810,33 @@ class MainWindow(QMainWindow):
                 },
             )
         else:
+            try:
+                selected_transcriber, owns_transcriber = (
+                    self._transcriber_for_operation(operation)
+                    if operation is not None
+                    else (self.transcriber, False)
+                )
+            except Exception as exc:
+                self._on_transcribed(
+                    operation_token,
+                    "",
+                    "",
+                    0.0,
+                    str(exc),
+                )
+                return
+            transcription_route = (
+                operation.route.get("transcription", {})
+                if operation is not None
+                else {}
+            )
             worker = TranscribeWorker(
-                self.transcriber,
+                selected_transcriber,
                 audio_path,
-                model_size=cfg.get("model_size", "large-v3"),
+                model_size=str(
+                    transcription_route.get("model")
+                    or cfg.get("model_size", "large-v3")
+                ),
                 compute_type=cfg.get("compute_type", "int8"),
                 device=cfg.get("device", "auto"),
                 cpu_threads=int(cfg.get("cpu_threads", 4)),
@@ -3802,6 +3846,11 @@ class MainWindow(QMainWindow):
                 vad_filter=bool(cfg.get("vad_filter", True)),
                 models_dir=self.models_dir,
             )
+            if owns_transcriber:
+                worker.finished.connect(
+                    lambda *_: selected_transcriber.shutdown()
+                )
+                worker.cancelled.connect(selected_transcriber.shutdown)
         worker.progress.connect(
             lambda text, lang, prob: self._on_transcribe_progress(
                 operation_token,
@@ -3911,6 +3960,18 @@ class MainWindow(QMainWindow):
             return
         self._dictation_operation_ids.pop(operation_token, None)
         self._dictation_durations_ms.pop(operation_token, None)
+        if operation_id and self._operation_coordinator:
+            operation = self._operation_coordinator.store.get(operation_id)
+            if operation and operation.status is OperationStatus.RETRYABLE:
+                if operation_id not in self._retryable_dictation_ids:
+                    self._retryable_dictation_ids.append(operation_id)
+            else:
+                self._retryable_dictation_ids = [
+                    candidate
+                    for candidate in self._retryable_dictation_ids
+                    if candidate != operation_id
+                ]
+            self._update_recovered_dictation_actions()
 
         self._update_tray_icon(recording=False)
 
@@ -4011,6 +4072,12 @@ class MainWindow(QMainWindow):
                     self._operation_coordinator.finish_cancel(operation_id)
             except Exception:
                 logger.exception("Could not persist worker cancellation")
+            self._retryable_dictation_ids = [
+                candidate
+                for candidate in self._retryable_dictation_ids
+                if candidate != operation_id
+            ]
+            self._update_recovered_dictation_actions()
 
     def _on_transcription_cancellation_pending(
         self,
@@ -4030,6 +4097,12 @@ class MainWindow(QMainWindow):
             is_translatable=False,
         )
         if operation_id:
+            self._retryable_dictation_ids = [
+                candidate
+                for candidate in self._retryable_dictation_ids
+                if candidate != operation_id
+            ]
+            self._update_recovered_dictation_actions()
             QTimer.singleShot(
                 60_000,
                 lambda identifier=operation_id: (
@@ -5320,12 +5393,13 @@ class MainWindow(QMainWindow):
 
     def _update_recovered_dictation_actions(self) -> None:
         available = bool(self._retryable_dictation_ids)
+        enabled = available and not self._dictation.transcribing
         if hasattr(self, "retry_dictation_btn"):
             self.retry_dictation_btn.setVisible(available)
-            self.retry_dictation_btn.setEnabled(available)
+            self.retry_dictation_btn.setEnabled(enabled)
         if hasattr(self, "tray_retry_dictation_action"):
             self.tray_retry_dictation_action.setVisible(available)
-            self.tray_retry_dictation_action.setEnabled(available)
+            self.tray_retry_dictation_action.setEnabled(enabled)
 
     def _retry_next_recovered_dictation(self) -> None:
         if (
@@ -5388,7 +5462,6 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._retryable_dictation_ids.pop(0)
         self._update_recovered_dictation_actions()
         self._dictation_operation_ids[operation_token] = operation_id
         self._dictation_durations_ms[operation_token] = duration_ms

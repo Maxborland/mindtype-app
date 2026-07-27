@@ -132,6 +132,13 @@ def test_recovered_dictation_action_starts_the_preserved_operation(
         operation_id="dictation-retry",
         status=OperationStatus.RETRYABLE,
         source_asset_path=source,
+        route={
+            "transcription": {
+                "provider": "local",
+                "model": "large-v3",
+                "backend": "whisper_cpp",
+            }
+        },
     )
     coordinator = MagicMock()
     coordinator.store.get.return_value = operation
@@ -160,9 +167,76 @@ def test_recovered_dictation_action_starts_the_preserved_operation(
     MainWindow._retry_next_recovered_dictation(window)
 
     coordinator.begin_attempt.assert_called_once()
-    assert window._retryable_dictation_ids == []
+    assert window._retryable_dictation_ids == [operation.operation_id]
     assert window._dictation.phase is DictationPhase.TRANSCRIBING
     token = window._dictation.operation_token
     assert window._dictation_operation_ids[token] == operation.operation_id
     assert window._dictation_durations_ms[token] == 1250
     window._run_transcription.assert_called_once_with(source, token)
+
+
+def test_recovered_dictation_uses_its_disclosed_local_backend() -> None:
+    from app.main import MainWindow
+
+    recovered_transcriber = MagicMock()
+    window = SimpleNamespace(
+        _transcriber_backend="openrouter",
+        transcriber=MagicMock(),
+        _build_transcriber=MagicMock(return_value=recovered_transcriber),
+    )
+    operation = SimpleNamespace(
+        route={
+            "transcription": {
+                "provider": "local",
+                "model": "large-v3",
+                "backend": "whisper_cpp",
+            }
+        }
+    )
+
+    selected, owned = MainWindow._transcriber_for_operation(
+        window,
+        operation,
+    )
+
+    assert selected is recovered_transcriber
+    assert owned is True
+    window._build_transcriber.assert_called_once_with("whisper_cpp")
+
+
+def test_failed_recovered_dictation_stays_actionable() -> None:
+    from app.dictation_state import DictationState
+    from app.main import MainWindow
+    from app.operation_models import OperationStatus
+
+    state = DictationState()
+    token = state.begin_recovery(auto_insert=False)
+    operation_id = "dictation-retry"
+    coordinator = MagicMock()
+    coordinator.store.get.return_value = SimpleNamespace(
+        status=OperationStatus.RETRYABLE
+    )
+    window = SimpleNamespace(
+        _dictation=state,
+        _dictation_operation_ids={token: operation_id},
+        _dictation_durations_ms={token: 1000},
+        _retryable_dictation_ids=[],
+        _operation_coordinator=coordinator,
+        _update_recovered_dictation_actions=MagicMock(),
+        _update_tray_icon=MagicMock(),
+        _add_journal_entry=MagicMock(),
+        overlay=MagicMock(),
+        _t=lambda key: key,
+    )
+
+    MainWindow._on_transcribed(
+        window,
+        token,
+        "",
+        "",
+        0.0,
+        "temporary failure",
+    )
+
+    assert window._retryable_dictation_ids == [operation_id]
+    window._update_recovered_dictation_actions.assert_called_once()
