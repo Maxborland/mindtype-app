@@ -168,7 +168,9 @@ class AudioRecorder:
     def _stop_path(self, timeout: float = 5.0) -> Optional[Path]:
         was_running = self._running.is_set()
         if not was_running and self._writer_thread is None:
-            return None
+            path = self._tmp_path
+            self._tmp_path = None
+            return path
         if was_running:
             self._running.clear()
             self._level_callback = None
@@ -275,7 +277,17 @@ class AudioRecorder:
 
     def stop(self, timeout: float = 5.0) -> Optional[Path]:
         """Compatibility wrapper for microphone-only callers."""
-        return self._stop_path(timeout=timeout)
+        try:
+            return self._stop_path(timeout=timeout)
+        except RuntimeError:
+            # Compatibility callers cannot consume an interrupted capture.
+            # Once the writer has finalized, discard it so the next recording
+            # is not permanently blocked by a retained temporary path.
+            if self._writer_thread is None and self._tmp_path is not None:
+                self._tmp_path.unlink(missing_ok=True)
+                self._tmp_path = None
+                self._started_at_monotonic_ns = None
+            raise
 
     @property
     def recording(self) -> bool:

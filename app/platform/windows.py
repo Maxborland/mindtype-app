@@ -4,6 +4,7 @@ Windows-специфичная реализация платформенного
 """
 
 import ctypes
+import hashlib
 import logging
 import time
 from ctypes import wintypes
@@ -94,6 +95,13 @@ KEYEVENTF_KEYUP = 0x0002
 VK_CONTROL = 0x11
 
 
+def _stable_hotkey_id(combo: str) -> int:
+    """Return a deterministic RegisterHotKey application-range identifier."""
+    normalized = combo.lower().replace(" ", "").encode("utf-8")
+    digest = hashlib.sha256(normalized).digest()
+    return int.from_bytes(digest[:2], "little") % 0xBFFF + 1
+
+
 class WinEventFilter(QAbstractNativeEventFilter):
     """Фильтр нативных событий Windows для перехвата WM_HOTKEY."""
 
@@ -131,7 +139,6 @@ class WindowsHotkeyListener(BaseHotkeyListener):
         self._filter: Optional[WinEventFilter] = None
         self._check_timer: Optional[QTimer] = None
         self._vk_keys: List[int] = []
-        self._atom_id: Optional[int] = None
 
         self._parse_combo()
         if not self._vk_code:
@@ -172,12 +179,7 @@ class WindowsHotkeyListener(BaseHotkeyListener):
         if self._registered_id is not None:
             return
 
-        atom_name = f"MindType.Hotkey.{self.combo.lower().replace(' ', '')}"
-        atom_id = int(kernel32.GlobalAddAtomW(atom_name))
-        if not atom_id:
-            raise RuntimeError("Не удалось выделить стабильный ID для хоткея")
-        self._atom_id = atom_id
-        self._registered_id = atom_id
+        self._registered_id = _stable_hotkey_id(self.combo)
 
         try:
             success = user32.RegisterHotKey(
@@ -188,14 +190,10 @@ class WindowsHotkeyListener(BaseHotkeyListener):
             )
         except Exception:
             self._registered_id = None
-            kernel32.GlobalDeleteAtom(self._atom_id)
-            self._atom_id = None
             raise
 
         if not success:
             self._registered_id = None
-            kernel32.GlobalDeleteAtom(self._atom_id)
-            self._atom_id = None
             raise RuntimeError(
                 f"Не удалось зарегистрировать хоткей: {self.combo}. "
                 "Возможно, он уже используется другим приложением."
@@ -210,9 +208,6 @@ class WindowsHotkeyListener(BaseHotkeyListener):
         if self._registered_id is not None:
             user32.UnregisterHotKey(None, self._registered_id)
             self._registered_id = None
-        if self._atom_id is not None:
-            kernel32.GlobalDeleteAtom(self._atom_id)
-            self._atom_id = None
 
         if self._filter:
             app = QApplication.instance()

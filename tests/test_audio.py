@@ -187,6 +187,29 @@ class TestAudioRecorder:
         assert recorder.stop(timeout=0.01) == wav_path
         assert recorder._writer_thread is None
 
+    def test_compatibility_stop_discards_finalized_interrupted_capture(
+        self,
+        tmp_path,
+    ):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "overflowed.wav"
+        wav_path.touch()
+        recorder._tmp_path = wav_path
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        writer = MagicMock()
+        writer.is_alive.return_value = False
+        recorder._writer_thread = writer
+        recorder._overflowed.set()
+
+        with pytest.raises(RuntimeError, match="аудиобуфер был переполнен"):
+            recorder.stop(timeout=0.01)
+
+        assert recorder._tmp_path is None
+        assert recorder._writer_thread is None
+        assert not wav_path.exists()
+
+
     @patch('app.audio.sd.RawInputStream')
     def test_start_monitoring_success(self, mock_stream):
         """Успешный старт мониторинга."""

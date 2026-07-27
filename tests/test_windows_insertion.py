@@ -172,36 +172,39 @@ def test_windows_hotkey_rejects_modifier_only_or_unknown_combo(combo):
         WindowsHotkeyListener(combo)
 
 
-def test_windows_hotkey_uses_and_releases_global_atom():
+def test_windows_hotkey_uses_stable_application_range_id():
     listener = WindowsHotkeyListener("ctrl+alt+v")
 
     with (
-        patch("app.platform.windows.kernel32.GlobalAddAtomW", return_value=0xC123),
-        patch("app.platform.windows.kernel32.GlobalDeleteAtom") as delete_atom,
         patch("app.platform.windows.user32.RegisterHotKey", return_value=True) as register,
         patch("app.platform.windows.user32.UnregisterHotKey") as unregister,
         patch("app.platform.windows.QApplication.instance", return_value=None),
     ):
         listener.start()
-        register.assert_called_once_with(None, 0xC123, listener._modifiers, 0x56)
+        hotkey_id = register.call_args.args[1]
+        assert 1 <= hotkey_id <= 0xBFFF
+        register.assert_called_once_with(None, hotkey_id, listener._modifiers, 0x56)
 
         listener.stop()
 
-    unregister.assert_called_once_with(None, 0xC123)
-    delete_atom.assert_called_once_with(0xC123)
+    unregister.assert_called_once_with(None, hotkey_id)
+
+    same_combo = WindowsHotkeyListener("CTRL + ALT + V")
+    with (
+        patch("app.platform.windows.user32.RegisterHotKey", return_value=True) as register,
+        patch("app.platform.windows.QApplication.instance", return_value=None),
+    ):
+        same_combo.start()
+    assert register.call_args.args[1] == hotkey_id
 
 
-def test_windows_hotkey_releases_atom_when_registration_fails():
+def test_windows_hotkey_clears_id_when_registration_fails():
     listener = WindowsHotkeyListener("ctrl+alt+v")
 
     with (
-        patch("app.platform.windows.kernel32.GlobalAddAtomW", return_value=0xC123),
-        patch("app.platform.windows.kernel32.GlobalDeleteAtom") as delete_atom,
         patch("app.platform.windows.user32.RegisterHotKey", return_value=False),
     ):
         with pytest.raises(RuntimeError, match="Не удалось зарегистрировать"):
             listener.start()
 
-    delete_atom.assert_called_once_with(0xC123)
     assert listener._registered_id is None
-    assert listener._atom_id is None

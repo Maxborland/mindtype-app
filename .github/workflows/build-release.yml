@@ -201,6 +201,7 @@ jobs:
         shell: pwsh
         env:
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          MINDTYPE_UPDATE_AUTHENTICODE_SIGNER: ${{ vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER }}
         run: |
           $Installer = "dist\MindType-${{ steps.version.outputs.version }}-Setup.exe"
           $CertificatePath = Join-Path $env:RUNNER_TEMP "mindtype-signing.pfx"
@@ -218,6 +219,17 @@ jobs:
             $Signature = Get-AuthenticodeSignature $File
             if ($Signature.Status -ne "Valid") {
               throw "Invalid Authenticode signature for ${File}: $($Signature.Status)"
+            }
+            if ("${{ github.ref_type }}" -eq "tag") {
+              $ActualSigner = [string]$Signature.SignerCertificate.Subject
+              $ExpectedSigner = [string]$env:MINDTYPE_UPDATE_AUTHENTICODE_SIGNER
+              if ([string]::IsNullOrWhiteSpace($ExpectedSigner)) {
+                throw "Tagged releases require MINDTYPE_UPDATE_AUTHENTICODE_SIGNER"
+              }
+              $ExpectedSigner = $ExpectedSigner.Trim()
+              if ($ActualSigner -cne $ExpectedSigner) {
+                throw "Authenticode signer mismatch for ${File}: expected '$ExpectedSigner', got '$ActualSigner'"
+              }
             }
           }
 

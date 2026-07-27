@@ -62,6 +62,8 @@ def test_tag_release_requires_signing_and_publishes_checksum():
     assert "Get-AuthenticodeSignature" in text
     assert "Get-FileHash" in text
     assert ".sha256" in text
+    assert "$Signature.SignerCertificate.Subject" in text
+    assert "$ActualSigner -cne $ExpectedSigner" in text
 
 
 def test_tag_release_requires_embedded_entitlement_trust_root():
