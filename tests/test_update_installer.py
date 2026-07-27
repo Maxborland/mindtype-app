@@ -175,6 +175,30 @@ def test_redirect_handler_rejects_downgrade_and_unlisted_host() -> None:
         )
 
 
+def test_default_redirect_policy_allows_github_release_asset_host() -> None:
+    from app.update_installer import SafeUpdateRedirectHandler
+    from app.updater import UPDATE_DOWNLOAD_HOSTS
+
+    handler = SafeUpdateRedirectHandler(UPDATE_DOWNLOAD_HOSTS)
+    redirected = handler.redirect_request(
+        urllib.request.Request(
+            "https://github.com/Maxborland/mindtype-app/releases/download/v1/app.exe"
+        ),
+        None,
+        302,
+        "Found",
+        {},
+        (
+            "https://release-assets.githubusercontent.com/"
+            "github-production-release-asset/app.exe"
+        ),
+    )
+
+    assert redirected.full_url.startswith(
+        "https://release-assets.githubusercontent.com/"
+    )
+
+
 class FakeDownloadResponse:
     def __init__(self, content: bytes, *, final_url: str) -> None:
         self._stream = io.BytesIO(content)

@@ -93,6 +93,7 @@ class CanonicalExporter:
 
         stage = Path(tempfile.mkdtemp(prefix=".mindtype-export-", dir=destination))
         published: list[Path] = []
+        backups: dict[Path, Path] = {}
         try:
             staged_paths = {
                 format_: stage / final_path.name
@@ -107,13 +108,33 @@ class CanonicalExporter:
                 path.exists() for path in final_paths.values()
             ):
                 raise FileExistsError("Export destination appeared during rendering")
+            backup_dir = stage / "backups"
+            for final_path in final_paths.values():
+                if final_path.exists():
+                    backup_dir.mkdir(exist_ok=True)
+                    backup_path = backup_dir / final_path.name
+                    shutil.copy2(final_path, backup_path)
+                    backups[final_path] = backup_path
             for format_, staged_path in staged_paths.items():
                 os.replace(staged_path, final_paths[format_])
                 published.append(final_paths[format_])
             return final_paths
-        except Exception:
+        except Exception as publish_error:
+            restore_errors: list[OSError] = []
             for final_path in published:
-                final_path.unlink(missing_ok=True)
+                backup_path = backups.get(final_path)
+                try:
+                    if backup_path is not None:
+                        os.replace(backup_path, final_path)
+                    else:
+                        final_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    restore_errors.append(exc)
+            if restore_errors:
+                raise RuntimeError(
+                    "Export publication failed and existing projections "
+                    "could not be fully restored"
+                ) from publish_error
             raise
         finally:
             shutil.rmtree(stage, ignore_errors=True)

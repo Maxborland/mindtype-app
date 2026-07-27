@@ -106,6 +106,38 @@ class TestAudioRecorder:
         assert recorder.recording is False
         assert recorder._tmp_path == wav_path
 
+    @patch("app.audio.sd.RawInputStream")
+    def test_writer_timeout_blocks_restart_until_pending_wav_is_finalized(
+        self,
+        mock_stream,
+        tmp_path,
+    ):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "unfinished.wav"
+        wav_path.touch()
+        pending_queue = MagicMock()
+        writer = MagicMock()
+        writer.is_alive.side_effect = [True, False]
+        recorder._tmp_path = wav_path
+        recorder._queue = pending_queue
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+
+        with pytest.raises(RuntimeError, match="ещё записывается"):
+            recorder.stop(timeout=0.01)
+
+        with pytest.raises(RuntimeError, match="[Пп]редыдущ"):
+            recorder.start()
+
+        assert recorder._queue is pending_queue
+        assert recorder._tmp_path == wav_path
+        mock_stream.assert_not_called()
+
+        assert recorder.stop(timeout=0.01) == wav_path
+        assert recorder._writer_thread is None
+        assert recorder._tmp_path is None
+
     @patch('app.audio.sd.RawInputStream')
     def test_start_monitoring_success(self, mock_stream):
         """Успешный старт мониторинга."""

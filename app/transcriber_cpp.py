@@ -663,7 +663,13 @@ class WhisperCppTranscriber:
                 # If stat fails, treat as error.
                 raise
 
-            verify_model_file(part_path, artifact)
+            try:
+                verify_model_file(part_path, artifact)
+            except Exception:
+                # A complete but invalid payload cannot be resumed from
+                # another mirror: its size would produce an EOF range.
+                part_path.unlink(missing_ok=True)
+                raise
             os.replace(part_path, dest_path)
 
         part_path = dest_path.with_suffix(dest_path.suffix + ".part")

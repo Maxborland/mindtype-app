@@ -97,6 +97,11 @@ class AudioRecorder:
     ) -> None:
         if self._running.is_set():
             return
+        if self._writer_thread is not None or self._tmp_path is not None:
+            raise RuntimeError(
+                "Предыдущая запись ещё не финализирована; "
+                "повторите остановку перед новым запуском"
+            )
 
         self._level_callback = level_callback
         with self._level_history_lock:
@@ -159,13 +164,15 @@ class AudioRecorder:
         self._running.set()
 
     def _stop_path(self, timeout: float = 5.0) -> Optional[Path]:
-        if not self._running.is_set():
+        was_running = self._running.is_set()
+        if not was_running and self._writer_thread is None:
             return None
-        self._running.clear()
-        self._level_callback = None
+        if was_running:
+            self._running.clear()
+            self._level_callback = None
 
         stream_error: Optional[BaseException] = None
-        if self._stream:
+        if was_running and self._stream:
             try:
                 self._stream.stop()
             except BaseException as exc:
@@ -177,10 +184,13 @@ class AudioRecorder:
                     if stream_error is None:
                         stream_error = exc
                 self._stream = None
-        try:
-            self._queue.put(None, timeout=timeout)
-        except queue.Full as exc:
-            raise RuntimeError("Не удалось завершить запись: аудиобуфер переполнен") from exc
+        if was_running:
+            try:
+                self._queue.put(None, timeout=timeout)
+            except queue.Full as exc:
+                raise RuntimeError(
+                    "Не удалось завершить запись: аудиобуфер переполнен"
+                ) from exc
         if self._writer_thread:
             self._writer_thread.join(timeout=timeout)
             if self._writer_thread.is_alive():

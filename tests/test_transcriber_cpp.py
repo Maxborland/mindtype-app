@@ -132,6 +132,86 @@ def test_whisper_cpp_download_tries_sources_in_order(tmp_path: Path, monkeypatch
     assert calls[1] == "https://good.example/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
 
+def test_wrong_full_model_payload_is_discarded_before_next_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    expected = b"x" * (6 * 1024 * 1024)
+    corrupt = b"y" * len(expected)
+    calls: list[tuple[str, str | None]] = []
+
+    class Response:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._position = 0
+            self.status = 200
+            self.headers = {"Content-Length": str(len(data))}
+
+        def read(self, size: int = -1) -> bytes:
+            if self._position >= len(self._data):
+                return b""
+            if size < 0:
+                size = len(self._data) - self._position
+            chunk = self._data[self._position : self._position + size]
+            self._position += len(chunk)
+            return chunk
+
+        def getcode(self) -> int:
+            return self.status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(request: urllib.request.Request, **_kwargs):
+        calls.append(
+            (
+                request.full_url,
+                request.get_header("Range"),
+            )
+        )
+        payload = corrupt if "corrupt.example" in request.full_url else expected
+        return Response(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    from app.model_manifest import ModelArtifact
+    from app.transcriber_cpp import WhisperCppTranscriber
+
+    artifact = ModelArtifact(
+        model_id="small",
+        filename="ggml-small.bin",
+        version="test",
+        url="https://verified.example/ggml-small.bin",
+        size=len(expected),
+        sha256=hashlib.sha256(expected).hexdigest(),
+        license="MIT",
+        source_revision="a" * 40,
+    )
+    monkeypatch.setattr(
+        "app.transcriber_cpp.get_model_artifact",
+        lambda _model: artifact,
+    )
+    transcriber = WhisperCppTranscriber()
+    transcriber.set_download_sources(
+        [
+            "https://corrupt.example/models",
+            "https://good.example/models",
+        ]
+    )
+
+    model = transcriber.download_model("small", models_dir=tmp_path)
+
+    assert model.read_bytes() == expected
+    assert calls[:2] == [
+        ("https://corrupt.example/models/ggml-small.bin", None),
+        ("https://good.example/models/ggml-small.bin", None),
+    ]
+    assert not model.with_suffix(".bin.part").exists()
+
+
 def test_existing_model_with_wrong_hash_is_rejected(
     tmp_path: Path,
     monkeypatch,

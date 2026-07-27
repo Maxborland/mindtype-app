@@ -136,3 +136,59 @@ def test_failed_projection_leaves_no_partial_bundle(
         exporter.export_bundle(_hostile_result(), tmp_path)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_idempotent_republish_restores_existing_bundle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import copy
+    import os
+
+    from app.exporters import CanonicalExporter, ExportFormat
+
+    exporter = CanonicalExporter()
+    formats = (ExportFormat.JSON, ExportFormat.TXT)
+    original_paths = exporter.export_bundle(
+        _hostile_result(),
+        tmp_path,
+        formats=formats,
+        idempotency_key="operation-1",
+    )
+    original_bytes = {
+        format_: path.read_bytes()
+        for format_, path in original_paths.items()
+    }
+    replacement = copy.deepcopy(_hostile_result())
+    replacement["transcript"]["segments"][0]["text"] = "новый текст"
+    real_replace = os.replace
+    failed = False
+
+    def fail_second_projection(source, destination):
+        nonlocal failed
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            not failed
+            and destination_path.suffix == ".txt"
+            and source_path.parent.name != "backups"
+        ):
+            failed = True
+            raise PermissionError("destination is locked")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_second_projection)
+
+    with pytest.raises(PermissionError, match="locked"):
+        exporter.export_bundle(
+            replacement,
+            tmp_path,
+            formats=formats,
+            idempotency_key="operation-1",
+        )
+
+    assert {
+        format_: path.read_bytes()
+        for format_, path in original_paths.items()
+    } == original_bytes
+    assert not list(tmp_path.glob(".mindtype-export-*"))

@@ -44,6 +44,7 @@ UPDATE_DOWNLOAD_HOSTS = {
     "releases.mindtype.space",
     "github.com",
     "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
 }
 
 AUTOMATIC_UPDATE_DISABLED_MESSAGE = (
