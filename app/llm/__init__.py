@@ -84,12 +84,12 @@ PROVIDER_REGISTRY = {
 }
 
 _cloud_token_source: Optional[Callable[[], Optional[str]]] = None
-_cloud_refresh: Optional[Callable[[], None]] = None
+_cloud_refresh: Optional[Callable[[Optional[str]], None]] = None
 
 
 def configure_mindtype_cloud_session(
     token_source: Callable[[], Optional[str]],
-    refresh: Callable[[], None],
+    refresh: Callable[[Optional[str]], None],
 ) -> None:
     """Configure the process-wide short-lived session used by cloud LLM calls."""
     global _cloud_token_source, _cloud_refresh

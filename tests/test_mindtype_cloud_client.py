@@ -179,11 +179,16 @@ def test_401_refreshes_once_and_preserves_idempotency_key() -> None:
     )
     tokens = iter(["expired", "fresh"])
     current = [next(tokens)]
+    rejected_tokens = []
+
+    def refresh(rejected_access_token: str | None) -> None:
+        rejected_tokens.append(rejected_access_token)
+        current[0] = next(tokens)
 
     client = MindTypeCloudClient(
         "https://mindtype.space",
         access_token=lambda: current[0],
-        refresh_access_token=lambda: current.__setitem__(0, next(tokens)),
+        refresh_access_token=refresh,
         transport=transport,
         sleep=lambda _seconds: None,
     )
@@ -200,6 +205,7 @@ def test_401_refreshes_once_and_preserves_idempotency_key() -> None:
         for request in transport.requests
     } == {"operation-1:transcription"}
     assert transport.requests[1]["headers"]["Authorization"] == "Bearer fresh"
+    assert rejected_tokens == ["expired"]
     assert json.loads(transport.requests[1]["body"]) == {
         "operation_id": "operation-1",
         "upload_id": "upload-1",
@@ -213,7 +219,7 @@ def test_missing_in_memory_access_token_refreshes_before_request() -> None:
     transport = ScriptedTransport([response(200, {"usage": []})])
     current = [""]
 
-    def refresh() -> None:
+    def refresh(_rejected_access_token: str | None) -> None:
         current[0] = "fresh"
 
     client = MindTypeCloudClient(

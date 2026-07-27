@@ -72,7 +72,9 @@ class MindTypeCloudProvider(LLMProvider):
         self,
         access_token: Union[str, Callable[[], Optional[str]]],
         *,
-        refresh_access_token: Optional[Callable[[], None]] = None,
+        refresh_access_token: Optional[
+            Callable[[Optional[str]], None]
+        ] = None,
         timeout: int = 180,
     ):
         """
@@ -93,7 +95,7 @@ class MindTypeCloudProvider(LLMProvider):
             else self._access_token
         )
         if not token and self._refresh_access_token is not None:
-            self._refresh_access_token()
+            self._refresh_access_token(None)
             token = (
                 self._access_token()
                 if callable(self._access_token)
@@ -136,12 +138,13 @@ class MindTypeCloudProvider(LLMProvider):
 
         body = json.dumps(data).encode("utf-8") if data else None
         for attempt in range(2):
+            request_token = self._token()
             request = urllib.request.Request(
                 url,
                 data=body,
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self._token()}",
+                    "Authorization": f"Bearer {request_token}",
                 },
                 method=method,
             )
@@ -154,7 +157,7 @@ class MindTypeCloudProvider(LLMProvider):
                     and attempt == 0
                     and self._refresh_access_token is not None
                 ):
-                    self._refresh_access_token()
+                    self._refresh_access_token(request_token)
                     continue
                 self._raise_http_error(error)
             except urllib.error.URLError as error:

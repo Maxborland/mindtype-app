@@ -543,6 +543,7 @@ class CloudSessionManager:
         *,
         now: Optional[datetime] = None,
         force: bool = False,
+        rejected_access_token: Optional[str] = None,
     ) -> EntitlementClaims:
         checked_at = now or datetime.now(timezone.utc)
         if checked_at.tzinfo is None:
@@ -550,13 +551,20 @@ class CloudSessionManager:
         else:
             checked_at = checked_at.astimezone(timezone.utc)
         with self._session_lock:
-            if (
-                not force
-                and self._access_token is not None
+            session_is_valid = (
+                self._access_token is not None
                 and self._access_expires_at is not None
                 and self._access_expires_at
                 > checked_at + timedelta(seconds=30)
                 and self._claims is not None
+            )
+            rejected_generation_was_replaced = (
+                force
+                and rejected_access_token is not None
+                and self._access_token != rejected_access_token
+            )
+            if session_is_valid and (
+                not force or rejected_generation_was_replaced
             ):
                 return self._claims
             refresh_token = self.refresh_store.load(self.device_id)

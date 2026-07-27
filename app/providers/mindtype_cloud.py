@@ -188,7 +188,9 @@ class MindTypeCloudClient:
         base_url: str,
         *,
         access_token: TokenSource,
-        refresh_access_token: Optional[Callable[[], None]] = None,
+        refresh_access_token: Optional[
+            Callable[[Optional[str]], None]
+        ] = None,
         transport: Optional[HTTPTransport] = None,
         timeout: float = 60,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -252,7 +254,7 @@ class MindTypeCloudClient:
             else self._access_token
         )
         if not token and self._refresh_access_token is not None:
-            self._refresh_access_token()
+            self._refresh_access_token(None)
             token = (
                 self._access_token()
                 if callable(self._access_token)
@@ -381,9 +383,10 @@ class MindTypeCloudClient:
         refreshed = False
         retry_index = 0
         while True:
+            request_token = bearer_token or self._token()
             request_headers = {
                 "Accept": "application/json",
-                "Authorization": f"Bearer {bearer_token or self._token()}",
+                "Authorization": f"Bearer {request_token}",
                 **dict(headers or {}),
             }
             if payload is not None:
@@ -426,7 +429,7 @@ class MindTypeCloudClient:
                 and bearer_token is None
                 and self._refresh_access_token is not None
             ):
-                self._refresh_access_token()
+                self._refresh_access_token(request_token)
                 refreshed = True
                 continue
 

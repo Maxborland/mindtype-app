@@ -905,7 +905,10 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to initialize MindType Cloud: {e}")
 
-    def _refresh_mindtype_cloud_session(self) -> None:
+    def _refresh_mindtype_cloud_session(
+        self,
+        rejected_access_token: Optional[str] = None,
+    ) -> None:
         """Refresh or create a short-lived session without persisting access."""
         if self._cloud_session_manager is None:
             raise RuntimeError(
@@ -914,7 +917,10 @@ class MainWindow(QMainWindow):
         from .licensing.session import LicenseSessionError
 
         try:
-            self._cloud_session_manager.refresh_access_token(force=True)
+            self._cloud_session_manager.refresh_access_token(
+                force=True,
+                rejected_access_token=rejected_access_token,
+            )
             return
         except LicenseSessionError as error:
             if error.authoritative:

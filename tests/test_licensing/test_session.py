@@ -949,3 +949,81 @@ def test_forced_refresh_replaces_a_server_rejected_valid_access_token(
     assert client.calls == [{"refresh_token": "refresh-1"}]
     assert manager.access_token(now=now) == "replacement-access"
     assert refresh_store.token == "refresh-2"
+
+
+def test_concurrent_forced_refreshes_share_replacement_session(
+    tmp_path: Path,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    initial = LicenseSession(
+        access_token="rejected-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="refresh-1",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    replacement = LicenseSession(
+        access_token="replacement-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="refresh-2",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    refresh_store = FakeRefreshStore()
+    client = FakeSessionClient(response=initial)
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+    manager.activate(
+        license_key="MT-AAAA-BBBB-CCCC",
+        desktop_version="0.9.3",
+        platform="windows",
+        now=now,
+    )
+    client.calls.clear()
+    entered = Event()
+    release = Event()
+
+    def refresh_session(**request):
+        client.calls.append(request)
+        entered.set()
+        assert release.wait(timeout=2)
+        return replacement
+
+    client.refresh_session = refresh_session
+    request = {
+        "now": now,
+        "force": True,
+        "rejected_access_token": "rejected-access",
+    }
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(manager.refresh_access_token, **request)
+        assert entered.wait(timeout=2)
+        second = executor.submit(manager.refresh_access_token, **request)
+        release.set()
+        first_claims = first.result(timeout=2)
+        second_claims = second.result(timeout=2)
+
+    assert client.calls == [{"refresh_token": "refresh-1"}]
+    assert first_claims == second_claims
+    assert manager.access_token(now=now) == "replacement-access"
+    assert refresh_store.token == "refresh-2"

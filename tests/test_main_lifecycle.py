@@ -601,9 +601,12 @@ def test_server_rejected_access_token_forces_cloud_session_refresh() -> None:
         license_manager=MagicMock(),
     )
 
-    MainWindow._refresh_mindtype_cloud_session(window)
+    MainWindow._refresh_mindtype_cloud_session(window, "rejected-access")
 
-    session_manager.refresh_access_token.assert_called_once_with(force=True)
+    session_manager.refresh_access_token.assert_called_once_with(
+        force=True,
+        rejected_access_token="rejected-access",
+    )
 
 
 def test_file_batch_prioritizes_one_persisted_cloud_route() -> None:
