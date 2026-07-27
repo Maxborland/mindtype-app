@@ -353,6 +353,7 @@ class MultiTrackAudioRecorder:
         self._results: list[AudioCaptureResult] = []
         self._microphone_finalized = False
         self._system_finalized = False
+        self._discard_results_on_finalize = False
 
     def start(
         self,
@@ -369,6 +370,7 @@ class MultiTrackAudioRecorder:
         self._results = []
         self._microphone_finalized = False
         self._system_finalized = False
+        self._discard_results_on_finalize = False
         system_started = False
         try:
             if normalized_source in {
@@ -387,10 +389,18 @@ class MultiTrackAudioRecorder:
                 )
         except Exception:
             if system_started:
+                # The microphone failed after loopback had started. Keep the
+                # session owned until the system writer can be finalized.
+                self._microphone_finalized = True
                 partial = self.system.stop()
                 if partial.track is not None:
                     partial.track.path.unlink(missing_ok=True)
-            self._source = None
+                    self._system_finalized = True
+                    self._source = None
+                else:
+                    self._discard_results_on_finalize = True
+            else:
+                self._source = None
             raise
 
     def stop(self) -> MultiTrackCapture:
@@ -403,7 +413,10 @@ class MultiTrackAudioRecorder:
         } and not self._microphone_finalized:
             microphone_result = self.microphone.stop_capture()
             if microphone_result.track is not None:
-                self._results.append(microphone_result)
+                if self._discard_results_on_finalize:
+                    microphone_result.track.path.unlink(missing_ok=True)
+                else:
+                    self._results.append(microphone_result)
                 self._microphone_finalized = True
         if source in {
             AudioSourceKind.SYSTEM,
@@ -411,7 +424,10 @@ class MultiTrackAudioRecorder:
         } and not self._system_finalized:
             system_result = self.system.stop()
             if system_result.track is not None:
-                self._results.append(system_result)
+                if self._discard_results_on_finalize:
+                    system_result.track.path.unlink(missing_ok=True)
+                else:
+                    self._results.append(system_result)
                 self._system_finalized = True
 
         microphone_done = (
@@ -426,6 +442,7 @@ class MultiTrackAudioRecorder:
         capture = MultiTrackCapture(results=tuple(self._results))
         self._source = None
         self._results = []
+        self._discard_results_on_finalize = False
         return capture
 
     @property

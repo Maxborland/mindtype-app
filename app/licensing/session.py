@@ -417,6 +417,7 @@ class CloudSessionManager:
         session: LicenseSession,
         *,
         checked_at: datetime,
+        preserve_existing_on_failure: bool = False,
     ) -> EntitlementClaims:
         expires_at = session.access_expires_at.astimezone(timezone.utc)
         if not checked_at < expires_at <= checked_at + timedelta(minutes=20):
@@ -434,8 +435,9 @@ class CloudSessionManager:
                 now=checked_at,
             )
         except Exception:
-            self.refresh_store.clear(self.device_id)
-            self._clear_memory_and_lease()
+            if not preserve_existing_on_failure:
+                self.refresh_store.clear(self.device_id)
+                self._clear_memory_and_lease()
             raise
         self._access_token = session.access_token
         self._access_expires_at = expires_at
@@ -479,7 +481,11 @@ class CloudSessionManager:
                     self._clear_memory_and_lease()
                     self.refresh_store.clear(self.device_id)
                 raise
-            return self._adopt_session(session, checked_at=checked_at)
+            return self._adopt_session(
+                session,
+                checked_at=checked_at,
+                preserve_existing_on_failure=True,
+            )
 
     def access_token(
         self,

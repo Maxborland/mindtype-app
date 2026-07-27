@@ -499,3 +499,45 @@ def test_multitrack_keeps_session_owned_until_system_track_finalizes() -> None:
     assert finalized.tracks == (finalized_track,)
     assert session.recording is False
     assert system.stop.call_count == 2
+
+
+def test_multitrack_start_rollback_remains_owned_until_system_finalizes(
+    tmp_path,
+) -> None:
+    microphone = MagicMock()
+    microphone.start.side_effect = RuntimeError("microphone unavailable")
+    system = MagicMock()
+    rollback_track = RecordedTrack(
+        source=AudioSourceKind.SYSTEM,
+        path=tmp_path / "rollback.wav",
+        sample_rate=48_000,
+        channels=2,
+        started_at_monotonic_ns=10,
+        ended_at_monotonic_ns=20,
+    )
+    rollback_track.path.write_bytes(b"partial")
+    system.stop.side_effect = [
+        AudioCaptureResult(
+            status=AudioCaptureStatus.INTERRUPTED,
+            track=None,
+            error="system writer still finalizing",
+        ),
+        AudioCaptureResult(
+            status=AudioCaptureStatus.INTERRUPTED,
+            track=rollback_track,
+            error="microphone startup failed",
+        ),
+    ]
+    session = MultiTrackAudioRecorder(microphone=microphone, system=system)
+
+    with pytest.raises(RuntimeError, match="microphone unavailable"):
+        session.start(AudioSourceKind.MICROPHONE_SYSTEM)
+
+    assert session.recording is True
+    with pytest.raises(RuntimeError, match="still finalizing"):
+        session.start(AudioSourceKind.SYSTEM)
+
+    assert session.stop().tracks == ()
+    assert session.recording is False
+    assert not rollback_track.path.exists()
+    assert system.stop.call_count == 2

@@ -375,6 +375,64 @@ def test_missing_refresh_token_preserves_valid_offline_lease(
     ).device_id == device_id
 
 
+def test_invalid_rotated_lease_preserves_prior_lease_and_refresh_token(
+    tmp_path: Path,
+) -> None:
+    from app.licensing.entitlement import LeaseValidationError
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    initial = LicenseSession(
+        access_token="access-token",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="refresh-token",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    refresh_store = FakeRefreshStore()
+    client = FakeSessionClient(response=initial)
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+    manager.activate(
+        license_key="MT-AAAA-BBBB-CCCC",
+        desktop_version="0.9.3",
+        platform="windows",
+        now=now,
+    )
+    prior_lease = (tmp_path / "entitlement.lease").read_text(
+        encoding="utf-8"
+    )
+    client.refresh_session = lambda **_request: LicenseSession(
+        access_token="rotated-access",
+        access_expires_at=now + timedelta(minutes=31),
+        refresh_token="rotated-refresh",
+        entitlement_lease="invalid.lease",
+        claim_version=1,
+    )
+
+    with pytest.raises(LeaseValidationError):
+        manager.refresh_access_token(now=now + timedelta(minutes=16))
+
+    assert refresh_store.token == "rotated-refresh"
+    assert (tmp_path / "entitlement.lease").read_text(
+        encoding="utf-8"
+    ) == prior_lease
+    assert manager.lease_store.load(
+        now=now + timedelta(minutes=16)
+    ).device_id == device_id
+
+
 def test_keyring_refresh_store_never_falls_back_to_plaintext() -> None:
     from app.licensing.session import (
         CredentialStoreError,

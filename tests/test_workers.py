@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 from app.ui.workers import (
     CloudCancellationWorker,
+    OperationAcknowledgementWorker,
     CloudDictationWorker,
     TranscribeWorker,
 )
@@ -193,3 +194,18 @@ def test_recovery_cancellation_emits_resolved_after_server_confirmation():
     worker.run()
 
     assert resolved == ["operation-1"]
+
+
+def test_operation_acknowledgement_worker_reports_network_failure():
+    acknowledge = MagicMock(side_effect=TimeoutError("server unavailable"))
+    worker = OperationAcknowledgementWorker(
+        "operation-1",
+        acknowledge,
+    )
+    failed = []
+    worker.failed.connect(lambda *args: failed.append(args))
+
+    worker.run()
+
+    acknowledge.assert_called_once_with()
+    assert failed == [("operation-1", "server unavailable")]

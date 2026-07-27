@@ -1,6 +1,7 @@
 """Тесты генератора отчётов: саммари-карточки, участники, транскрипт по репликам."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -335,6 +336,39 @@ class TestReportOutputPaths:
         assert task.output_files == {
             "html": tmp_path / "call_transcription.html",
         }
+
+    def test_worker_skips_legacy_report_when_canonical_export_owns_output(
+        self,
+        tmp_path,
+    ):
+        from app.ui.workers import FileTranscriptionWorker
+
+        result = make_result()
+        task = FileTask(
+            file_path=result.file_path,
+            status=FileStatus.COMPLETED,
+            result=result,
+        )
+
+        class ImmediateQueue:
+            is_running = False
+
+            def start(self):
+                self._on_completed(task)
+
+        worker = FileTranscriptionWorker(
+            queue=ImmediateQueue(),
+            output_dir=tmp_path,
+            output_format="html",
+            ui_language="ru",
+            generate_reports=False,
+        )
+        worker._report_generator.generate = MagicMock()
+
+        worker.run()
+
+        worker._report_generator.generate.assert_not_called()
+        assert task.output_files == {}
 
     def test_cancel_during_report_generation_cannot_finish_task(self, tmp_path):
         from app.ui.workers import FileTranscriptionWorker

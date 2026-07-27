@@ -7,7 +7,7 @@
 import json
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping
+from typing import Callable, TYPE_CHECKING, Mapping
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -252,6 +252,29 @@ class CloudCancellationWorker(QThread):
             self.failed.emit(self.operation_id, str(error))
 
 
+class OperationAcknowledgementWorker(QThread):
+    """Acknowledge one durable result without blocking the GUI thread."""
+
+    resolved = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
+
+    def __init__(
+        self,
+        operation_id: str,
+        acknowledge: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self.operation_id = operation_id
+        self.acknowledge = acknowledge
+
+    def run(self) -> None:
+        try:
+            self.acknowledge()
+            self.resolved.emit(self.operation_id)
+        except Exception as error:
+            self.failed.emit(self.operation_id, str(error))
+
+
 class ModelDownloadWorker(QThread):
     """Воркер для загрузки моделей."""
     progress = pyqtSignal(str, int, int)
@@ -337,12 +360,15 @@ class FileTranscriptionWorker(QThread):
         output_dir: Path,
         output_format: str,
         ui_language: str,
+        *,
+        generate_reports: bool = True,
     ):
         super().__init__()
         self.queue = queue
         self.output_dir = output_dir
         self.output_format = output_format
         self.ui_language = ui_language
+        self.generate_reports = generate_reports
 
         # Импортируем здесь чтобы избежать circular imports
         from ..report_generator import ReportGenerator
@@ -358,7 +384,11 @@ class FileTranscriptionWorker(QThread):
 
         def on_completed(task):
             # Генерируем отчёт если успешно
-            if task.status == FileStatus.COMPLETED and task.result:
+            if (
+                self.generate_reports
+                and task.status == FileStatus.COMPLETED
+                and task.result
+            ):
                 if getattr(self.queue, "cancel_requested", False):
                     task.status = FileStatus.CANCELLED
                     task.progress = 0

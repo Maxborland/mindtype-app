@@ -148,6 +148,7 @@ from .ui.icons import create_app_icon
 from .ui.components import apply_system7_titlebar
 from .ui.workers import (
     CloudCancellationWorker,
+    OperationAcknowledgementWorker,
     CloudDictationWorker,
     TranscribeWorker,
     ModelDownloadWorker,
@@ -673,6 +674,7 @@ class MainWindow(QMainWindow):
             self.models_dir = desired_models_dir
         self._transcribe_thread: Optional[QThread] = None
         self._cancellation_workers: set[QThread] = set()
+        self._acknowledgement_workers: set[QThread] = set()
         self._download_thread: Optional[ModelDownloadWorker] = None
         self.last_text: str = ""
         self._dictation = DictationState()  # машина состояний диктовки (запись→транскрипция→вставка)
@@ -5111,6 +5113,7 @@ class MainWindow(QMainWindow):
             output_dir=self._output_dir,
             output_format=self.output_format_combo.currentData(),
             ui_language=self._ui_lang,
+            generate_reports=False,
         )
         self._file_worker.task_progress.connect(self._on_file_task_progress)
         self._file_worker.task_completed.connect(self._on_file_task_completed)
@@ -5549,11 +5552,29 @@ class MainWindow(QMainWindow):
             self._init_mindtype_cloud()
             return self._cloud_executor
 
-        acknowledge_completed_operation(
-            self._operation_coordinator,
+        worker = OperationAcknowledgementWorker(
             operation_id,
-            cloud_executor_factory=cloud_executor,
+            lambda: acknowledge_completed_operation(
+                self._operation_coordinator,
+                operation_id,
+                cloud_executor_factory=cloud_executor,
+            ),
         )
+        self._acknowledgement_workers.add(worker)
+        worker.failed.connect(
+            lambda identifier, error: self._add_journal_entry(
+                "error",
+                "Result acknowledgement is pending",
+                text=f"{identifier}: {error}",
+                is_translatable=False,
+            )
+        )
+        worker.finished.connect(
+            lambda current=worker: self._acknowledgement_workers.discard(
+                current
+            )
+        )
+        worker.start()
 
     def _cleanup_expired_spool(self) -> None:
         if self._operation_coordinator is None:
@@ -5666,6 +5687,7 @@ class MainWindow(QMainWindow):
             getattr(self, '_credits_worker', None),
             getattr(self, '_history_worker', None),
             *list(self._cancellation_workers),
+            *list(self._acknowledgement_workers),
         ]:
             if worker and worker.isRunning():
                 worker.quit()
