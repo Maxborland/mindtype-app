@@ -44,7 +44,10 @@ def test_cloud_llm_refreshes_once_after_401(monkeypatch) -> None:
     current = ["expired-access"]
     attempts = []
 
-    def refresh() -> None:
+    rejected_tokens = []
+
+    def refresh(rejected_access_token: str | None) -> None:
+        rejected_tokens.append(rejected_access_token)
         current[0] = "fresh-access"
 
     def request(call, *, timeout):
@@ -80,3 +83,4 @@ def test_cloud_llm_refreshes_once_after_401(monkeypatch) -> None:
         "Bearer expired-access",
         "Bearer fresh-access",
     ]
+    assert rejected_tokens == ["expired-access"]

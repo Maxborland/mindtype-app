@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, Callable
+from typing import Callable, Optional, Tuple
 
 from .entitlement import (
     EntitlementClaims,
@@ -29,7 +29,7 @@ from .entitlement import (
     write_durable_text,
 )
 from .key_validator import KeyValidator
-from .trial import TrialManager, TRIAL_DURATION_DAYS, TRIAL_TRANSCRIPTION_LIMIT_SECONDS
+from .trial import TRIAL_DURATION_DAYS, TrialManager
 
 logger = logging.getLogger("mindtype.license")
 
@@ -276,6 +276,7 @@ class LicenseManager:
         self._lease_error_code: Optional[str] = None
         self._deactivation_cleanup: list[Callable[[], None]] = []
         self._cloud_deactivator: Optional[Callable[[], None]] = None
+        self._entitlement_renewer: Optional[Callable[[], None]] = None
         self._device_id = _get_device_id()
         self._device_name = _get_device_name()
         if lease_verifier is None:
@@ -368,6 +369,13 @@ class LicenseManager:
     ) -> None:
         """Use the signed cloud session when the legacy key is gone."""
         self._cloud_deactivator = callback
+
+    def set_entitlement_renewer(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """Renew a signed lease through the stored cloud refresh session."""
+        self._entitlement_renewer = callback
 
     def install_entitlement_lease(
         self,
@@ -655,6 +663,19 @@ class LicenseManager:
 
     def needs_revalidation(self) -> bool:
         """Проверить, нужна ли ревалидация лицензии."""
+        lease_due = False
+        if self._lease_claims is not None:
+            expires_at = self._lease_claims.expires_at
+            current = datetime.now(expires_at.tzinfo)
+            lease_due = current >= expires_at - timedelta(days=1)
+            if self._license_data is None:
+                return lease_due
+        if (
+            self._license_data is None
+            and self._lease_marker_file.exists()
+            and self._entitlement_renewer is not None
+        ):
+            return True
         if self._license_data is None:
             return False
 
@@ -673,21 +694,12 @@ class LicenseManager:
                 interval = 604800  # 7 дней по умолчанию
 
             deadline = validated_at + timedelta(seconds=interval)
-            if self._lease_claims is not None:
-                refresh_before_expiry = (
-                    self._lease_claims.expires_at - timedelta(days=1)
-                )
-                if validated_at.tzinfo is None:
-                    refresh_before_expiry = refresh_before_expiry.replace(
-                        tzinfo=None
-                    )
-                deadline = min(deadline, refresh_before_expiry)
             current = (
                 datetime.now(deadline.tzinfo)
                 if deadline.tzinfo is not None
                 else datetime.now()
             )
-            return current >= deadline
+            return lease_due or current >= deadline
         except Exception:
             return True
 
@@ -702,7 +714,19 @@ class LicenseManager:
             return None
 
         if self._license_data is None:
-            return None
+            if self._entitlement_renewer is None:
+                return None
+            try:
+                self._entitlement_renewer()
+                self._refresh_entitlement_lease()
+                return ValidationResult.SUCCESS
+            except Exception as exc:
+                self._refresh_entitlement_lease()
+                logger.warning(
+                    "Entitlement lease renewal failed: %s",
+                    type(exc).__name__,
+                )
+                return ValidationResult.NETWORK_ERROR
 
         key = KeyValidator.format_key(self._license_data.get("license_key", ""))
         result, _, _ = self.activate_online(key)
