@@ -119,7 +119,7 @@ class TestAudioRecorder:
         wav_path.touch()
         pending_queue = MagicMock()
         writer = MagicMock()
-        writer.is_alive.side_effect = [True, False]
+        writer.is_alive.side_effect = [True, True, False]
         recorder._tmp_path = wav_path
         recorder._queue = pending_queue
         recorder._running.set()
@@ -148,7 +148,7 @@ class TestAudioRecorder:
         wav_path = tmp_path / "unfinished.wav"
         wav_path.touch()
         writer = MagicMock()
-        writer.is_alive.side_effect = [True, True, False]
+        writer.is_alive.side_effect = [True, True, True, False]
         recorder._tmp_path = wav_path
         recorder._queue = MagicMock()
         recorder._running.set()
@@ -172,7 +172,7 @@ class TestAudioRecorder:
         pending_queue = queue.Queue(maxsize=1)
         pending_queue.put(b"audio")
         writer = MagicMock()
-        writer.is_alive.return_value = False
+        writer.is_alive.side_effect = [True, False]
         recorder._tmp_path = wav_path
         recorder._queue = pending_queue
         recorder._running.set()
@@ -186,6 +186,30 @@ class TestAudioRecorder:
         assert pending_queue.get_nowait() == b"audio"
         assert recorder.stop(timeout=0.01) == wav_path
         assert recorder._writer_thread is None
+
+    def test_dead_writer_is_reaped_before_full_queue_sentinel(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "failed.wav"
+        wav_path.touch()
+        pending_queue = queue.Queue(maxsize=1)
+        pending_queue.put(b"audio")
+        writer = MagicMock()
+        writer.is_alive.return_value = False
+        recorder._tmp_path = wav_path
+        recorder._queue = pending_queue
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+        recorder._writer_error = OSError("disk full")
+
+        result = recorder.stop_capture(timeout=0.01)
+
+        assert result.status is AudioCaptureStatus.INTERRUPTED
+        assert result.track is None
+        assert "disk full" in (result.error or "")
+        assert recorder._writer_thread is None
+        assert recorder.finalizing is False
+        assert wav_path.exists() is False
 
     def test_compatibility_stop_discards_finalized_interrupted_capture(
         self,

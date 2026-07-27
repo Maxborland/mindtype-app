@@ -140,7 +140,7 @@ def test_dictation_ack_is_scheduled_after_result_delivery() -> None:
     )
 
 
-def test_unfinished_multitrack_stop_can_be_retried() -> None:
+def test_unfinished_multitrack_stop_is_retried_by_timer(monkeypatch) -> None:
     from app.audio_sources import MultiTrackCapture
     from app.dictation_state import DictationPhase, DictationState
     from app.main import MainWindow
@@ -149,7 +149,18 @@ def test_unfinished_multitrack_stop_can_be_retried() -> None:
     state.begin_recording(started_at=1.0)
     audio_session = MagicMock()
     audio_session.recording = True
-    audio_session.stop.return_value = MultiTrackCapture(results=())
+    callbacks = []
+
+    def stop():
+        if audio_session.stop.call_count == 2:
+            audio_session.recording = False
+        return MultiTrackCapture(results=())
+
+    audio_session.stop.side_effect = stop
+    monkeypatch.setattr(
+        "app.main.QTimer.singleShot",
+        lambda delay, callback: callbacks.append((delay, callback)),
+    )
     window = SimpleNamespace(
         audio_session=audio_session,
         _dictation=state,
@@ -164,12 +175,41 @@ def test_unfinished_multitrack_stop_can_be_retried() -> None:
     )
 
     MainWindow._stop_recording_with_auto_insert(window)
-    MainWindow._stop_recording_with_auto_insert(window)
+    assert audio_session.stop.call_count == 1
+    assert len(callbacks) == 1
+    assert callbacks[0][0] == 100
+
+    callbacks[0][1]()
 
     assert audio_session.stop.call_count == 2
-    assert state.phase is DictationPhase.RECORDING
+    assert state.phase is DictationPhase.FAILED
     window.overlay.show_processing.assert_called()
-    window.overlay.show_error.assert_not_called()
+    window.overlay.show_error.assert_called_once_with("error")
+
+
+def test_audio_finalization_timer_does_not_stop_a_new_operation(
+    monkeypatch,
+) -> None:
+    from app.main import MainWindow
+
+    callbacks = []
+    monkeypatch.setattr(
+        "app.main.QTimer.singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+    window = SimpleNamespace(
+        audio_session=SimpleNamespace(
+            recording=True,
+            stop=MagicMock(),
+        ),
+        _dictation=SimpleNamespace(operation_token=1),
+    )
+
+    MainWindow._schedule_audio_finalization_retry(window, 1)
+    window._dictation.operation_token = 2
+    callbacks[0]()
+
+    window.audio_session.stop.assert_not_called()
 
 
 def test_failed_projection_keeps_source_pending_ack(

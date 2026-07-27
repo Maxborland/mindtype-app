@@ -188,6 +188,10 @@ class AudioRecorder:
                     if stream_error is None:
                         stream_error = exc
                 self._stream = None
+        if self._writer_thread and not self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=0)
+            self._writer_thread = None
+            self._writer_stop_requested = False
         if self._writer_thread and not self._writer_stop_requested:
             try:
                 self._queue.put(None, timeout=timeout)

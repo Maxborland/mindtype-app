@@ -681,6 +681,7 @@ class MainWindow(QMainWindow):
         self._dictation_operation_ids: dict[int, str] = {}
         self._dictation_durations_ms: dict[int, int] = {}
         self._retryable_dictation_ids: list[str] = []
+        self._audio_finalize_retry_token: Optional[int] = None
         self._recording_hotkey = False  # отдельная забота: идёт перепривязка хоткея в настройках
         self._really_quit = False  # Флаг для полного выхода
         self._preserve_cloud_jobs_on_shutdown = False
@@ -3610,6 +3611,34 @@ class MainWindow(QMainWindow):
         ) and self.audio_session.recording:
             self._stop_recording_with_auto_insert()
 
+    def _schedule_audio_finalization_retry(
+        self,
+        operation_token: int,
+    ) -> None:
+        if getattr(self, "_audio_finalize_retry_token", None) == operation_token:
+            return
+        self._audio_finalize_retry_token = operation_token
+        QTimer.singleShot(
+            100,
+            lambda token=operation_token: MainWindow._retry_audio_finalization(
+                self,
+                token,
+            ),
+        )
+
+    def _retry_audio_finalization(self, operation_token: int) -> None:
+        if (
+            getattr(self, "_audio_finalize_retry_token", None)
+            != operation_token
+        ):
+            return
+        self._audio_finalize_retry_token = None
+        if (
+            self._dictation.operation_token == operation_token
+            and self.audio_session.recording
+        ):
+            MainWindow._stop_recording_with_auto_insert(self)
+
     def _stop_recording_with_auto_insert(self) -> None:
         """Остановить запись и включить автовставку."""
         if not self.audio_session.recording:
@@ -3641,6 +3670,10 @@ class MainWindow(QMainWindow):
         if not capture.tracks:
             if self.audio_session.recording:
                 self.overlay.show_processing()
+                MainWindow._schedule_audio_finalization_retry(
+                    self,
+                    operation_token,
+                )
                 return
             if self._dictation.begin_transcription(
                 operation_token,

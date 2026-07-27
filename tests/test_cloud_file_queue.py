@@ -384,6 +384,94 @@ def test_local_transcription_can_use_cloud_summary_without_repeating_stt(
     assert completed == [task]
 
 
+def test_retryable_cloud_summary_keeps_hybrid_task_pending(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.file_transcriber import FileTranscriptionQueue
+    from app.operation_coordinator import OperationCoordinator
+    from app.operation_models import OperationStatus
+    from app.operation_store import OperationStore
+    from app.spool import SpoolManager
+    from app.transcription_models import (
+        FileStatus,
+        FileTask,
+        PostProcessOptions,
+        SummaryOptions,
+        TranscribeOptions,
+    )
+
+    source = tmp_path / "hybrid interview.wav"
+    source.write_bytes(b"local-audio")
+    coordinator = OperationCoordinator(
+        store=OperationStore(tmp_path / "operations.sqlite3"),
+        spool=SpoolManager(tmp_path / "spool"),
+    )
+    task = FileTask(file_path=source)
+    route = {
+        "transcription": {"provider": "local", "model": "whisper"},
+        "summary": {"provider": "mindtype_cloud", "model": "auto"},
+    }
+    coordinator.prepare_file_task(task, route=route)
+    monkeypatch.setattr(
+        "app.file_transcriber.get_file_duration",
+        lambda _path: 1.0,
+    )
+
+    class LocalTranscriber:
+        def transcribe_with_timestamps(self, **_kwargs):
+            return (
+                [{"start": 0.0, "end": 1.0, "text": "Локальный текст"}],
+                "ru",
+                0.95,
+            )
+
+    class SummaryExecutor:
+        def __init__(self):
+            self.coordinator = coordinator
+
+        def advance_summary(self, operation_id, **_options):
+            return coordinator.mark_retryable(
+                operation_id,
+                error_code="INSUFFICIENT_CREDITS",
+            )
+
+    completed = []
+    queue = FileTranscriptionQueue(
+        transcriber=LocalTranscriber(),
+        transcribe=TranscribeOptions(
+            model_size="small",
+            compute_type="int8",
+            device="cpu",
+            language="ru",
+            beam_size=1,
+            vad_filter=True,
+            models_dir=tmp_path,
+        ),
+        summary=SummaryOptions(
+            enable=True,
+            provider="mindtype_cloud",
+            preset_name="PM",
+        ),
+        postprocess=PostProcessOptions(enable=False),
+        cloud_summary_executor=SummaryExecutor(),
+        cloud_poll_interval=0,
+        on_completed=completed.append,
+    )
+    queue._running.set()
+
+    queue._process_task(task)
+
+    assert task.status is FileStatus.PENDING
+    assert task.error_message == "INSUFFICIENT_CREDITS"
+    assert queue.is_running is False
+    assert completed == [task]
+    resumed = coordinator.prepare_file_task(task, route=route)
+    assert resumed.operation_id == task.operation_id
+    assert resumed.status is OperationStatus.RUNNING
+    assert resumed.attempt_count == 2
+
+
 def test_failed_cloud_cancel_stays_durable_for_startup_recovery(
     tmp_path: Path,
 ) -> None:

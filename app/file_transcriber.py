@@ -551,6 +551,8 @@ class FileTranscriptionQueue:
                                 return
                             if finish_cancelled():
                                 return
+                            if task.status is FileStatus.PENDING:
+                                return
                             raise RuntimeError(
                                 "MindType Cloud summary did not complete"
                             )
@@ -786,10 +788,17 @@ class FileTranscriptionQueue:
                 return True
             if operation.status is OperationStatus.CANCELLED:
                 return False
-            if operation.status in {
-                OperationStatus.FAILED,
-                OperationStatus.RETRYABLE,
-            }:
+            if operation.status is OperationStatus.RETRYABLE:
+                task.status = FileStatus.PENDING
+                task.progress = 0
+                task.error_message = (
+                    operation.last_error_code or "CLOUD_SUMMARY_RETRY_REQUIRED"
+                )
+                self._running.clear()
+                if self._on_completed:
+                    self._on_completed(task)
+                return False
+            if operation.status is OperationStatus.FAILED:
                 raise RuntimeError(
                     operation.last_error_code or "CLOUD_SUMMARY_FAILED"
                 )
