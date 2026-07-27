@@ -410,7 +410,18 @@ class CloudSessionManager:
                     self.refresh_store.clear(self.device_id)
                 raise
 
-            return self._adopt_session(session, checked_at=checked_at)
+            preserve_existing = self._claims is not None
+            if not preserve_existing:
+                try:
+                    self.lease_store.load(now=checked_at)
+                    preserve_existing = True
+                except Exception:
+                    pass
+            return self._adopt_session(
+                session,
+                checked_at=checked_at,
+                preserve_existing_on_failure=preserve_existing,
+            )
 
     def _adopt_session(
         self,

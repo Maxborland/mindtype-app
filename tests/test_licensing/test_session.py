@@ -212,6 +212,67 @@ def test_invalid_lease_rolls_back_refresh_token(tmp_path: Path) -> None:
     assert not (tmp_path / "entitlement.lease").exists()
 
 
+def test_invalid_activation_lease_preserves_existing_offline_material(
+    tmp_path: Path,
+) -> None:
+    from app.licensing.entitlement import LeaseValidationError
+    from app.licensing.session import LicenseSession
+
+    now = datetime.now(timezone.utc)
+    private_key = Ed25519PrivateKey.generate()
+    device_id = "device-hash"
+    initial = LicenseSession(
+        access_token="access-token",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="refresh-token",
+        entitlement_lease=signed_lease(
+            private_key,
+            device_id=device_id,
+            now=now,
+        ),
+        claim_version=1,
+    )
+    refresh_store = FakeRefreshStore()
+    client = FakeSessionClient(response=initial)
+    manager = session_manager(
+        tmp_path,
+        private_key=private_key,
+        client=client,
+        refresh_store=refresh_store,
+        device_id=device_id,
+    )
+    manager.activate(
+        license_key="MT-AAAA-BBBB-CCCC",
+        desktop_version="0.9.3",
+        platform="windows",
+        now=now,
+    )
+    prior_lease = (tmp_path / "entitlement.lease").read_text(
+        encoding="utf-8"
+    )
+    client.response = LicenseSession(
+        access_token="replacement-access",
+        access_expires_at=now + timedelta(minutes=15),
+        refresh_token="replacement-refresh",
+        entitlement_lease="invalid.lease",
+        claim_version=1,
+    )
+
+    with pytest.raises(LeaseValidationError):
+        manager.activate(
+            license_key="MT-AAAA-BBBB-CCCC",
+            desktop_version="0.9.3",
+            platform="windows",
+            now=now,
+        )
+
+    assert refresh_store.token == "replacement-refresh"
+    assert (tmp_path / "entitlement.lease").read_text(
+        encoding="utf-8"
+    ) == prior_lease
+    assert manager.lease_store.load(now=now).device_id == device_id
+
+
 def test_authoritative_negative_clears_cached_session_and_lease(
     tmp_path: Path,
 ) -> None:

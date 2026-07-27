@@ -311,7 +311,11 @@ class Updater:
         self._temp_path = downloaded
         return True, downloaded, None
 
-    def install_update(self) -> bool:
+    def install_update(
+        self,
+        *,
+        before_launch: Optional[Callable[[], None]] = None,
+    ) -> bool:
         """Re-verify and launch the installer without shell interpolation."""
         manifest = self.verified_manifest
         installer = self._temp_path
@@ -324,13 +328,15 @@ class Updater:
             return False
         try:
             verify_downloaded_installer(installer, manifest)
+            if before_launch is not None:
+                before_launch()
             subprocess.Popen(
                 [str(installer.resolve(strict=True))],
                 cwd=str(installer.parent.resolve()),
                 close_fds=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except (InstallerVerificationError, OSError) as exc:
+        except Exception as exc:
             logger.warning("Запуск обновления отклонён: %s", exc)
             return False
         return True

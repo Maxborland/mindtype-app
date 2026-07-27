@@ -470,3 +470,29 @@ def test_failed_recovered_dictation_stays_actionable() -> None:
 
     assert window._retryable_dictation_ids == [operation_id]
     window._update_recovered_dictation_actions.assert_called_once()
+
+
+def test_update_install_preparation_stops_native_runtime_and_preserves_cloud_jobs(
+) -> None:
+    from app.main import MainWindow
+
+    file_queue = SimpleNamespace(
+        is_running=True,
+        cancel=MagicMock(),
+    )
+    window = SimpleNamespace(
+        _really_quit=False,
+        _preserve_cloud_jobs_on_shutdown=False,
+        _file_queue=file_queue,
+        _cleanup_all=MagicMock(),
+    )
+    window._prepare_for_full_exit = lambda: (
+        MainWindow._prepare_for_full_exit(window)
+    )
+
+    MainWindow._prepare_for_update_install(window)
+
+    assert window._really_quit is True
+    assert window._preserve_cloud_jobs_on_shutdown is True
+    file_queue.cancel.assert_called_once_with()
+    window._cleanup_all.assert_called_once_with()

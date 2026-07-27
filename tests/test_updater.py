@@ -442,6 +442,52 @@ class TestUpdaterInstallation:
         assert args[0] == [str(installer.resolve())]
         assert kwargs.get("shell", False) is False
 
+    def test_install_runs_cleanup_after_verification_and_before_launch(
+        self,
+        tmp_path,
+    ):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import Updater
+
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        installer = tmp_path / "MindType-1.2.0-Setup.exe"
+        installer.write_bytes(b"signed installer")
+        updater = Updater(
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+        updater.verified_manifest = manifest
+        updater._temp_path = installer
+        events = []
+
+        with (
+            patch(
+                "app.updater.verify_downloaded_installer",
+                side_effect=lambda *_args: events.append("verified"),
+            ),
+            patch(
+                "app.updater.subprocess.Popen",
+                side_effect=lambda *_args, **_kwargs: events.append(
+                    "launched"
+                ),
+            ),
+        ):
+            installed = updater.install_update(
+                before_launch=lambda: events.append("cleaned"),
+            )
+
+        assert installed is True
+        assert events == ["verified", "cleaned", "launched"]
+
 
 class TestUpdaterGetDownloadInfo:
     """Тесты для get_download_info."""

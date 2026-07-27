@@ -639,7 +639,7 @@ class MindTypeCloudClient:
             raise ValueError(
                 "provide exactly one cloud summary transcript source"
             )
-        preset = str(options.get("preset") or "general")
+        preset = str(options.get("preset") or "generic")
         input_token_estimate = int(
             options.get("input_token_estimate", 0)
         )
@@ -833,6 +833,21 @@ class MindTypeCloudExecutor:
             normalized_source["channels"] = channels
         normalized["source"] = normalized_source
         return normalized
+
+    @staticmethod
+    def _without_local_source_metadata(
+        canonical_transcript: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build the cloud payload without disclosing the local filename."""
+        cloud_payload = dict(canonical_transcript)
+        source = cloud_payload.get("source")
+        if not isinstance(source, Mapping):
+            return cloud_payload
+        cloud_payload["source"] = {
+            **source,
+            "display_name": "local-transcript",
+        }
+        return cloud_payload
 
     def _handle_summary_job(
         self,
@@ -1239,9 +1254,12 @@ class MindTypeCloudExecutor:
                 canonical_transcript,
                 stage=OperationStage.SUMMARIZE,
             )
+            cloud_transcript = self._without_local_source_metadata(
+                canonical_transcript
+            )
             summary_job = self.client.create_summary(
                 operation_id=operation_id,
-                canonical_transcript=canonical_transcript,
+                canonical_transcript=cloud_transcript,
                 options=options,
             )
             summary_id = self._required_remote_id(

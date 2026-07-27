@@ -4380,7 +4380,9 @@ class MainWindow(QMainWindow):
 
             if reply == QMessageBox.StandardButton.Yes:
                 self._add_journal_entry("success", "update_ready", is_translatable=True)
-                if self.updater.install_update():
+                if self.updater.install_update(
+                    before_launch=self._prepare_for_update_install,
+                ):
                     QApplication.quit()
                 else:
                     QMessageBox.critical(
@@ -5776,15 +5778,20 @@ class MainWindow(QMainWindow):
             self.hide()
             return
 
-        # Полный выход прерывает локальный worker, но cloud ledger остаётся
-        # in-flight: следующий запуск переведёт его в RETRYABLE.
+        self._prepare_for_full_exit()
+        super().closeEvent(event)
+
+    def _prepare_for_update_install(self) -> None:
+        """Release native binaries immediately before starting the installer."""
+        self._really_quit = True
+        self._prepare_for_full_exit()
+
+    def _prepare_for_full_exit(self) -> None:
+        """Preserve cloud jobs and stop every local runtime before exit."""
         self._preserve_cloud_jobs_on_shutdown = True
         if self._file_queue and self._file_queue.is_running:
             self._file_queue.cancel()
-
-        # Полное закрытие — останавливаем все фоновые потоки и ресурсы
         self._cleanup_all()
-        super().closeEvent(event)
 
     def _cleanup_all(self) -> None:
         """Остановить все фоновые потоки и освободить ресурсы."""

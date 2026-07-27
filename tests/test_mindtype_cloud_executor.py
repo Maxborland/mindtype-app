@@ -599,7 +599,11 @@ def test_local_transcript_can_use_durable_cloud_summary_without_cloud_stt(
         call for call in client.calls if call[0] == "create_summary"
     )
     assert create_call[2] is None
-    assert create_call[3] == transcript
+    assert create_call[3]["source"]["display_name"] == "local-transcript"
+    assert create_call[3]["source"]["display_name"] != (
+        transcript["source"]["display_name"]
+    )
+    assert transcript["source"]["display_name"] == "meeting.wav"
     assert not any(
         call[0] == "create_upload" for call in client.calls
     )
@@ -633,6 +637,7 @@ def test_local_transcript_can_use_durable_cloud_summary_without_cloud_stt(
         completed.canonical_result_path.read_text(encoding="utf-8")
     )
     assert saved["route"]["transcription"]["provider"] == "local"
+    assert saved["source"]["display_name"] == "meeting.wav"
     assert saved["summary"]["generated"] is True
     assert ("acknowledge_summary", "summary-1") not in client.calls
     assert not any(
