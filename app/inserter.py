@@ -6,6 +6,12 @@
 import sys
 from typing import Optional
 
+from .insertion import (
+    InsertionFailure,
+    InsertionMethod,
+    InsertionResult,
+)
+
 # Выбираем реализацию в зависимости от платформы
 if sys.platform == "win32":
     from .platform.windows import WindowsWindowManager, WindowsTextInserter
@@ -81,6 +87,19 @@ def insert_text(text: str, delay: float = 0.1) -> bool:
     return _text_inserter.insert_text(text, delay)
 
 
+def insert_text_result(text: str, delay: float = 0.1) -> InsertionResult:
+    """Insert text and retain a typed diagnostic result where supported."""
+    detailed = getattr(_text_inserter, "insert_text_result", None)
+    if callable(detailed):
+        return detailed(text, delay)
+    if _text_inserter.insert_text(text, delay):
+        return InsertionResult.ok(
+            InsertionMethod.CLIPBOARD,
+            attempted=(InsertionMethod.CLIPBOARD,),
+        )
+    return InsertionResult.failed(InsertionFailure.ALL_METHODS_FAILED)
+
+
 def type_text(text: str) -> bool:
     """
     Напечатать текст посимвольно.
@@ -94,4 +113,10 @@ def type_text(text: str) -> bool:
     return _text_inserter.type_text(text)
 
 
-__all__ = ["focus_manager", "insert_text", "type_text", "WindowFocusManager"]
+__all__ = [
+    "focus_manager",
+    "insert_text",
+    "insert_text_result",
+    "type_text",
+    "WindowFocusManager",
+]

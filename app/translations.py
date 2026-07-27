@@ -139,6 +139,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Основные настройки
         "audio_input": "Аудио вход",
+        "audio_source": "Источник записи",
+        "microphone_only": "Только микрофон",
+        "system_audio_only": "Только звук системы",
+        "microphone_and_system": "Микрофон и звук системы",
+        "system_audio_device": "Устройство вывода",
+        "system_audio_consent": "Я понимаю, что записывается звук системы, и получил согласие участников",
+        "system_audio_consent_required": "Подтвердите согласие на запись системного звука",
         "hotkey": "Хоткей",
         "ui_language": "Язык приложения",
         "transcription_language": "Язык транскрипции",
@@ -160,6 +167,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Дополнительные настройки
         "vad_filter": "Пропускать тишину",
+        "auto_insert": "Автоматически вставлять текст",
         "beam_size": "Точность",
         "model_path": "Путь модели",
         "model_download_sources": "Источники загрузки моделей",
@@ -170,6 +178,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "margin": "Отступ",
         "wave_gain": "Усиление волны",
         "opacity": "Прозрачность",
+        "reduced_motion": "Уменьшить анимацию",
+        "optional_pack_required": "нужен дополнительный компонент",
 
         # Позиции overlay
         "bottom_center": "Снизу по центру",
@@ -186,7 +196,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Загрузка модели...",
         "error": "Ошибка",
         "success": "Успешно",
-        "cancelled": "Отменено",
 
         # Журнал
         "transcription": "Транскрипция",
@@ -203,9 +212,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Кнопки
         "record_hotkey": "Записать",
         "refresh": "Обновить",
-        "download_model": "Скачать модель",
         "skip": "Пропустить",
-        "cancel": "Отмена",
         "cancelled": "Отменено",
         "first_run_title": "Добро пожаловать в MindType",
         "first_run_welcome": "Для работы приложения необходимо скачать модель распознавания речи. Выберите модель в зависимости от ваших потребностей:",
@@ -262,7 +269,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Системный трей
         "show_window": "Показать окно",
+        "repeat_last_insert": "Повторить последнюю вставку",
         "start_recording": "Начать запись",
+        "retry_recovered_dictation": "Повторить восстановленную диктовку",
         "exit": "Выход",
 
         # Тест микрофона
@@ -309,6 +318,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "downloading_update": "Загрузка обновления...",
         "update_ready": "Обновление готово к установке",
         "update_error": "Ошибка обновления",
+        "automatic_update_disabled": "Установщик не запущен: не удалось подтвердить полную цепочку доверия обновления.",
         "current_version": "Текущая версия",
 
         # Новые ключи для покупки и поддержки
@@ -420,6 +430,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "diarization_backend_openrouter": "OpenRouter (LLM)",
         "diarization_backend_local": "Локальная (офлайн)",
         "diarization_backend_tooltip": "Как определять спикеров в записи.\nАвто — через OpenRouter, если задан API ключ, иначе локально.\nOpenRouter (LLM) — модель размечает спикеров по структуре диалога, умеет узнавать имена; при ошибке — откат на локальную.\nЛокальная — офлайн по голосу (MFCC), без затрат.",
+        "data_route_disclosure": "Маршрут данных: аудио — {audio}; диаризация — {diarization}; саммари — {summary}.",
+        "dictation_data_route": "Маршрут диктовки: аудио — {audio}.",
+        "route_local": "локально",
+        "route_off": "выключена",
 
         # Голосовой ассистент
         "assistant": "Ассистент",
@@ -549,6 +563,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Basic settings
         "audio_input": "Audio Input",
+        "audio_source": "Recording source",
+        "microphone_only": "Microphone only",
+        "system_audio_only": "System audio only",
+        "microphone_and_system": "Microphone and system audio",
+        "system_audio_device": "Output device",
+        "system_audio_consent": "I understand system audio is recorded and have participant consent",
+        "system_audio_consent_required": "Confirm consent before recording system audio",
         "hotkey": "Hotkey",
         "ui_language": "App Language",
         "transcription_language": "Transcription Language",
@@ -570,6 +591,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Additional settings
         "vad_filter": "Skip silence",
+        "auto_insert": "Insert text automatically",
         "beam_size": "Accuracy",
         "model_path": "Model Path",
         "model_download_sources": "Model Download Sources",
@@ -580,6 +602,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "margin": "Margin",
         "wave_gain": "Wave Gain",
         "opacity": "Opacity",
+        "reduced_motion": "Reduce motion",
+        "optional_pack_required": "optional component required",
 
         # Overlay positions
         "bottom_center": "Bottom Center",
@@ -596,7 +620,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Loading model...",
         "error": "Error",
         "success": "Success",
-        "cancelled": "Cancelled",
 
         # Journal
         "transcription": "Transcription",
@@ -613,9 +636,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Buttons
         "record_hotkey": "Record",
         "refresh": "Refresh",
-        "download_model": "Download Model",
         "skip": "Skip",
-        "cancel": "Cancel",
         "cancelled": "Cancelled",
         "first_run_title": "Welcome to MindType",
         "first_run_welcome": "To use the application, you need to download a speech recognition model. Choose a model based on your needs:",
@@ -672,7 +693,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # System tray
         "show_window": "Show window",
+        "repeat_last_insert": "Repeat last insertion",
         "start_recording": "Start recording",
+        "retry_recovered_dictation": "Retry recovered dictation",
         "exit": "Exit",
 
         # Mic test
@@ -719,6 +742,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "downloading_update": "Downloading update...",
         "update_ready": "Update ready to install",
         "update_error": "Update error",
+        "automatic_update_disabled": "The installer was not launched because the complete update trust chain could not be verified.",
         "current_version": "Current version",
 
         # New keys for purchase and support
@@ -831,6 +855,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "diarization_backend_openrouter": "OpenRouter (LLM)",
         "diarization_backend_local": "Local (offline)",
         "diarization_backend_tooltip": "How to detect speakers in the recording.\nAuto — via OpenRouter when an API key is set, otherwise locally.\nOpenRouter (LLM) — the model labels speakers by dialogue structure and can recognize names; falls back to local on errors.\nLocal — offline by voice (MFCC), no cost.",
+        "data_route_disclosure": "Data route: audio — {audio}; diarization — {diarization}; summary — {summary}.",
+        "dictation_data_route": "Dictation route: audio — {audio}.",
+        "route_local": "local",
+        "route_off": "off",
 
         # Setup Wizard
         "setup_welcome_title": "Welcome to MindType",
@@ -934,6 +962,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "Overlay anzeigen",
         "version": "Version",
         "vad_filter": "Stille überspringen",
+        "auto_insert": "Text automatisch einfügen",
         "beam_size": "Genauigkeit",
         "model_path": "Modellpfad",
         "transcribe_model": "Transkriptionsmodell",
@@ -953,7 +982,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Modell laden...",
         "error": "Fehler",
         "success": "Erfolg",
-        "cancelled": "Abgebrochen",
         "transcription": "Transkription",
         "auto_insert_done": "Auto-Einfügen abgeschlossen",
         "saved_window": "Fenster gespeichert",
@@ -994,7 +1022,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "Noch keine Transkriptionen",
         "clear_journal": "Löschen",
         "show_window": "Fenster anzeigen",
+        "repeat_last_insert": "Letzte Einfügung wiederholen",
         "start_recording": "Aufnahme starten",
+        "retry_recovered_dictation": "Wiederhergestelltes Diktat wiederholen",
         "exit": "Beenden",
         "test_mic": "Test",
         "mic_level": "Mikrofonpegel",
@@ -1120,6 +1150,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "Afficher overlay",
         "version": "Version",
         "vad_filter": "Ignorer le silence",
+        "auto_insert": "Insérer le texte automatiquement",
         "beam_size": "Précision",
         "model_path": "Chemin du modèle",
         "transcribe_model": "Modèle de transcription",
@@ -1139,7 +1170,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Chargement du modèle...",
         "error": "Erreur",
         "success": "Succès",
-        "cancelled": "Annulé",
         "transcription": "Transcription",
         "auto_insert_done": "Insertion auto terminée",
         "saved_window": "Fenêtre sauvegardée",
@@ -1180,7 +1210,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "Pas encore de transcriptions",
         "clear_journal": "Effacer",
         "show_window": "Afficher la fenêtre",
+        "repeat_last_insert": "Répéter la dernière insertion",
         "start_recording": "Démarrer l'enregistrement",
+        "retry_recovered_dictation": "Réessayer la dictée récupérée",
         "exit": "Quitter",
         "test_mic": "Test",
         "mic_level": "Niveau du micro",
@@ -1306,6 +1338,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "Mostrar overlay",
         "version": "Versión",
         "vad_filter": "Omitir silencio",
+        "auto_insert": "Insertar texto automáticamente",
         "beam_size": "Precisión",
         "model_path": "Ruta del modelo",
         "transcribe_model": "Modelo de transcripción",
@@ -1325,7 +1358,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Cargando modelo...",
         "error": "Error",
         "success": "Éxito",
-        "cancelled": "Cancelado",
         "transcription": "Transcripción",
         "auto_insert_done": "Auto-inserción completada",
         "saved_window": "Ventana guardada",
@@ -1366,7 +1398,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "Aún no hay transcripciones",
         "clear_journal": "Borrar",
         "show_window": "Mostrar ventana",
+        "repeat_last_insert": "Repetir la última inserción",
         "start_recording": "Iniciar grabación",
+        "retry_recovered_dictation": "Reintentar dictado recuperado",
         "exit": "Salir",
         "test_mic": "Probar",
         "mic_level": "Nivel del micrófono",
@@ -1492,6 +1526,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "Mostra overlay",
         "version": "Versione",
         "vad_filter": "Salta silenzio",
+        "auto_insert": "Inserisci testo automaticamente",
         "beam_size": "Precisione",
         "model_path": "Percorso del modello",
         "transcribe_model": "Modello di trascrizione",
@@ -1511,7 +1546,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Caricamento modello...",
         "error": "Errore",
         "success": "Successo",
-        "cancelled": "Annullato",
         "transcription": "Trascrizione",
         "auto_insert_done": "Auto-inserimento completato",
         "saved_window": "Finestra salvata",
@@ -1552,7 +1586,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "Nessuna trascrizione ancora",
         "clear_journal": "Cancella",
         "show_window": "Mostra finestra",
+        "repeat_last_insert": "Ripeti l'ultimo inserimento",
         "start_recording": "Avvia registrazione",
+        "retry_recovered_dictation": "Riprova dettatura recuperata",
         "exit": "Esci",
         "test_mic": "Test",
         "mic_level": "Livello microfono",
@@ -1678,6 +1714,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "Mostrar overlay",
         "version": "Versão",
         "vad_filter": "Pular silêncio",
+        "auto_insert": "Inserir texto automaticamente",
         "beam_size": "Precisão",
         "model_path": "Caminho do modelo",
         "transcribe_model": "Modelo de transcrição",
@@ -1697,7 +1734,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "Carregando modelo...",
         "error": "Erro",
         "success": "Sucesso",
-        "cancelled": "Cancelado",
         "transcription": "Transcrição",
         "auto_insert_done": "Auto-inserção concluída",
         "saved_window": "Janela salva",
@@ -1738,7 +1774,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "Ainda não há transcrições",
         "clear_journal": "Limpar",
         "show_window": "Mostrar janela",
+        "repeat_last_insert": "Repetir a última inserção",
         "start_recording": "Iniciar gravação",
+        "retry_recovered_dictation": "Tentar novamente o ditado recuperado",
         "exit": "Sair",
         "test_mic": "Testar",
         "mic_level": "Nível do microfone",
@@ -1864,6 +1902,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "显示悬浮窗",
         "version": "版本",
         "vad_filter": "跳过静音",
+        "auto_insert": "自动插入文本",
         "beam_size": "准确度",
         "model_path": "模型路径",
         "transcribe_model": "转录模型",
@@ -1883,7 +1922,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "加载模型...",
         "error": "错误",
         "success": "成功",
-        "cancelled": "已取消",
         "transcription": "转录",
         "auto_insert_done": "自动插入完成",
         "saved_window": "窗口已保存",
@@ -1924,7 +1962,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "暂无转录",
         "clear_journal": "清除",
         "show_window": "显示窗口",
+        "repeat_last_insert": "重复上次插入",
         "start_recording": "开始录音",
+        "retry_recovered_dictation": "重试已恢复的听写",
         "exit": "退出",
         "test_mic": "测试",
         "mic_level": "麦克风电平",
@@ -2050,6 +2090,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "オーバーレイを表示",
         "version": "バージョン",
         "vad_filter": "無音をスキップ",
+        "auto_insert": "テキストを自動挿入",
         "beam_size": "精度",
         "model_path": "モデルパス",
         "transcribe_model": "文字起こしモデル",
@@ -2069,7 +2110,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "モデル読み込み中...",
         "error": "エラー",
         "success": "成功",
-        "cancelled": "キャンセル",
         "transcription": "文字起こし",
         "auto_insert_done": "自動挿入完了",
         "saved_window": "ウィンドウ保存済み",
@@ -2110,7 +2150,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "まだ文字起こしがありません",
         "clear_journal": "クリア",
         "show_window": "ウィンドウを表示",
+        "repeat_last_insert": "前回の挿入を繰り返す",
         "start_recording": "録音開始",
+        "retry_recovered_dictation": "復元した音声入力を再試行",
         "exit": "終了",
         "test_mic": "テスト",
         "mic_level": "マイクレベル",
@@ -2236,6 +2278,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "show_overlay": "오버레이 표시",
         "version": "버전",
         "vad_filter": "무음 건너뛰기",
+        "auto_insert": "텍스트 자동 삽입",
         "beam_size": "정확도",
         "model_path": "모델 경로",
         "transcribe_model": "전사 모델",
@@ -2255,7 +2298,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_model": "모델 로딩 중...",
         "error": "오류",
         "success": "성공",
-        "cancelled": "취소됨",
         "transcription": "전사",
         "auto_insert_done": "자동 삽입 완료",
         "saved_window": "창 저장됨",
@@ -2296,7 +2338,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "no_transcriptions": "아직 전사가 없습니다",
         "clear_journal": "지우기",
         "show_window": "창 표시",
+        "repeat_last_insert": "마지막 삽입 반복",
         "start_recording": "녹음 시작",
+        "retry_recovered_dictation": "복구된 받아쓰기 다시 시도",
         "exit": "종료",
         "test_mic": "테스트",
         "mic_level": "마이크 레벨",

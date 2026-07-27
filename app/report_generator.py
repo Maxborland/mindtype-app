@@ -4,6 +4,7 @@
 """
 
 import html
+import re
 import subprocess
 import shutil
 from datetime import datetime
@@ -21,18 +22,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
     <title>{title}</title>
-    <!-- MathJax for LaTeX support (только браузер; в PDF игнорируется) -->
-    <script>
-        MathJax = {{
-            tex: {{
-                inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-                displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
-            }},
-            svg: {{ fontCache: 'global' }}
-        }};
-    </script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
     <style>
         body {{
             font-family: "Segoe UI", "Inter", Arial, sans-serif;
@@ -463,36 +455,20 @@ class ReportGenerator:
         - - и * списки → <ul>; 1. и 1) списки → <ol>
         - **жирный** → <strong>
         - | таблицы | и || таблицы | (формат из встроенных пресетов)
-        - $LaTeX$ формулы (сохраняются как есть для MathJax)
+        - LaTeX-подобные фрагменты как обычный экранированный текст
         """
         import re
-        import uuid
-
-        def _escape_preserving_latex(text: str) -> str:
-            """Экранировать HTML, сохраняя LaTeX формулы."""
-            latex_placeholders = {}
-
-            def save_latex(match):
-                placeholder = f"__LATEX_{uuid.uuid4().hex[:8]}__"
-                latex_placeholders[placeholder] = match.group(0)
-                return placeholder
-
-            # Сохраняем $...$ и $$...$$
-            text = re.sub(r'\$\$[^$]+\$\$', save_latex, text)
-            text = re.sub(r'\$[^$]+\$', save_latex, text)
-
-            text = html.escape(text)
-
-            for placeholder, latex in latex_placeholders.items():
-                text = text.replace(placeholder, latex)
-
-            return text
 
         def _inline(text: str) -> str:
-            """Инлайн-разметка: **жирный** + экранирование с сохранением LaTeX."""
-            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
-            text = _escape_preserving_latex(text)
-            return text.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
+            """Экранировать текст, разрешая только созданную здесь bold-разметку."""
+            parts = []
+            start = 0
+            for match in re.finditer(r'\*\*(.+?)\*\*', text):
+                parts.append(html.escape(text[start:match.start()]))
+                parts.append(f"<strong>{html.escape(match.group(1))}</strong>")
+                start = match.end()
+            parts.append(html.escape(text[start:]))
+            return "".join(parts)
 
         lines = summary.split('\n')
         html_parts = []
@@ -783,11 +759,20 @@ class ReportGenerator:
         speakers_section = self._generate_speakers_section(result)
         summary_section = self._generate_summary_section(result)
 
+        raw_language = result.detected_language or "und"
+        document_language = (
+            raw_language
+            if re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", raw_language)
+            else "und"
+        )
+        report_title = f"{self._labels['window_title']} - {result.file_path.name}"
+        window_title = f"{self._labels['window_title']}: {result.file_path.name}"
+
         # Формируем HTML
         html_content = HTML_TEMPLATE.format(
-            lang=result.detected_language or "en",
-            title=f"{self._labels['window_title']} - {result.file_path.name}",
-            window_title=f"{self._labels['window_title']}: {result.file_path.name}",
+            lang=html.escape(document_language, quote=True),
+            title=html.escape(report_title),
+            window_title=html.escape(window_title),
 
             # Метки
             label_file=self._labels["label_file"],
@@ -805,10 +790,10 @@ class ReportGenerator:
 
             # Значения
             file_name=html.escape(result.file_path.name),
-            duration=result.duration_formatted,
-            language=self._get_language_name(result.detected_language),
+            duration=html.escape(result.duration_formatted),
+            language=html.escape(self._get_language_name(result.detected_language)),
             probability=f"{result.language_probability * 100:.0f}",
-            model=result.model_used,
+            model=html.escape(result.model_used),
             date=result.transcription_date.strftime("%Y-%m-%d %H:%M"),
 
             # Статистика
@@ -902,6 +887,27 @@ class ReportGenerator:
         except Exception:
             return False
 
+    @staticmethod
+    def _safe_report_base_name(source_path: Path) -> str:
+        """Build a portable filename without trusting the source path text."""
+        safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", source_path.stem)
+        safe_stem = safe_stem.strip(" .")[:120] or "audio"
+        return f"{safe_stem}_transcription"
+
+    @staticmethod
+    def _unique_report_base_name(
+        output_dir: Path,
+        base_name: str,
+        suffixes: tuple[str, ...],
+    ) -> str:
+        """Choose one non-colliding stem for every format in this export."""
+        candidate = base_name
+        index = 2
+        while any((output_dir / f"{candidate}{suffix}").exists() for suffix in suffixes):
+            candidate = f"{base_name}_{index}"
+            index += 1
+        return candidate
+
     def generate(
         self,
         result: TranscriptionResult,
@@ -921,8 +927,17 @@ class ReportGenerator:
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Базовое имя файла
-        base_name = result.file_path.stem + "_transcription"
+        base_name = self._safe_report_base_name(result.file_path)
+        reserved_suffixes = {
+            "html": (".html",),
+            "pdf": (".pdf", ".html"),
+            "both": (".html", ".pdf"),
+        }.get(format, ())
+        base_name = self._unique_report_base_name(
+            output_dir,
+            base_name,
+            reserved_suffixes,
+        )
 
         created_files = {}
 
@@ -943,5 +958,3 @@ class ReportGenerator:
                     created_files["html"] = html_path
 
         return created_files
-
-

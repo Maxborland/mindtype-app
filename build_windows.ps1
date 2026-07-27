@@ -7,7 +7,8 @@
 param(
     [switch]$Clean,
     [switch]$NoInstaller,
-    [string]$Version = ""
+    [string]$Version = "",
+    [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,15 +52,44 @@ if ($Clean) {
     Write-Host "[1/4] Skipping clean (use -Clean to clean)" -ForegroundColor Gray
 }
 
-# Check PyInstaller
-Write-Host "[2/4] Checking PyInstaller..." -ForegroundColor Yellow
-try {
-    $pyinstallerVersion = & python -m PyInstaller --version 2>&1
-    Write-Host "  PyInstaller: $pyinstallerVersion" -ForegroundColor Green
-} catch {
-    Write-Host "  PyInstaller not found. Installing..." -ForegroundColor Yellow
-    pip install pyinstaller
+# Verify the release interpreter and synchronize deterministic build inputs.
+Write-Host "[2/4] Preparing hashed Python 3.11 build environment..." -ForegroundColor Yellow
+$BuildPythonVersion = & $PythonExe -c "import sys; print('.'.join(map(str, sys.version_info[:2])))"
+if ($LASTEXITCODE -ne 0 -or $BuildPythonVersion.Trim() -ne "3.11") {
+    throw "Windows release builds require Python 3.11; got '$BuildPythonVersion'"
 }
+$IsVirtualEnvironment = & $PythonExe -c "import sys; print('1' if sys.prefix != sys.base_prefix else '0')"
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not inspect the Python 3.11 build environment"
+}
+$BuildPythonExe = $PythonExe
+if ($IsVirtualEnvironment.Trim() -ne "1") {
+    $BuildVenv = Join-Path $RootDir ".venv-build"
+    $BuildVenvPython = Join-Path $BuildVenv "Scripts\python.exe"
+    if (-not (Test-Path $BuildVenvPython)) {
+        & $PythonExe -m venv $BuildVenv
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not create isolated Windows build environment"
+        }
+    }
+    $BuildPythonExe = $BuildVenvPython
+}
+$BaseLock = Join-Path $RootDir "requirements\base.lock"
+$DevLock = Join-Path $RootDir "requirements\dev.lock"
+foreach ($LockFile in @($BaseLock, $DevLock)) {
+    if (-not (Test-Path $LockFile)) {
+        throw "Hashed dependency lock not found: $LockFile"
+    }
+}
+& $BuildPythonExe -m pip install --require-hashes -r $BaseLock -r $DevLock
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install hashed Windows build dependencies"
+}
+$pyinstallerVersion = & $BuildPythonExe -m PyInstaller --version 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller is unavailable after installing hashed build dependencies"
+}
+Write-Host "  PyInstaller: $pyinstallerVersion" -ForegroundColor Green
 
 # Build with PyInstaller using spec file
 Write-Host "[3/4] Building with PyInstaller (using mindtype.spec)..." -ForegroundColor Yellow
@@ -69,7 +99,7 @@ if (-not (Test-Path $SpecFile)) {
     throw "Spec file not found: $SpecFile"
 }
 
-& python -m PyInstaller $SpecFile --noconfirm --clean
+& $BuildPythonExe -m PyInstaller $SpecFile --noconfirm --clean
 
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed"

@@ -119,8 +119,12 @@ def _default_config() -> Dict[str, Any]:
         "ui_language": "ru",                 # Язык интерфейса приложения
         "beam_size": 5,
         "vad_filter": True,
+        "auto_insert_enabled": True,
         "hotkey": "ctrl+alt+v",
+        "audio_source": "microphone",
         "microphone": None,
+        "system_audio_device": None,
+        "system_audio_consent": False,
         "cpu_threads": 4,
         "num_workers": 1,
         "models_dir": str(DEFAULT_MODELS_DIR),
@@ -134,6 +138,7 @@ def _default_config() -> Dict[str, Any]:
         "overlay_margin": 20,                # Отступ от края экрана
         "overlay_wave_gain": 1.5,            # Усиление волн (1.0 - 10.0)
         "overlay_opacity": 230,              # Прозрачность фона (0-255)
+        "reduced_motion": False,             # Отключить непрерывные анимации overlay
         # Саммаризация (мульти-провайдер)
         "llm_provider": "openrouter",        # openai, anthropic, gemini, ollama, openrouter
         "llm_reasoning_enabled": True,       # Включить reasoning mode

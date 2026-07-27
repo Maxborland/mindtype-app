@@ -6,11 +6,21 @@ import re
 import logging
 import time
 import shutil
+import threading
+import wave
 import numpy as np
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 from .accelerator import get_best_provider, get_provider_options
+from .artifact_manifest import verify_packaged_runtime
+from .model_manifest import (
+    ModelArtifact,
+    get_model_artifact,
+    verify_model_file,
+)
+from .vad import SUPPORTED_SAMPLE_RATES, WebRtcVadSegmenter
+from .whisper_server import WhisperServerConfig, WhisperServerRuntime
 
 # Настройка локального логгера
 logger = logging.getLogger("transcriber_cpp")
@@ -110,12 +120,20 @@ class WhisperCppTranscriber:
     """Транскрибер на основе whisper.cpp бинарника."""
 
     def __init__(self):
+        if sys.platform == "win32":
+            verify_packaged_runtime()
         self.model_path: Optional[Path] = None
         self.binary_path: Path = self._find_binary()
+        self.server_path: Path = self._find_server_binary()
         self.device: str = "auto"
         self.gpu_backend: str = self._detect_gpu_backend()
         self.threads: int = 4
+        self._server_runtime = WhisperServerRuntime()
         self._vad = None
+        self._process_lock = threading.Lock()
+        self._current_process: Optional[subprocess.Popen] = None
+        self._cancel_requested = threading.Event()
+        self._verified_models: Dict[Path, Tuple[int, int]] = {}
         # Preferred model download sources (CDN/mirrors). If empty, _download_model()
         # falls back to built-in defaults.
         self._download_sources: List[str] = []
@@ -123,6 +141,54 @@ class WhisperCppTranscriber:
         # Убеждаемся, что бинарник есть и готов к работе
         self._ensure_binary()
         logger.info(f"Инициализирован WhisperCppTranscriber. Платформа: {sys.platform}, Backend: {self.gpu_backend}, Бинарник: {self.binary_path}")
+
+    def prepare_operation(self) -> None:
+        """Reset cancellation only when no previous native process is running."""
+        self._server_runtime.prepare_operation()
+        with self._process_lock:
+            if self._current_process and self._current_process.poll() is None:
+                raise RuntimeError("Другая локальная транскрипция уже выполняется")
+            self._current_process = None
+            self._cancel_requested.clear()
+
+    def _register_process(self, process: subprocess.Popen) -> None:
+        with self._process_lock:
+            if self._current_process and self._current_process.poll() is None:
+                process.kill()
+                raise RuntimeError("Другая локальная транскрипция уже выполняется")
+            if self._cancel_requested.is_set():
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise InterruptedError("Транскрипция отменена")
+            self._current_process = process
+
+    def _release_process(self, process: Optional[subprocess.Popen]) -> None:
+        if process is None:
+            return
+        with self._process_lock:
+            if self._current_process is process:
+                self._current_process = None
+
+    def cancel_current(self, grace_timeout: float = 2.0) -> None:
+        """Terminate active whisper.cpp gracefully, then force it if needed."""
+        self._cancel_requested.set()
+        runtime = getattr(self, "_server_runtime", None)
+        if runtime is not None:
+            runtime.cancel(grace_timeout=grace_timeout)
+        with self._process_lock:
+            process = self._current_process
+        if not process or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=grace_timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=grace_timeout)
 
     def set_download_sources(self, sources: List[str]) -> None:
         """Set ordered list of download sources for GGML whisper.cpp models."""
@@ -143,8 +209,10 @@ class WhisperCppTranscriber:
             return "metal"
 
         if sys.platform == "win32":
-            # На Windows мы используем DirectML бинарник (обычно поставляется в комплекте)
-            return "directml"
+            runtime_dir = Path(__file__).parent.parent / "bin" / "win-x64"
+            if (runtime_dir / "ggml-vulkan.dll").exists():
+                return "vulkan"
+            return "cpu"
 
         # Linux: проверяем наличие Vulkan
         if shutil.which("vulkaninfo") or Path("/usr/lib/x86_64-linux-gnu/libvulkan.so.1").exists():
@@ -166,8 +234,22 @@ class WhisperCppTranscriber:
         else:
             return base_path / "linux-x64" / "whisper-cli"
 
+    def _find_server_binary(self) -> Path:
+        """Find the persistent whisper-server executable for this platform."""
+        base_path = Path(__file__).parent.parent / "bin"
+        if sys.platform == "win32":
+            return base_path / "win-x64" / "whisper-server.exe"
+        if sys.platform == "darwin":
+            brew_path = Path("/usr/local/bin/whisper-server")
+            if brew_path.exists():
+                return brew_path
+            return base_path / "darwin-arm64" / "whisper-server"
+        return base_path / "linux-x64" / "whisper-server"
+
     def _ensure_binary(self) -> None:
         """Проверить наличие бинарника и права доступа."""
+        if not self.server_path.exists():
+            logger.error(f"Persistent whisper-server не найден: {self.server_path}")
         if not self.binary_path.exists():
             if sys.platform == "win32":
                 logger.error(f"Бинарник для Windows не найден: {self.binary_path}")
@@ -344,13 +426,14 @@ class WhisperCppTranscriber:
         # Оставляем только безопасные символы
         model_name = "".join(c for c in model_name if c.isalnum() or c in ".-_")
 
-        model_filename = f"ggml-{model_name}.bin"
+        artifact = get_model_artifact(model_name)
+        model_filename = artifact.filename
 
         # Защита от path traversal
         try:
             target_path = (models_dir / model_filename).resolve()
             base_resolved = models_dir.resolve()
-            if not str(target_path).startswith(str(base_resolved)):
+            if not target_path.is_relative_to(base_resolved):
                 logger.error(f"Попытка выхода за пределы папки моделей: {target_path}")
                 raise ValueError("Некорректное имя модели")
             self.model_path = target_path
@@ -368,6 +451,7 @@ class WhisperCppTranscriber:
                 bundled_path = (BUNDLED_MODELS_DIR / model_filename)
                 if bundled_path.exists():
                     self.model_path = bundled_path
+                    self._verify_model_once(bundled_path, artifact)
                     logger.info(f"Используем встроенную модель: {self.model_path}")
                     if progress_callback:
                         progress_callback("model_loaded", 100, 100)
@@ -384,8 +468,10 @@ class WhisperCppTranscriber:
                 models_dir,
                 progress_callback,
                 sources=self._download_sources or None,
+                artifact=artifact,
             )
         else:
+            self._verify_model_once(self.model_path, artifact)
             logger.info(f"Файл модели уже существует.")
             if progress_callback:
                 progress_callback("model_loaded", 100, 100)
@@ -396,6 +482,7 @@ class WhisperCppTranscriber:
         models_dir: Path,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
         sources: Optional[List[str]] = None,
+        artifact: Optional[ModelArtifact] = None,
     ) -> None:
         """
         Скачать GGML модель.
@@ -412,17 +499,19 @@ class WhisperCppTranscriber:
         import urllib.request
         import urllib.error
 
+        artifact = artifact or get_model_artifact(model_name)
         repo_id = "ggerganov/whisper.cpp"
-        filename = f"ggml-{model_name}.bin"
+        filename = artifact.filename
         dest_path = models_dir / filename
 
         default_sources: List[str] = [
             # MindType CDN (if available)
             "https://cdn.mindtype.space/models/whispercpp",
             "https://mindtype.space/models/whispercpp",
-            # HF mirrors and HF
-            "https://hf-mirror.com/{repo_id}/resolve/main/{filename}",
-            "https://huggingface.co/{repo_id}/resolve/main/{filename}",
+            # Mirrors are accepted only when they serve the exact
+            # manifest-pinned bytes.
+            "https://hf-mirror.com/{repo_id}/resolve/{revision}/{filename}",
+            artifact.url,
         ]
 
         sources_to_try: List[str] = list(sources or default_sources)
@@ -437,9 +526,15 @@ class WhisperCppTranscriber:
         def _build_url(src: str) -> str:
             if "{" in src and "}" in src:
                 try:
-                    return src.format(repo_id=repo_id, filename=filename)
+                    return src.format(
+                        repo_id=repo_id,
+                        filename=filename,
+                        revision=artifact.source_revision,
+                    )
                 except Exception:
                     pass
+            if urllib.parse.urlparse(src).path.endswith(f"/{filename}"):
+                return src
             return src.rstrip("/") + "/" + filename
 
         def _download_url(url: str) -> None:
@@ -506,6 +601,10 @@ class WhisperCppTranscriber:
                     total = 0
                 if status == 206 and total > 0:
                     total += downloaded
+                if total > 0 and total != artifact.size:
+                    raise RuntimeError(
+                        "download size does not match the verified model manifest"
+                    )
 
                 # Sanity checks: protect against HTML error pages / wrong content.
                 ctype = ""
@@ -564,7 +663,14 @@ class WhisperCppTranscriber:
                 # If stat fails, treat as error.
                 raise
 
-            part_path.replace(dest_path)
+            try:
+                verify_model_file(part_path, artifact)
+            except Exception:
+                # A complete but invalid payload cannot be resumed from
+                # another mirror: its size would produce an EOF range.
+                part_path.unlink(missing_ok=True)
+                raise
+            os.replace(part_path, dest_path)
 
         part_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
@@ -589,7 +695,7 @@ class WhisperCppTranscriber:
             for src in sources_to_try:
                 url = _build_url(src)
                 parsed = urllib.parse.urlparse(url)
-                if parsed.scheme not in ("https", "http"):
+                if parsed.scheme != "https":
                     errors_by_url[url] = "unsupported scheme"
                     continue
 
@@ -598,6 +704,11 @@ class WhisperCppTranscriber:
                     logger.info(f"Скачивание {filename} из {url}...")
                     _download_url(url)
                     self.model_path = dest_path
+                    stat = dest_path.stat()
+                    self._verified_models[dest_path.resolve()] = (
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    )
                     logger.info(f"Модель успешно скачана: {self.model_path}")
                     return
                 except InterruptedError:
@@ -633,6 +744,19 @@ class WhisperCppTranscriber:
             f"Не удалось скачать модель {model_name}."
             f" partial={_part_size()} bytes. {err_summary}"
         )
+
+    def _verify_model_once(
+        self,
+        path: Path,
+        artifact: ModelArtifact,
+    ) -> None:
+        resolved = Path(path).resolve(strict=True)
+        stat = resolved.stat()
+        fingerprint = (stat.st_size, stat.st_mtime_ns)
+        if self._verified_models.get(resolved) == fingerprint:
+            return
+        verify_model_file(resolved, artifact)
+        self._verified_models[resolved] = fingerprint
 
     def download_model(
         self,
@@ -677,10 +801,26 @@ class WhisperCppTranscriber:
             return temp_path
         except Exception as e:
             logger.error(f"Ошибка конвертации аудио {audio_path}: {e}")
-            # Если не удалось, возвращаем оригинал и надеемся на лучшее
-            return audio_path
+            raise RuntimeError(
+                f"Не удалось преобразовать аудио в WAV для whisper-server: {e}"
+            ) from e
 
-    def transcribe(
+    @staticmethod
+    def _is_vad_ready_wav(audio_path: Path) -> bool:
+        """Inspect WAV encoding instead of trusting only its extension."""
+        if audio_path.suffix.lower() != ".wav":
+            return False
+        try:
+            with wave.open(str(audio_path), "rb") as source:
+                return (
+                    source.getframerate() in SUPPORTED_SAMPLE_RATES
+                    and source.getnchannels() == 1
+                    and source.getsampwidth() == 2
+                )
+        except (OSError, EOFError, ValueError, wave.Error):
+            return False
+
+    def _transcribe_cli_legacy(
         self,
         audio_path: Path,
         language: str = "auto",
@@ -700,6 +840,7 @@ class WhisperCppTranscriber:
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
 
+        process: Optional[subprocess.Popen] = None
         try:
             # VAD фильтрация перед вызовом бинарника
             if vad_filter:
@@ -737,6 +878,7 @@ class WhisperCppTranscriber:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
+            self._register_process(process)
 
             import threading
             def track_progress(pipe, callback):
@@ -803,6 +945,7 @@ class WhisperCppTranscriber:
                         return clean_stdout.strip(), language, 1.0
                 raise RuntimeError(f"Не удалось распарсить результат: {e}")
         finally:
+            self._release_process(process)
             # Очистка временного файла
             if is_temp_wav and working_audio_path.exists():
                 try:
@@ -810,7 +953,7 @@ class WhisperCppTranscriber:
                 except OSError:
                     pass
 
-    def transcribe_with_timestamps(
+    def _transcribe_with_timestamps_cli_legacy(
         self,
         audio_path: Path,
         language: str = "auto",
@@ -829,6 +972,7 @@ class WhisperCppTranscriber:
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
 
+        process: Optional[subprocess.Popen] = None
         try:
             # Генерируем уникальное имя для результата
             result_id = int(time.time())
@@ -848,6 +992,7 @@ class WhisperCppTranscriber:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
+            self._register_process(process)
 
             try:
                 # Timeout: 30 minutes max for transcription
@@ -928,13 +1073,14 @@ class WhisperCppTranscriber:
                 logger.error(f"JSON error: {e}")
                 raise RuntimeError(f"Ошибка парсинга JSON: {e}")
         finally:
+            self._release_process(process)
             if is_temp_wav and working_audio_path.exists():
                 try:
                     os.remove(working_audio_path)
                 except OSError:
                     pass
 
-    def transcribe_stream(
+    def _transcribe_stream_cli_legacy(
         self,
         audio_path: Path,
         language: str = "auto",
@@ -952,6 +1098,7 @@ class WhisperCppTranscriber:
             working_audio_path = self._convert_to_wav(audio_path)
             is_temp_wav = working_audio_path != audio_path
 
+        process: Optional[subprocess.Popen] = None
         try:
             # VAD фильтрация
             if vad_filter:
@@ -976,6 +1123,7 @@ class WhisperCppTranscriber:
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
+            self._register_process(process)
 
             full_text = ""
             for line_bytes in process.stdout:
@@ -993,11 +1141,268 @@ class WhisperCppTranscriber:
                 process.wait()
                 logger.error("Транскрипция прервана: превышено время ожидания")
         finally:
+            self._release_process(process)
             if is_temp_wav and working_audio_path.exists():
                 try:
                     os.remove(working_audio_path)
                 except OSError:
                     pass
+
+    def _server_config(self) -> WhisperServerConfig:
+        if not self.model_path or not self.model_path.exists():
+            raise RuntimeError(f"Модель не найдена: {self.model_path}")
+        return WhisperServerConfig(
+            server_path=self.server_path,
+            model_path=self.model_path,
+            threads=self.threads,
+            use_gpu=self.device != "cpu" and self.gpu_backend != "cpu",
+        )
+
+    def _server_inference(
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        beam_size: int,
+        word_timestamps: bool,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> Dict[str, Any]:
+        is_temp_wav = False
+        working_audio_path = audio_path
+        if audio_path.suffix.lower() != ".wav":
+            working_audio_path = self._convert_to_wav(audio_path)
+            is_temp_wav = working_audio_path != audio_path
+        try:
+            if progress_callback:
+                progress_callback("transcribing", 0, 100)
+            result = self._server_runtime.infer(
+                self._server_config(),
+                working_audio_path,
+                language=language,
+                beam_size=beam_size,
+                word_timestamps=word_timestamps,
+            )
+            if progress_callback:
+                progress_callback("transcribing", 100, 100)
+            return result
+        finally:
+            if is_temp_wav and working_audio_path.exists():
+                try:
+                    working_audio_path.unlink()
+                except OSError:
+                    pass
+
+    def _server_inference_regions(
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        beam_size: int,
+        word_timestamps: bool,
+        vad_filter: bool,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> List[Tuple[int, Dict[str, Any]]]:
+        if not vad_filter:
+            return [
+                (
+                    0,
+                    self._server_inference(
+                        audio_path,
+                        language=language,
+                        beam_size=beam_size,
+                        word_timestamps=word_timestamps,
+                        progress_callback=progress_callback,
+                    ),
+                )
+            ]
+
+        import tempfile
+
+        is_temp_wav = False
+        working_audio_path = audio_path
+        if not self._is_vad_ready_wav(audio_path):
+            working_audio_path = self._convert_to_wav(audio_path)
+            is_temp_wav = working_audio_path != audio_path
+        try:
+            segmenter = WebRtcVadSegmenter()
+            cancel_event = getattr(self, "_cancel_requested", None)
+            regions = segmenter.regions(
+                working_audio_path,
+                cancel_requested=(
+                    cancel_event.is_set if cancel_event is not None else None
+                ),
+            )
+            if not regions:
+                if progress_callback:
+                    progress_callback("transcribing", 100, 100)
+                return []
+            results: List[Tuple[int, Dict[str, Any]]] = []
+            with tempfile.TemporaryDirectory(prefix="mindtype-vad-") as temp_dir:
+                region_path = Path(temp_dir) / "region.wav"
+                for index, region in enumerate(regions):
+                    if progress_callback:
+                        progress_callback(
+                            "transcribing",
+                            int(index * 100 / len(regions)),
+                            100,
+                        )
+                    segmenter.write_region(
+                        working_audio_path, region_path, region
+                    )
+                    data = self._server_runtime.infer(
+                        self._server_config(),
+                        region_path,
+                        language=language,
+                        beam_size=beam_size,
+                        word_timestamps=word_timestamps,
+                    )
+                    results.append((region.start_ms, data))
+            if progress_callback:
+                progress_callback("transcribing", 100, 100)
+            return results
+        finally:
+            if is_temp_wav and working_audio_path.exists():
+                try:
+                    working_audio_path.unlink()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _result_probability(data: Dict[str, Any]) -> float:
+        language_probability = data.get("language_probability")
+        if isinstance(language_probability, (int, float)):
+            return min(1.0, max(0.0, float(language_probability)))
+        probabilities: List[float] = []
+        for segment in data.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            for word in segment.get("words", []) or []:
+                if not isinstance(word, dict):
+                    continue
+                probability = word.get("probability")
+                if isinstance(probability, (int, float)):
+                    probabilities.append(min(1.0, max(0.0, float(probability))))
+        if probabilities:
+            return sum(probabilities) / len(probabilities)
+        return 1.0
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        language: str = "auto",
+        beam_size: int = 5,
+        vad_filter: bool = False,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> Tuple[str, Optional[str], float]:
+        """Transcribe through the persistent local whisper-server."""
+        results = self._server_inference_regions(
+            audio_path,
+            language=language,
+            beam_size=beam_size,
+            word_timestamps=False,
+            vad_filter=vad_filter,
+            progress_callback=progress_callback,
+        )
+        if not results:
+            return "", None if language == "auto" else language, 1.0
+        detected_language = next(
+            (
+                data.get("language")
+                for _offset, data in results
+                if isinstance(data.get("language"), str)
+                and data.get("language")
+            ),
+            None,
+        )
+        if not isinstance(detected_language, str) or not detected_language:
+            detected_language = None if language == "auto" else language
+        return (
+            " ".join(
+                str(data["text"]).strip()
+                for _offset, data in results
+                if str(data["text"]).strip()
+            ),
+            detected_language,
+            sum(self._result_probability(data) for _offset, data in results)
+            / len(results),
+        )
+
+    def transcribe_with_timestamps(
+        self,
+        audio_path: Path,
+        language: str = "auto",
+        beam_size: int = 5,
+        vad_filter: bool = False,
+        word_timestamps: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str], float]:
+        """Return validated server segments without replacing their raw text."""
+        results = self._server_inference_regions(
+            audio_path,
+            language=language,
+            beam_size=beam_size,
+            word_timestamps=word_timestamps,
+            vad_filter=vad_filter,
+        )
+        segments: List[Dict[str, Any]] = []
+        for offset_ms, data in results:
+            offset_s = offset_ms / 1000.0
+            for source in data["segments"]:
+                start_s, end_s = self._extract_segment_times(source)
+                segment: Dict[str, Any] = {
+                    "start": offset_s + start_s,
+                    "end": offset_s + end_s,
+                    "text": str(source.get("text", "")).strip(),
+                }
+                if word_timestamps and isinstance(source.get("words"), list):
+                    words = []
+                    for source_word in source["words"]:
+                        if not isinstance(source_word, dict):
+                            continue
+                        word = dict(source_word)
+                        for key in ("start", "end"):
+                            value = word.get(key)
+                            if isinstance(value, (int, float)):
+                                word[key] = offset_s + float(value)
+                        words.append(word)
+                    segment["words"] = words
+                segments.append(segment)
+        detected_language = next(
+            (
+                data.get("language")
+                for _offset, data in results
+                if isinstance(data.get("language"), str)
+                and data.get("language")
+            ),
+            None,
+        )
+        if not isinstance(detected_language, str) or not detected_language:
+            detected_language = None if language == "auto" else language
+        confidence = (
+            sum(self._result_probability(data) for _offset, data in results)
+            / len(results)
+            if results
+            else 1.0
+        )
+        return segments, detected_language, confidence
+
+    def transcribe_stream(
+        self,
+        audio_path: Path,
+        language: str = "auto",
+        beam_size: int = 5,
+        vad_filter: bool = False,
+    ) -> Iterable[Tuple[str, Optional[str], float]]:
+        """Compatibility iterator that emits only the final server result."""
+        yield self.transcribe(
+            audio_path,
+            language=language,
+            beam_size=beam_size,
+            vad_filter=vad_filter,
+        )
+
+    def shutdown(self) -> None:
+        """Release the persistent native server during application shutdown."""
+        self._server_runtime.cancel()
 
     def _build_cmd(self, audio_path: Path, language: str, beam_size: int, vad_filter: bool) -> List[str]:
         """Собрать команду для запуска."""
@@ -1019,9 +1424,5 @@ class WhisperCppTranscriber:
         elif self.gpu_backend == "vulkan":
             # Для Vulkan можно явно указать устройство, если нужно
             pass
-        elif self.gpu_backend == "directml" and sys.platform == "win32":
-            # На Windows DirectML используется по умолчанию в соответствующих сборках
-            pass
-
         cmd.append("-np") # Не печатать лог в stdout
         return cmd

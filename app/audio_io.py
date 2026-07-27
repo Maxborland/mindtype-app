@@ -23,9 +23,42 @@ def load_16k_mono(audio_path: Union[str, Path]) -> Tuple["np.ndarray", int]:
 
 
 def to_wav_16k_mono(audio_path: Union[str, Path], out_path: Union[str, Path]) -> Path:
-    """Сконвертировать аудио в WAV 16 кГц моно 16-bit PCM по пути out_path."""
+    """Сконвертировать поддерживаемое soundfile-аудио в PCM16 WAV.
+
+    This path is part of the lightweight base runtime, so it deliberately does
+    not depend on the optional librosa/numba diarization pack.
+    """
     import soundfile as sf
 
-    data, _ = load_16k_mono(audio_path)
-    sf.write(str(out_path), data, SAMPLE_RATE, subtype="PCM_16")
+    data, source_rate = sf.read(
+        str(audio_path),
+        dtype="float32",
+        always_2d=True,
+    )
+    if source_rate <= 0:
+        raise ValueError("source sample rate must be positive")
+    mono = data.mean(axis=1, dtype=np.float32)
+    if source_rate != SAMPLE_RATE and mono.size:
+        target_frames = max(
+            1,
+            round(mono.size * SAMPLE_RATE / source_rate),
+        )
+        source_positions = np.arange(mono.size, dtype=np.float64)
+        target_positions = (
+            np.arange(target_frames, dtype=np.float64)
+            * source_rate
+            / SAMPLE_RATE
+        )
+        mono = np.interp(
+            target_positions,
+            source_positions,
+            mono,
+        ).astype(np.float32)
+    sf.write(
+        str(out_path),
+        mono,
+        SAMPLE_RATE,
+        subtype="PCM_16",
+        format="WAV",
+    )
     return Path(out_path)

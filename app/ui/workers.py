@@ -4,9 +4,10 @@
 Все QThread классы для асинхронных операций.
 """
 
+import json
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING, Mapping
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -55,6 +56,12 @@ class TranscribeWorker(QThread):
     def cancel(self) -> None:
         """Отменить транскрипцию."""
         self._cancelled = True
+        cancel_current = getattr(self.transcriber, "cancel_current", None)
+        if callable(cancel_current):
+            try:
+                cancel_current()
+            except Exception:
+                pass
 
     def is_cancelled(self) -> bool:
         """Проверить, отменена ли транскрипция."""
@@ -71,6 +78,10 @@ class TranscribeWorker(QThread):
             if self._cancelled:
                 self.cancelled.emit()
                 return
+
+            prepare_operation = getattr(self.transcriber, "prepare_operation", None)
+            if callable(prepare_operation):
+                prepare_operation()
 
             self.status_update.emit("loading_model")
             self.transcriber.load_model(
@@ -101,6 +112,9 @@ class TranscribeWorker(QThread):
                 detected_lang = lang or ""
                 detected_prob = prob
                 self.progress.emit(partial, detected_lang, prob)
+            if self._cancelled:
+                self.cancelled.emit()
+                return
             self.finished.emit(last_text, detected_lang, detected_prob, "")
         except Exception as exc:
             if self._cancelled:
@@ -108,6 +122,166 @@ class TranscribeWorker(QThread):
                 return
             err = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             self.finished.emit(last_text, detected_lang, detected_prob, err)
+
+
+class CloudDictationWorker(QThread):
+    """Poll one durable cloud dictation without loading a local model."""
+
+    progress = pyqtSignal(str, str, float)
+    status_update = pyqtSignal(str)
+    finished = pyqtSignal(str, str, float, str)
+    cancelled = pyqtSignal()
+    cancellation_pending = pyqtSignal(str)
+
+    def __init__(
+        self,
+        executor,
+        operation_id: str,
+        *,
+        options: Mapping[str, object],
+        poll_interval_ms: int = 1_000,
+    ) -> None:
+        super().__init__()
+        self.executor = executor
+        self.operation_id = operation_id
+        self.options = dict(options)
+        self.poll_interval_ms = max(0, int(poll_interval_ms))
+        self._cancelled = False
+        self._shutdown_requested = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def stop_for_shutdown(self) -> None:
+        """Stop polling without changing the durable server job."""
+        self._shutdown_requested = True
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def run(self) -> None:
+        from ..operation_models import OperationStage, OperationStatus
+
+        try:
+            while True:
+                if self._shutdown_requested:
+                    return
+                if self._cancelled:
+                    operation = self.executor.cancel(self.operation_id)
+                    if operation.status is OperationStatus.CANCELLED:
+                        self.cancelled.emit()
+                    else:
+                        self.cancellation_pending.emit(
+                            "server cancellation is still pending"
+                        )
+                    return
+                operation = self.executor.advance_transcription(
+                    self.operation_id,
+                    options=self.options,
+                )
+                if self._shutdown_requested:
+                    return
+                if operation.status is OperationStatus.COMPLETED:
+                    result_path = operation.canonical_result_path
+                    if result_path is None or not result_path.is_file():
+                        raise RuntimeError(
+                            "Cloud dictation completed without a local result"
+                        )
+                    payload = json.loads(
+                        result_path.read_text(encoding="utf-8")
+                    )
+                    transcript = payload["transcript"]
+                    text = " ".join(
+                        str(segment.get("text") or "").strip()
+                        for segment in transcript["segments"]
+                        if str(segment.get("text") or "").strip()
+                    )
+                    confidence = transcript.get("confidence")
+                    self.finished.emit(
+                        text,
+                        str(transcript.get("language") or "und"),
+                        (
+                            float(confidence)
+                            if confidence is not None
+                            else 0.0
+                        ),
+                        "",
+                    )
+                    return
+                if operation.status is OperationStatus.CANCELLED:
+                    self.cancelled.emit()
+                    return
+                if operation.status in {
+                    OperationStatus.FAILED,
+                    OperationStatus.RETRYABLE,
+                }:
+                    self.finished.emit(
+                        "",
+                        "",
+                        0.0,
+                        operation.last_error_code
+                        or "CLOUD_TRANSCRIPTION_FAILED",
+                    )
+                    return
+                self.status_update.emit(
+                    "summarizing"
+                    if operation.stage is OperationStage.SUMMARIZE
+                    else "transcribing"
+                )
+                self.msleep(self.poll_interval_ms)
+        except Exception as error:
+            if self._cancelled:
+                self.cancellation_pending.emit(str(error))
+            else:
+                self.finished.emit("", "", 0.0, str(error))
+
+
+class CloudCancellationWorker(QThread):
+    """Retry one durable remote cancellation outside the GUI thread."""
+
+    resolved = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, executor, operation_id: str) -> None:
+        super().__init__()
+        self.executor = executor
+        self.operation_id = operation_id
+
+    def run(self) -> None:
+        try:
+            operation = self.executor.cancel(self.operation_id)
+            from ..operation_models import OperationStatus
+
+            if operation.status is not OperationStatus.CANCELLED:
+                raise RuntimeError(
+                    "cloud cancellation was not confirmed"
+                )
+            self.resolved.emit(self.operation_id)
+        except Exception as error:
+            self.failed.emit(self.operation_id, str(error))
+
+
+class OperationAcknowledgementWorker(QThread):
+    """Acknowledge one durable result without blocking the GUI thread."""
+
+    resolved = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
+
+    def __init__(
+        self,
+        operation_id: str,
+        acknowledge: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self.operation_id = operation_id
+        self.acknowledge = acknowledge
+
+    def run(self) -> None:
+        try:
+            self.acknowledge()
+            self.resolved.emit(self.operation_id)
+        except Exception as error:
+            self.failed.emit(self.operation_id, str(error))
 
 
 class ModelDownloadWorker(QThread):
@@ -195,12 +369,15 @@ class FileTranscriptionWorker(QThread):
         output_dir: Path,
         output_format: str,
         ui_language: str,
+        *,
+        generate_reports: bool = True,
     ):
         super().__init__()
         self.queue = queue
         self.output_dir = output_dir
         self.output_format = output_format
         self.ui_language = ui_language
+        self.generate_reports = generate_reports
 
         # Импортируем здесь чтобы избежать circular imports
         from ..report_generator import ReportGenerator
@@ -216,23 +393,44 @@ class FileTranscriptionWorker(QThread):
 
         def on_completed(task):
             # Генерируем отчёт если успешно
-            if task.status == FileStatus.COMPLETED and task.result:
+            if (
+                self.generate_reports
+                and task.status == FileStatus.COMPLETED
+                and task.result
+            ):
+                if getattr(self.queue, "cancel_requested", False):
+                    task.status = FileStatus.CANCELLED
+                    task.progress = 0
+                    self.task_completed.emit(task)
+                    return
                 try:
                     task.status = FileStatus.GENERATING
                     task.progress = 95
                     self.task_progress.emit(task)
 
-                    self._report_generator.generate(
+                    created_files = self._report_generator.generate(
                         task.result,
                         self.output_dir,
                         self.output_format,
                     )
 
-                    task.status = FileStatus.COMPLETED
-                    task.progress = 100
+                    if getattr(self.queue, "cancel_requested", False):
+                        for path in created_files.values():
+                            path.unlink(missing_ok=True)
+                        task.output_files = {}
+                        task.status = FileStatus.CANCELLED
+                        task.progress = 0
+                    else:
+                        task.output_files = created_files
+                        task.status = FileStatus.COMPLETED
+                        task.progress = 100
                 except Exception as e:
-                    task.status = FileStatus.ERROR
-                    task.error_message = str(e)
+                    if getattr(self.queue, "cancel_requested", False):
+                        task.status = FileStatus.CANCELLED
+                        task.progress = 0
+                    else:
+                        task.status = FileStatus.ERROR
+                        task.error_message = str(e)
 
             self.task_completed.emit(task)
 
@@ -247,4 +445,3 @@ class FileTranscriptionWorker(QThread):
             self.msleep(100)
 
         self.all_completed.emit()
-

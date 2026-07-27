@@ -2,7 +2,7 @@
 
 # MindType
 
-**Voice-to-text with AI-powered summaries. Works offline.**
+**Voice-to-text with cloud or local processing — you choose the data route.**
 
 ![MindType Screenshot](assets/screenshot.png)
 
@@ -29,7 +29,7 @@ Additional screenshots:
 | **Voice Transcription** | Speak naturally, get accurate text. Supports 100+ languages. |
 | **AI Summaries** | Auto-generate meeting notes, study guides, lecture summaries. Supports multiple LLM providers. |
 | **File Processing** | Transcribe audio/video files (MP3, WAV, MP4, MKV, etc). |
-| **100% Offline** | Your voice data never leaves your computer. |
+| **Hybrid processing** | Use OpenRouter or other cloud providers on a laptop, or install local models for offline work. |
 | **Export Options** | Save transcripts and summaries as PDF or HTML. |
 | **Fast** | Powered by Whisper with GPU acceleration support. |
 
@@ -77,7 +77,30 @@ MindType can automatically generate structured summaries from your transcription
 - **Ollama** (local models - Llama, Mistral, etc.)
 - **OpenRouter** (access to 100+ models)
 
-Use cloud providers for best quality, or run completely offline with Ollama.
+For most laptops, cloud summarization is the recommended route: it avoids
+downloading and running a large local LLM. Local Ollama remains an explicit
+offline option for users whose hardware and privacy requirements justify it.
+
+### Data routes and privacy
+
+MindType does not claim that every workflow is offline. The route depends on
+the options selected by the user:
+
+- local Whisper/whisper.cpp keeps transcription audio on the computer;
+- OpenRouter transcription sends audio to OpenRouter and its selected upstream
+  provider;
+- MindType Cloud or another cloud LLM receives the transcript when selected for
+  summarization;
+- Ollama keeps summarization local;
+- crash reports are saved locally and are sent only after the user checks the
+  send option in the crash dialog.
+
+Cloud providers have their own retention and processing terms. OpenRouter
+requests made by MindType ask providers not to retain inputs for training via
+`provider.data_collection = deny`, but this is not a substitute for reviewing
+the provider's current policy. A fully local route requires both a local
+transcription backend and Ollama, and may be slow or inaccurate on a typical
+laptop.
 
 ## Building from Source
 
@@ -124,7 +147,9 @@ python main.py
 
 ## Pro Version
 
-MindType offers a 7-day free trial with full features. After the trial, purchase a Pro license ($29 one-time) to continue using all features.
+MindType offers a 7-day free trial. Desktop licensing and usage-based cloud
+processing are separate cost categories; current commercial terms are shown on
+the official website.
 
 **[Get Pro License](https://mindtype.space)**
 

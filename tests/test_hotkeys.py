@@ -12,46 +12,31 @@ from unittest.mock import MagicMock, patch
 class TestIsAdmin:
     """Тесты функции is_admin."""
 
-    @patch.object(sys, 'platform', 'win32')
     def test_is_admin_windows_admin(self):
         """На Windows с правами админа возвращает True."""
-        with patch('ctypes.windll.shell32.IsUserAnAdmin', return_value=1):
-            # Переимпортируем модуль для применения patch
-            import importlib
-            from app import hotkeys
-            importlib.reload(hotkeys)
+        from app import hotkeys
 
-            # Мокаем ctypes для теста
-            with patch('app.hotkeys.ctypes') as mock_ctypes:
-                mock_ctypes.windll.shell32.IsUserAnAdmin.return_value = 1
+        mock_ctypes = MagicMock()
+        mock_ctypes.windll.shell32.IsUserAnAdmin.return_value = 1
+        with patch.object(hotkeys.sys, "platform", "win32"):
+            with patch.dict(sys.modules, {"ctypes": mock_ctypes}):
+                assert hotkeys.is_admin() is True
 
-                # Вызываем функцию напрямую
-                result = hotkeys.is_admin()
-                # Т.к. мы на Windows, результат зависит от реального состояния
-                assert isinstance(result, bool)
-
-    @patch.object(sys, 'platform', 'linux')
     def test_is_admin_linux_root(self):
         """На Linux с uid=0 возвращает True."""
-        with patch('os.getuid', return_value=0):
-            import importlib
-            from app import hotkeys
+        from app import hotkeys
 
-            with patch('os.getuid', return_value=0):
-                result = hotkeys.is_admin()
-                # На текущей системе это может не работать из-за platform check
-                assert isinstance(result, bool)
+        with patch.object(hotkeys.sys, "platform", "linux"):
+            with patch("os.getuid", return_value=0, create=True):
+                assert hotkeys.is_admin() is True
 
-    @patch.object(sys, 'platform', 'linux')
     def test_is_admin_linux_not_root(self):
         """На Linux с uid!=0 возвращает False."""
-        with patch('os.getuid', return_value=1000):
-            import importlib
-            from app import hotkeys
+        from app import hotkeys
 
-            with patch('os.getuid', return_value=1000):
-                result = hotkeys.is_admin()
-                assert isinstance(result, bool)
+        with patch.object(hotkeys.sys, "platform", "linux"):
+            with patch("os.getuid", return_value=1000, create=True):
+                assert hotkeys.is_admin() is False
 
 
 class TestBaseHotkeyListener:
@@ -253,4 +238,3 @@ class TestHotkeyModuleExports:
         """Модуль экспортирует is_admin."""
         from app.hotkeys import is_admin
         assert callable(is_admin)
-

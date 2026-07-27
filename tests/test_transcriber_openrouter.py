@@ -128,6 +128,7 @@ class TestTranscribeAudio:
         assert data["model"] == "openai/whisper-1"
         assert data["input_audio"] == {"data": "BASE64", "format": "wav"}
         assert data["language"] == "ru"
+        assert data["provider"] == {"data_collection": "deny"}
         assert kwargs.get("retries") == 3  # transient 520/502 повторяются
 
     def test_auto_language_omitted(self):

@@ -1,0 +1,291 @@
+"""Static release-contract checks that run without GitHub credentials."""
+
+import re
+from pathlib import Path
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOWS = ROOT / ".github" / "workflows"
+CANONICAL = WORKFLOWS / "build-release.yml"
+
+
+def test_one_workflow_owns_version_tag_releases():
+    tag_owners = []
+    for workflow in WORKFLOWS.glob("*.yml"):
+        text = workflow.read_text(encoding="utf-8")
+        if re.search(r"tags:\s*\n\s*-\s*['\"]v\\?\\?\\*|tags:\s*\n\s*-\s*['\"]v\\?\\*",
+                     text):
+            tag_owners.append(workflow.name)
+
+    assert tag_owners == ["build-release.yml"]
+
+
+def test_actions_are_pinned_to_commit_shas():
+    text = CANONICAL.read_text(encoding="utf-8")
+    action_refs = re.findall(r"uses:\s*([^\s#]+)", text)
+
+    assert action_refs
+    assert all(re.search(r"@[0-9a-f]{40}$", ref) for ref in action_refs)
+
+
+def test_release_runs_tests_and_uses_existing_build_spec():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+    build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert "python -m ruff check app tests --select F821,F601" in workflow
+    assert "python -m pytest -q" in workflow
+    assert "build_windows.ps1" in workflow
+    assert 'Join-Path $RootDir "mindtype.spec"' in build_script
+    assert (ROOT / "mindtype.spec").is_file()
+
+
+def test_release_smoke_tests_the_frozen_application_before_signing():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    build_position = workflow.index("- name: Build application")
+    signing_position = workflow.index(
+        "- name: Require signing secrets for tag releases"
+    )
+    frozen_smoke_position = workflow.index(
+        'dist\\MindType\\MindType.exe" --smoke-test'
+    )
+
+    assert build_position < frozen_smoke_position < signing_position
+
+
+def test_tag_release_requires_signing_and_publishes_checksum():
+    text = CANONICAL.read_text(encoding="utf-8")
+
+    assert "WINDOWS_SIGNING_CERT_BASE64" in text
+    assert "Get-AuthenticodeSignature" in text
+    assert "Get-FileHash" in text
+    assert ".sha256" in text
+    assert "$Signature.SignerCertificate.Subject" in text
+    assert "$ActualSigner -cne $ExpectedSigner" in text
+
+
+def test_tag_release_requires_embedded_entitlement_trust_root():
+    text = CANONICAL.read_text(encoding="utf-8")
+
+    assert "vars.MINDTYPE_LICENSE_PUBLIC_KEY" in text
+    assert 'throw "Tagged releases require MINDTYPE_LICENSE_PUBLIC_KEY"' in text
+    assert "scripts/embed_release_trust_root.py --check" in text
+
+
+def test_tag_release_requires_update_trust_root_and_signer_identity():
+    text = CANONICAL.read_text(encoding="utf-8")
+
+    assert "vars.MINDTYPE_UPDATE_PUBLIC_KEY" in text
+    assert "vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER" in text
+    assert 'throw "Tagged releases require MINDTYPE_UPDATE_PUBLIC_KEY"' in text
+    assert (
+        'throw "Tagged releases require '
+        'MINDTYPE_UPDATE_AUTHENTICODE_SIGNER"'
+    ) in text
+
+
+def test_uninstall_preserves_user_data():
+    installer = (ROOT / "installer" / "windows.iss").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[UninstallDelete]" not in installer
+    assert "{userappdata}" not in installer
+    assert "{localappdata}" not in installer
+
+
+def test_installer_stops_persistent_whisper_server():
+    installer = (ROOT / "installer" / "windows.iss").read_text(
+        encoding="utf-8"
+    )
+
+    assert '#define WhisperServerExeName "whisper-server.exe"' in installer
+    assert (
+        'Parameters: "/F /IM {#WhisperServerExeName}"'
+        in installer
+    )
+    assert (
+        "Exec('taskkill', '/IM {#WhisperServerExeName}'"
+        in installer
+    )
+    assert (
+        "Exec('taskkill', '/F /IM {#WhisperServerExeName}'"
+        in installer
+    )
+
+
+def test_onnx_dependencies_use_a_compatible_transformers_range():
+    base = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    onnx = (ROOT / "requirements-local-onnx.txt").read_text(encoding="utf-8")
+    assistant = (ROOT / "requirements-assistant.txt").read_text(encoding="utf-8")
+
+    assert "transformers" not in base
+    assert "optimum" not in base
+    assert "onnxruntime" not in base
+    assert "openwakeword" not in base
+    assert "soundcard" in base
+    assert "webrtcvad-wheels" in base
+    assert "transformers>=4.56.0,<4.58.0" in onnx
+    assert "optimum[onnxruntime]>=2.1.0,<2.3.0" in onnx
+    assert "openwakeword>=0.6.0" in assistant
+
+
+def test_dependency_inputs_are_split_by_installable_capability():
+    requirements = ROOT / "requirements"
+    base = (requirements / "base.in").read_text(encoding="utf-8")
+    development = (requirements / "dev.in").read_text(encoding="utf-8")
+    onnx = (requirements / "local-onnx.in").read_text(encoding="utf-8")
+    diarization = (
+        requirements / "local-diarization.in"
+    ).read_text(encoding="utf-8")
+    assistant = (requirements / "assistant.in").read_text(encoding="utf-8")
+
+    assert "PyQt6" in base
+    assert "cryptography" in base
+    assert "pytest" not in base
+    assert "pytest" in development
+    assert "pyinstaller" in development.lower()
+    assert "transformers" in onnx
+    assert "onnxruntime" in onnx
+    assert "librosa" in diarization
+    assert "scikit-learn" in diarization
+    assert "openwakeword" in assistant
+    for optional in [
+        "torch",
+        "transformers",
+        "optimum",
+        "onnxruntime",
+        "librosa",
+        "scikit-learn",
+    ]:
+        assert optional not in base.lower()
+
+
+def test_dependency_locks_are_exact_hashed_and_keep_optional_ml_out_of_base():
+    requirements = ROOT / "requirements"
+    lock_names = [
+        "base.lock",
+        "dev.lock",
+        "local-onnx.lock",
+        "local-diarization.lock",
+        "assistant.lock",
+    ]
+
+    for lock_name in lock_names:
+        lock = (requirements / lock_name).read_text(encoding="utf-8")
+        assert "# WARNING" not in lock
+        assert "==" in lock
+        assert "--hash=sha256:" in lock
+
+    base = (requirements / "base.lock").read_text(encoding="utf-8").lower()
+    for optional in [
+        "torch==",
+        "transformers==",
+        "optimum==",
+        "onnxruntime==",
+        "librosa==",
+        "scikit-learn==",
+        "scipy==",
+        "numba==",
+    ]:
+        assert optional not in base
+
+
+def test_release_installs_hashed_locks_and_publishes_validated_sbom():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    assert "--require-hashes" in workflow
+    assert "-r requirements/base.lock" in workflow
+    assert "-r requirements/dev.lock" in workflow
+    assert "-r requirements/local-diarization.lock" in workflow
+    assert "pip install -r requirements.txt" not in workflow
+    assert "python -m cyclonedx_py requirements" in workflow
+    assert "--validate" in workflow
+    assert ".cdx.json" in workflow
+    assert "requirements/*.in" in workflow
+    assert "requirements/*.lock" in workflow
+
+
+def test_release_verifies_and_publishes_native_artifact_manifests():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    assert "scripts/verify_artifact_manifests.py" in workflow
+    assert "--release" in workflow
+    assert "manifests/*.json" in workflow
+
+
+def test_base_pyinstaller_excludes_optional_ml_runtimes():
+    spec = (ROOT / "mindtype.spec").read_text(encoding="utf-8")
+
+    for module in [
+        "torch",
+        "transformers",
+        "optimum",
+        "onnxruntime",
+        "openwakeword",
+        "librosa",
+        "sklearn",
+        "scipy",
+        "numba",
+        "llvmlite",
+    ]:
+        assert f'"{module}"' in spec
+
+    assert 'GetModule("UIAutomationCore.dll")' in spec
+    assert '"comtypes.gen.UIAutomationClient"' in spec
+    assert '"webrtcvad"' in spec
+    assert '"_webrtcvad"' in spec
+    assert 'ROOT / "hooks"' in spec
+    assert (ROOT / "hooks" / "hook-webrtcvad.py").is_file()
+    assert '"app" / "assets"' not in spec
+
+
+def test_local_windows_build_never_installs_an_unpinned_builder():
+    build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert "pip install pyinstaller" not in build_script.lower()
+    assert "requirements\\base.lock" in build_script
+    assert "requirements\\dev.lock" in build_script
+    assert "--require-hashes" in build_script
+    assert "3.11" in build_script
+
+
+def test_local_windows_build_isolates_dependencies_from_base_python():
+    build_script = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert '".venv-build"' in build_script
+    assert "-m venv" in build_script
+    assert "sys.prefix != sys.base_prefix" in build_script
+    assert "$BuildPythonExe -m pip install --require-hashes" in build_script
+
+
+def test_tag_release_requires_and_publishes_signed_update_manifest():
+    workflow = CANONICAL.read_text(encoding="utf-8")
+
+    assert "MINDTYPE_UPDATE_PRIVATE_KEY" in workflow
+    assert "scripts/create_update_manifest.py" in workflow
+    assert 'dist\\MindType-update-manifest.json' in workflow
+    assert "--rollout-percentage 10" in workflow
+
+
+def test_base_desktop_import_does_not_load_assistant_model_runtimes():
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import app.main, sys;"
+                "assert 'openwakeword' not in sys.modules;"
+                "assert 'onnxruntime' not in sys.modules"
+            ),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert process.returncode == 0, process.stderr

@@ -9,11 +9,72 @@
 
 import json
 import sys
+import base64
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
 import urllib.error
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+
+UPDATE_SIGNER = "CN=MindType"
+
+
+def signed_update_payload(
+    version="1.2.0",
+    release_notes="New features",
+    minimum_supported_version="0.9.0",
+    rollout_percentage=100,
+):
+    private_key = Ed25519PrivateKey.generate()
+    public = private_key.public_key().public_bytes(
+        Encoding.Raw,
+        PublicFormat.Raw,
+    )
+    public_text = base64.urlsafe_b64encode(public).rstrip(b"=").decode("ascii")
+    manifest = {
+        "schema_version": "1.0",
+        "channel": "stable",
+        "version": version,
+        "platform": "windows",
+        "architecture": "x86_64",
+        "minimum_supported_version": minimum_supported_version,
+        "url": (
+            f"https://releases.mindtype.space/"
+            f"MindType-{version}-Setup.exe"
+        ),
+        "sha256": "a" * 64,
+        "size": 53_000_000,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "rollout_percentage": rollout_percentage,
+        "authenticode_signer": UPDATE_SIGNER,
+        "release_notes": release_notes,
+    }
+    canonical = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        private_key.sign(canonical)
+    ).rstrip(b"=").decode("ascii")
+    return {"manifest": manifest, "signature": signature}, public_text
+
+
+def trusted_updater(**kwargs):
+    from app.updater import Updater
+
+    _payload, public_key = signed_update_payload()
+    return Updater(
+        update_public_key=public_key,
+        expected_signer=UPDATE_SIGNER,
+        rollout_device_id="test-device",
+        **kwargs,
+    )
 
 
 class TestUpdaterVersionComparison:
@@ -65,14 +126,17 @@ class TestUpdaterCheckForUpdates:
 
         mock_response = MagicMock()
         mock_response.status = 200
-        mock_response.read.return_value = json.dumps({
-            "version": "1.2.0",
-            "release_notes": "New features"
-        }).encode('utf-8')
+        payload, public_key = signed_update_payload()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        updater = Updater(current_version="1.0.0")
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
 
         with patch('urllib.request.urlopen', return_value=mock_response):
             info = updater.check_for_updates()
@@ -81,46 +145,36 @@ class TestUpdaterCheckForUpdates:
         assert info.version == "1.2.0"
         assert info.error is None
 
-    def test_check_updates_fallback_on_primary_failure(self):
-        """Fallback на GitHub при недоступности основного сервера."""
+    def test_check_updates_does_not_fall_back_to_untrusted_source(self):
+        """A network failure must not downgrade to stale unsigned metadata."""
         from app.updater import Updater
 
         call_count = [0]
+        _, public_key = signed_update_payload(version="1.1.0")
 
         def mock_urlopen(request, timeout=None):
             call_count[0] += 1
-            url = request.full_url if hasattr(request, 'full_url') else str(request)
+            raise urllib.error.URLError("Connection refused")
 
-            # Первый вызов (primary) - ошибка
-            if call_count[0] == 1:
-                raise urllib.error.URLError("Connection refused")
-
-            # Второй вызов (fallback) - успех
-            mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.read.return_value = json.dumps({
-                "version": "1.1.0",
-                "release_notes": "Fallback release"
-            }).encode('utf-8')
-            mock_response.__enter__ = MagicMock(return_value=mock_response)
-            mock_response.__exit__ = MagicMock(return_value=False)
-            return mock_response
-
-        updater = Updater(current_version="1.0.0")
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
 
         with patch('urllib.request.urlopen', side_effect=mock_urlopen):
             info = updater.check_for_updates()
 
-        assert call_count[0] == 2  # Оба URL были опробованы
-        assert info.available is True
-        assert info.version == "1.1.0"
-        assert info.error is None
+        assert call_count[0] == 1
+        assert info.available is False
+        assert "Connection refused" in (info.error or "")
 
     def test_check_updates_all_sources_fail(self):
         """Ошибка когда все источники недоступны."""
         from app.updater import Updater
 
-        updater = Updater(current_version="1.0.0")
+        updater = trusted_updater(current_version="1.0.0")
 
         with patch('urllib.request.urlopen') as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError("Network error")
@@ -136,14 +190,20 @@ class TestUpdaterCheckForUpdates:
 
         mock_response = MagicMock()
         mock_response.status = 200
-        mock_response.read.return_value = json.dumps({
-            "version": "1.0.0",
-            "release_notes": "Current version"
-        }).encode('utf-8')
+        payload, public_key = signed_update_payload(
+            version="1.0.0",
+            release_notes="Current version",
+        )
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        updater = Updater(current_version="1.0.0")
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
 
         with patch('urllib.request.urlopen', return_value=mock_response):
             info = updater.check_for_updates()
@@ -152,67 +212,320 @@ class TestUpdaterCheckForUpdates:
         assert info.version == "1.0.0"
         assert info.error is None
 
+    def test_below_minimum_version_bypasses_staged_rollout(self):
+        from app.updater import Updater
+
+        mock_response = MagicMock()
+        payload, public_key = signed_update_payload(
+            version="1.2.0",
+            minimum_supported_version="1.1.0",
+            rollout_percentage=0,
+        )
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="excluded-device",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            info = updater.check_for_updates()
+
+        assert info.available is True
+
+    def test_supported_version_still_respects_staged_rollout(self):
+        from app.updater import Updater
+
+        mock_response = MagicMock()
+        payload, public_key = signed_update_payload(
+            version="1.2.0",
+            minimum_supported_version="0.9.0",
+            rollout_percentage=0,
+        )
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="excluded-device",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            info = updater.check_for_updates()
+
+        assert info.available is False
+
+    def test_missing_embedded_trust_root_does_not_touch_network(self):
+        from app.updater import Updater
+
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key="",
+            expected_signer="",
+        )
+
+        with patch("urllib.request.urlopen") as urlopen:
+            info = updater.check_for_updates()
+
+        assert info.available is False
+        assert "доверенного ключа" in info.error
+        urlopen.assert_not_called()
+
+    def test_tampered_manifest_is_not_shown_as_update(self):
+        from app.updater import Updater
+
+        payload, public_key = signed_update_payload()
+        payload["manifest"]["release_notes"] = "Install malware"
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            rollout_device_id="test-device",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            info = updater.check_for_updates()
+
+        assert info.available is False
+        assert "Недоверенный manifest" in info.error
+
+    def test_oversized_manifest_response_is_rejected(self):
+        from app.updater import MAX_UPDATE_MANIFEST_BYTES, Updater
+
+        _, public_key = signed_update_payload()
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = b"x" * (
+            MAX_UPDATE_MANIFEST_BYTES + 1
+        )
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+
+        with patch(
+            "urllib.request.urlopen",
+            return_value=mock_response,
+        ):
+            info = updater.check_for_updates()
+
+        assert info.available is False
+        assert "too large" in (info.error or "")
+
 
 class TestUpdaterDownloadValidation:
     """Тесты для валидации скачивания."""
 
-    def test_allowed_download_domains(self):
-        """Проверка whitelist доменов для скачивания."""
+    def test_download_requires_a_verified_manifest(self, tmp_path):
+        from app.updater import AUTOMATIC_UPDATE_DISABLED_MESSAGE
+
+        updater = trusted_updater(
+            current_version="1.0.0",
+            update_directory=tmp_path,
+        )
+
+        with patch(
+            "app.updater.download_verified_installer"
+        ) as download:
+            result = updater.download_update()
+
+        assert result == (
+            False,
+            None,
+            AUTOMATIC_UPDATE_DISABLED_MESSAGE,
+        )
+        download.assert_not_called()
+
+    def test_download_uses_only_the_verified_manifest(self, tmp_path):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import Updater
+
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        updater = Updater(
+            current_version="1.0.0",
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+            update_directory=tmp_path,
+        )
+        updater.verified_manifest = manifest
+        expected = tmp_path / "MindType-1.2.0-Setup.exe"
+        callback = MagicMock()
+
+        with patch(
+            "app.updater.download_verified_installer",
+            return_value=expected,
+        ) as download:
+            result = updater.download_update(callback)
+
+        assert result == (True, expected, None)
+        assert updater._temp_path == expected
+        download.assert_called_once_with(
+            manifest,
+            expected,
+            allowed_hosts=updater._allowed_download_hosts,
+            progress_callback=callback,
+        )
+
+
+class TestUpdaterInstallation:
+    """The installer is authenticated again immediately before execution."""
+
+    def test_install_fails_closed_without_verified_manifest(self, tmp_path):
         from app.updater import Updater
 
         updater = Updater(current_version="1.0.0")
-        updater.latest_info = {
-            "version": "1.1.0",
-            "platforms": {
-                "windows": {
-                    "url": "https://evil.com/malware.exe",
-                    "sha256": "abc123"
-                }
-            }
-        }
+        updater._temp_path = tmp_path / "MindType_Setup.exe"
+        updater._temp_path.write_bytes(b"untrusted installer")
 
-        success, path, error = updater.download_update()
+        with patch("subprocess.Popen") as popen:
+            installed = updater.install_update()
 
-        assert success is False
-        assert "Небезопасный URL" in error
+        assert installed is False
+        popen.assert_not_called()
 
-    def test_github_domain_allowed(self):
-        """GitHub домены должны быть разрешены."""
-        from app.updater import Updater
-        import urllib.parse
-
-        allowed_domains = [
-            "github.com",
-            "objects.githubusercontent.com",
-            "raw.githubusercontent.com",
-            "mindtype.space",
-        ]
-
-        for domain in allowed_domains:
-            url = f"https://{domain}/test.exe"
-            parsed = urllib.parse.urlparse(url)
-            assert parsed.netloc in allowed_domains or parsed.netloc == domain
-
-    def test_wrong_extension_rejected(self):
-        """Неверное расширение файла должно отклоняться."""
+    def test_install_reverifies_and_launches_without_shell(self, tmp_path):
+        from app.update_manifest import verify_update_manifest
         from app.updater import Updater
 
-        updater = Updater(current_version="1.0.0")
-        updater.latest_info = {
-            "version": "1.1.0",
-            "platforms": {
-                "windows": {
-                    "url": "https://github.com/repo/file.zip",  # Неверное расширение
-                    "sha256": "abc123"
-                }
-            }
-        }
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        installer = tmp_path / "MindType-1.2.0-Setup.exe"
+        installer.write_bytes(b"signed installer")
+        updater = Updater(
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+        updater.verified_manifest = manifest
+        updater._temp_path = installer
 
-        with patch('sys.platform', 'win32'):
-            success, path, error = updater.download_update()
+        with (
+            patch("app.updater.verify_downloaded_installer") as verify,
+            patch("app.updater.subprocess.Popen") as popen,
+        ):
+            installed = updater.install_update()
 
-        assert success is False
-        assert "расширение" in error.lower() or "extension" in error.lower()
+        assert installed is True
+        verify.assert_called_once_with(installer, manifest)
+        args, kwargs = popen.call_args
+        assert args[0] == [str(installer.resolve())]
+        assert kwargs.get("shell", False) is False
+
+    def test_install_runs_cleanup_after_verification_and_before_launch(
+        self,
+        tmp_path,
+    ):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import Updater
+
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        installer = tmp_path / "MindType-1.2.0-Setup.exe"
+        installer.write_bytes(b"signed installer")
+        updater = Updater(
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+        updater.verified_manifest = manifest
+        updater._temp_path = installer
+        events = []
+
+        with (
+            patch(
+                "app.updater.verify_downloaded_installer",
+                side_effect=lambda *_args: events.append("verified"),
+            ),
+            patch(
+                "app.updater.subprocess.Popen",
+                side_effect=lambda *_args, **_kwargs: events.append(
+                    "launched"
+                ),
+            ),
+        ):
+            installed = updater.install_update(
+                before_launch=lambda: events.append("cleaned"),
+            )
+
+        assert installed is True
+        assert events == ["verified", "cleaned", "launched"]
+
+    def test_post_cleanup_launch_failure_is_terminal(self, tmp_path):
+        from app.update_manifest import verify_update_manifest
+        from app.updater import (
+            UpdateLaunchAfterCleanupError,
+            Updater,
+        )
+
+        payload, public_key = signed_update_payload()
+        manifest = verify_update_manifest(
+            payload,
+            public_key=public_key,
+            expected_channel="stable",
+            expected_platform="windows",
+            expected_architecture="x86_64",
+            expected_signer=UPDATE_SIGNER,
+            allowed_hosts={"releases.mindtype.space"},
+        )
+        installer = tmp_path / "MindType-1.2.0-Setup.exe"
+        installer.write_bytes(b"signed installer")
+        updater = Updater(
+            update_public_key=public_key,
+            expected_signer=UPDATE_SIGNER,
+        )
+        updater.verified_manifest = manifest
+        updater._temp_path = installer
+        cleanup = MagicMock()
+
+        with (
+            patch("app.updater.verify_downloaded_installer"),
+            patch(
+                "app.updater.subprocess.Popen",
+                side_effect=OSError("antivirus blocked launch"),
+            ),
+            pytest.raises(UpdateLaunchAfterCleanupError),
+        ):
+            updater.install_update(before_launch=cleanup)
+
+        cleanup.assert_called_once_with()
 
 
 class TestUpdaterGetDownloadInfo:
@@ -295,11 +608,11 @@ class TestUpdaterConstants:
     """Тесты для констант и конфигурации."""
 
     def test_version_urls_defined(self):
-        """VERSION_URLS должен быть определён."""
-        from app.updater import VERSION_URLS
+        """Only endpoints serving the signed envelope belong in the trust chain."""
+        from app.updater import PRIMARY_VERSION_URL, VERSION_URLS
 
         assert isinstance(VERSION_URLS, list)
-        assert len(VERSION_URLS) >= 2  # Primary + fallback
+        assert VERSION_URLS == [PRIMARY_VERSION_URL]
 
     def test_primary_url_is_own_api(self):
         """Основной URL должен быть своим API."""
@@ -307,8 +620,8 @@ class TestUpdaterConstants:
 
         assert "mindtype" in PRIMARY_VERSION_URL.lower() or "localhost" in PRIMARY_VERSION_URL.lower()
 
-    def test_fallback_url_is_github(self):
-        """Fallback URL должен быть GitHub."""
-        from app.updater import FALLBACK_VERSION_URL
+    def test_broken_unsigned_github_fallback_is_not_configured(self):
+        from app import updater
 
-        assert "github" in FALLBACK_VERSION_URL.lower()
+        assert not hasattr(updater, "FALLBACK_VERSION_URL")
+        assert "raw.githubusercontent.com" not in "\n".join(updater.VERSION_URLS)

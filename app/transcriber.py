@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Protocol, List, Dict, Any, Union
+import importlib.util
 import sys
 import os
 import logging
@@ -21,6 +22,12 @@ except ImportError:
 ProgressCallback = Callable[[str, int, int], None]  # (status, current, total)
 
 class TranscriberBackend(Protocol):
+    def prepare_operation(self) -> None: ...
+
+    def cancel_current(self) -> None: ...
+
+    def shutdown(self) -> None: ...
+
     def load_model(
         self,
         model_size: str,
@@ -231,10 +238,40 @@ class FasterWhisperTranscriber:
 def _prefer_cpp() -> bool:
     """Решать, использовать ли whisper.cpp по умолчанию."""
     if sys.platform == "win32":
-        # На Windows всегда предпочитаем whisper.cpp, если есть бинарник
-        binary = Path(__file__).parent.parent / "bin" / "win-x64" / "whisper-cli.exe"
+        # Windows GA uses the persistent server, not a new CLI process per phrase.
+        binary = Path(__file__).parent.parent / "bin" / "win-x64" / "whisper-server.exe"
         return binary.exists()
     return False
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def available_transcriber_backends() -> List[str]:
+    """Return only backends that can run in the installed distribution."""
+    backends = ["whisper_cpp", "openrouter"]
+    if HAS_FASTER_WHISPER:
+        backends.append("faster_whisper")
+    if all(
+        _module_available(module)
+        for module in ("transformers", "optimum.onnxruntime", "onnxruntime")
+    ):
+        backends.append("onnx")
+    return backends
+
+
+def select_available_backend(preferred: str) -> str:
+    """Keep a saved backend when available, otherwise use the local baseline."""
+    available = available_transcriber_backends()
+    if preferred in available:
+        return preferred
+    if "whisper_cpp" in available:
+        return "whisper_cpp"
+    return available[0]
 
 def create_transcriber(backend: str = "auto") -> TranscriberBackend:
     """Фабрика для создания транскрибера."""
@@ -279,6 +316,21 @@ class Transcriber:
 
     def transcribe_stream(self, *args, **kwargs):
         return self._impl.transcribe_stream(*args, **kwargs)
+
+    def prepare_operation(self) -> None:
+        prepare = getattr(self._impl, "prepare_operation", None)
+        if callable(prepare):
+            prepare()
+
+    def cancel_current(self) -> None:
+        cancel = getattr(self._impl, "cancel_current", None)
+        if callable(cancel):
+            cancel()
+
+    def shutdown(self) -> None:
+        shutdown = getattr(self._impl, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
     def download_model(self, model_size: str, models_dir: Path, progress_callback=None) -> Path:
         if hasattr(self._impl, "download_model"):

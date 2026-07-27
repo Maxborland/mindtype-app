@@ -5,6 +5,7 @@
 import queue
 import tempfile
 import threading
+import time
 import wave
 from collections import deque
 from pathlib import Path
@@ -12,6 +13,13 @@ from typing import Callable, Deque, List, Optional
 
 import numpy as np
 import sounddevice as sd
+
+from .audio_sources import (
+    AudioCaptureResult,
+    AudioCaptureStatus,
+    AudioSourceKind,
+    RecordedTrack,
+)
 
 
 # Callback для уровня громкости: принимает список нормализованных значений [0.0-1.0]
@@ -25,9 +33,13 @@ class AudioRecorder:
         self.dtype = "int16"
         self._stream: Optional[sd.RawInputStream] = None
         self._writer_thread: Optional[threading.Thread] = None
-        self._queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
+        self._writer_stop_requested = False
+        self._queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=256)
         self._tmp_path: Optional[Path] = None
         self._running = threading.Event()
+        self._overflowed = threading.Event()
+        self._writer_error: Optional[BaseException] = None
+        self._started_at_monotonic_ns: Optional[int] = None
         self._level_callback: Optional[LevelCallback] = None
         # P12: Use deque instead of list for O(1) operations (list.pop(0) was O(n))
         self._level_history: Deque[float] = deque(maxlen=32)
@@ -52,7 +64,10 @@ class AudioRecorder:
             pass
 
         data = bytes(indata)
-        self._queue.put(data)
+        try:
+            self._queue.put_nowait(data)
+        except queue.Full:
+            self._overflowed.set()
 
         # Вычисляем уровень громкости для waveform
         if self._level_callback:
@@ -83,10 +98,19 @@ class AudioRecorder:
     ) -> None:
         if self._running.is_set():
             return
+        if self._writer_thread is not None or self._tmp_path is not None:
+            raise RuntimeError(
+                "Предыдущая запись ещё не финализирована; "
+                "повторите остановку перед новым запуском"
+            )
 
         self._level_callback = level_callback
         with self._level_history_lock:
             self._level_history.clear()
+        self._queue = queue.Queue(maxsize=256)
+        self._overflowed.clear()
+        self._writer_error = None
+        self._writer_stop_requested = False
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         self._tmp_path = Path(tmp.name)
@@ -106,46 +130,213 @@ class AudioRecorder:
             self._tmp_path = None
             raise RuntimeError(f"Не удалось открыть устройство записи: {e}") from e
 
-        self._running.set()
-
         def _writer() -> None:
             assert self._tmp_path is not None
-            with wave.open(str(self._tmp_path), "wb") as wf:
-                wf.setnchannels(self.channels)
-                wf.setsampwidth(np.dtype(self.dtype).itemsize)
-                wf.setframerate(self.samplerate)
-                while True:
-                    chunk = self._queue.get()
-                    if chunk is None:
-                        break
-                    wf.writeframes(chunk)
+            try:
+                with wave.open(str(self._tmp_path), "wb") as wf:
+                    wf.setnchannels(self.channels)
+                    wf.setsampwidth(np.dtype(self.dtype).itemsize)
+                    wf.setframerate(self.samplerate)
+                    while True:
+                        chunk = self._queue.get()
+                        if chunk is None:
+                            break
+                        wf.writeframes(chunk)
+            except BaseException as exc:
+                self._writer_error = exc
 
         self._writer_thread = threading.Thread(target=_writer, daemon=True)
         self._writer_thread.start()
-        self._stream.start()
+        try:
+            self._stream.start()
+        except sd.PortAudioError as exc:
+            self._queue.put(None)
+            self._writer_thread.join(timeout=5.0)
+            try:
+                self._stream.close()
+            finally:
+                self._stream = None
+                self._writer_thread = None
+                if self._tmp_path:
+                    self._tmp_path.unlink(missing_ok=True)
+                self._tmp_path = None
+            raise RuntimeError(f"Не удалось запустить устройство записи: {exc}") from exc
 
-    def stop(self, timeout: float = 5.0) -> Optional[Path]:
-        if not self._running.is_set():
-            return None
-        self._running.clear()
-        self._level_callback = None
+        self._started_at_monotonic_ns = time.monotonic_ns()
+        self._running.set()
 
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-        self._queue.put(None)
+    def _stop_path(self, timeout: float = 5.0) -> Optional[Path]:
+        was_running = self._running.is_set()
+        if not was_running and self._writer_thread is None:
+            path = self._tmp_path
+            self._tmp_path = None
+            return path
+        if was_running:
+            self._running.clear()
+            self._level_callback = None
+
+        stream_error: Optional[BaseException] = None
+        if was_running and self._stream:
+            try:
+                self._stream.stop()
+            except BaseException as exc:
+                stream_error = exc
+            finally:
+                try:
+                    self._stream.close()
+                except BaseException as exc:
+                    if stream_error is None:
+                        stream_error = exc
+                self._stream = None
+        if self._writer_thread and not self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=0)
+            self._writer_thread = None
+            self._writer_stop_requested = False
+        if self._writer_thread and not self._writer_stop_requested:
+            try:
+                self._queue.put(None, timeout=timeout)
+                self._writer_stop_requested = True
+            except queue.Full as exc:
+                raise RuntimeError(
+                    "Не удалось завершить запись: аудиобуфер переполнен"
+                ) from exc
         if self._writer_thread:
             self._writer_thread.join(timeout=timeout)
             if self._writer_thread.is_alive():
-                # Поток завис, но файл может быть частично записан
-                pass
+                raise RuntimeError("Не удалось завершить запись: WAV-файл ещё записывается")
+            self._writer_thread = None
+            self._writer_stop_requested = False
         path = self._tmp_path
         self._tmp_path = None
+        if self._writer_error:
+            if path:
+                path.unlink(missing_ok=True)
+            error = self._writer_error
+            self._writer_error = None
+            raise RuntimeError(f"Не удалось записать WAV-файл: {error}") from error
+        if self._overflowed.is_set():
+            self._tmp_path = path
+            raise RuntimeError("Запись повреждена: аудиобуфер был переполнен")
+        if stream_error is not None:
+            self._tmp_path = path
+            raise RuntimeError(
+                f"Устройство записи было отключено: {stream_error}"
+            ) from stream_error
         return path
+
+    def stop_capture(self, timeout: float = 5.0) -> AudioCaptureResult:
+        started_at = self._started_at_monotonic_ns
+        try:
+            path = self._stop_path(timeout=timeout)
+        except RuntimeError as exc:
+            path = self._tmp_path
+            writer_is_alive = bool(
+                self._writer_thread is not None
+                and self._writer_thread.is_alive()
+            )
+            if not writer_is_alive:
+                self._tmp_path = None
+            ended_at = time.monotonic_ns()
+            validation_error = (
+                self._invalid_wav_error(path)
+                if path is not None and not writer_is_alive
+                else None
+            )
+            if validation_error and path is not None:
+                path.unlink(missing_ok=True)
+                path = None
+            track = (
+                RecordedTrack(
+                    source=AudioSourceKind.MICROPHONE,
+                    path=path,
+                    sample_rate=self.samplerate,
+                    channels=self.channels,
+                    started_at_monotonic_ns=started_at or ended_at,
+                    ended_at_monotonic_ns=ended_at,
+                )
+                if (
+                    path is not None
+                    and path.exists()
+                    and not writer_is_alive
+                )
+                else None
+            )
+            if not writer_is_alive:
+                self._started_at_monotonic_ns = None
+            return AudioCaptureResult(
+                status=AudioCaptureStatus.INTERRUPTED,
+                track=track,
+                error="; ".join(
+                    part
+                    for part in (str(exc), validation_error)
+                    if part
+                ),
+            )
+        ended_at = time.monotonic_ns()
+        self._started_at_monotonic_ns = None
+        validation_error = self._invalid_wav_error(path)
+        if validation_error and path is not None:
+            path.unlink(missing_ok=True)
+            path = None
+        track = (
+            RecordedTrack(
+                source=AudioSourceKind.MICROPHONE,
+                path=path,
+                sample_rate=self.samplerate,
+                channels=self.channels,
+                started_at_monotonic_ns=started_at or ended_at,
+                ended_at_monotonic_ns=ended_at,
+            )
+            if path is not None
+            else None
+        )
+        return AudioCaptureResult(
+            status=(
+                AudioCaptureStatus.INTERRUPTED
+                if validation_error
+                else AudioCaptureStatus.COMPLETED
+            ),
+            track=track,
+            error=validation_error,
+        )
+
+    @staticmethod
+    def _invalid_wav_error(path: Optional[Path]) -> Optional[str]:
+        if path is None or not path.is_file():
+            return "microphone WAV is unavailable"
+        try:
+            with wave.open(str(path), "rb") as audio:
+                if audio.getnframes() <= 0:
+                    return "microphone WAV does not contain audio frames"
+        except (OSError, EOFError, wave.Error) as exc:
+            return f"microphone WAV is invalid: {exc}"
+        return None
+
+    def stop(self, timeout: float = 5.0) -> Optional[Path]:
+        """Compatibility wrapper for microphone-only callers."""
+        try:
+            return self._stop_path(timeout=timeout)
+        except RuntimeError:
+            # Compatibility callers cannot consume an interrupted capture.
+            # Once the writer has finalized, discard it so the next recording
+            # is not permanently blocked by a retained temporary path.
+            if self._writer_thread is None and self._tmp_path is not None:
+                self._tmp_path.unlink(missing_ok=True)
+                self._tmp_path = None
+                self._started_at_monotonic_ns = None
+            raise
 
     @property
     def recording(self) -> bool:
         return self._running.is_set()
+
+    @property
+    def finalizing(self) -> bool:
+        return (
+            self._running.is_set()
+            or self._writer_thread is not None
+            or self._tmp_path is not None
+        )
 
     # === Мониторинг микрофона (без записи) ===
 

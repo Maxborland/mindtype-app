@@ -13,8 +13,9 @@
 #endif
 
 #define AppPublisher "MindType"
-#define AppURL "https://mindtype.app"
+#define AppURL "https://mindtype.space"
 #define AppExeName "MindType.exe"
+#define WhisperServerExeName "whisper-server.exe"
 #define AppId "{{B2C3D4E5-F6A7-8901-BCDE-F12345678901}"
 
 [Setup]
@@ -62,10 +63,10 @@ DisableDirPage=no
 ; Version info
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
-VersionInfoDescription=MindType - Offline Speech-to-Text
+VersionInfoDescription=MindType - Hybrid Voice-to-Text
 VersionInfoProductName={#AppName}
 VersionInfoProductVersion={#AppVersion}
-VersionInfoCopyright=Copyright (c) 2024 {#AppPublisher}
+VersionInfoCopyright=Copyright (c) 2024-2026 {#AppPublisher}
 
 ; Signing (uncomment and configure for production)
 ; SignTool=signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 /a $f
@@ -87,11 +88,11 @@ Source: "..\dist\MindType\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 
 [Icons]
 ; Start menu
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Comment: "Offline Speech-to-Text"
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Comment: "Hybrid Voice-to-Text"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 
 ; Desktop icon (optional)
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; Comment: "Offline Speech-to-Text"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; Comment: "Hybrid Voice-to-Text"
 
 [Registry]
 ; Autostart (optional)
@@ -108,11 +109,7 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(
 [UninstallRun]
 ; Close app before uninstall
 Filename: "taskkill"; Parameters: "/F /IM {#AppExeName}"; Flags: runhidden; RunOnceId: "KillApp"
-
-[UninstallDelete]
-; Remove config files on uninstall
-Type: filesandordirs; Name: "{userappdata}\{#AppName}"
-Type: filesandordirs; Name: "{localappdata}\{#AppName}"
+Filename: "taskkill"; Parameters: "/F /IM {#WhisperServerExeName}"; Flags: runhidden; RunOnceId: "KillWhisperServer"
 
 [Code]
 // Custom messages
@@ -155,6 +152,11 @@ begin
     Exec('taskkill', '/F /IM {#AppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(500);
   end;
+
+  // A manually launched installer does not pass through updater cleanup.
+  Exec('taskkill', '/IM {#WhisperServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(500);
+  Exec('taskkill', '/F /IM {#WhisperServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 // Initialize setup
@@ -169,8 +171,6 @@ procedure InitializeWizard();
 begin
   WizardForm.Color := clWhite;
   WizardForm.MainPanel.Color := clWhite;
-  WizardForm.InnerNotebook.Color := clWhite;
-  WizardForm.OuterNotebook.Color := clWhite;
   WizardForm.PageNameLabel.Font.Style := [fsBold];
   WizardForm.WelcomeLabel1.Font.Style := [fsBold];
   WizardForm.FinishedHeadingLabel.Font.Style := [fsBold];
@@ -184,6 +184,7 @@ begin
   Result := True;
   // Close app before uninstall
   Exec('taskkill', '/F /IM {#AppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM {#WhisperServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(500);
 end;
 

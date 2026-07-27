@@ -1,141 +1,343 @@
-# =============================================================================
-# GitHub Actions workflow for building MindType releases
-# Triggers on tag push (v*) or manual dispatch
-# =============================================================================
-name: Build Release
+name: Windows Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version number (e.g., 1.0.0)'
+        description: "Version without the v prefix; defaults to app/version.py"
         required: false
-        default: ''
+        default: ""
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 env:
-  PYTHON_VERSION: '3.11'
-  APP_NAME: MindType
+  PYTHON_VERSION: "3.11"
 
 jobs:
-  # ==========================================================================
-  # Prepare release version
-  # ==========================================================================
-  prepare:
-    runs-on: ubuntu-latest
+  test-build-sign:
+    name: Test, build and sign Windows installer
+    runs-on: windows-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Determine version
-        id: version
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VERSION="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            VERSION="${{ github.ref_name }}"
-            VERSION="${VERSION#v}"
-          else
-            VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' app/version.py | head -1)
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
-
-  # ==========================================================================
-  # Build for Windows (PyArmor + PyInstaller)
-  # ==========================================================================
-  build-windows:
-    needs: prepare
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
+          cache-dependency-path: |
+            requirements/base.lock
+            requirements/dev.lock
+
+      - name: Determine and validate version
+        id: version
+        shell: pwsh
+        run: |
+          $AppVersion = python -c "from app.version import __version__; print(__version__)"
+          if ("${{ github.event.inputs.version }}") {
+            $Version = "${{ github.event.inputs.version }}"
+          } elseif ("${{ github.ref_type }}" -eq "tag") {
+            $Version = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $Version = $AppVersion
+          }
+          if ("${{ github.ref_type }}" -eq "tag" -and $Version -ne $AppVersion) {
+            throw "Tag version $Version does not match app/version.py $AppVersion"
+          }
+          "version=$Version" >> $env:GITHUB_OUTPUT
 
       - name: Install dependencies
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install --require-hashes `
+            -r requirements/base.lock `
+            -r requirements/dev.lock `
+            -r requirements/local-diarization.lock
+          python -m pip check
 
-      - name: Build with PyInstaller
+      - name: Embed and verify release trust roots
+        shell: pwsh
+        env:
+          MINDTYPE_LICENSE_PUBLIC_KEY: ${{ vars.MINDTYPE_LICENSE_PUBLIC_KEY }}
+          MINDTYPE_UPDATE_PUBLIC_KEY: ${{ vars.MINDTYPE_UPDATE_PUBLIC_KEY }}
+          MINDTYPE_UPDATE_AUTHENTICODE_SIGNER: ${{ vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER }}
         run: |
-          $env:VERSION = "${{ needs.prepare.outputs.version }}"
-          .\build_windows.ps1 -Version $env:VERSION -NoInstaller -Clean
+          $IsTag = "${{ github.ref_type }}" -eq "tag"
+          $HasLicenseRoot = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_LICENSE_PUBLIC_KEY)
+          $HasUpdateRoot = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_UPDATE_PUBLIC_KEY)
+          $HasUpdateSigner = -not [string]::IsNullOrWhiteSpace($env:MINDTYPE_UPDATE_AUTHENTICODE_SIGNER)
+          if ($IsTag -and -not $HasLicenseRoot) {
+            throw "Tagged releases require MINDTYPE_LICENSE_PUBLIC_KEY"
+          }
+          if ($IsTag -and -not $HasUpdateRoot) {
+            throw "Tagged releases require MINDTYPE_UPDATE_PUBLIC_KEY"
+          }
+          if ($IsTag -and -not $HasUpdateSigner) {
+            throw "Tagged releases require MINDTYPE_UPDATE_AUTHENTICODE_SIGNER"
+          }
+          if (-not ($HasLicenseRoot -and $HasUpdateRoot -and $HasUpdateSigner)) {
+            Write-Host "Manual dev build has no complete production trust roots."
+            exit 0
+          }
+          python scripts/embed_release_trust_root.py
+          python scripts/embed_release_trust_root.py --check
+
+      - name: Verify native runtime and model manifests
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            python scripts/verify_artifact_manifests.py --release
+          } else {
+            python scripts/verify_artifact_manifests.py
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native artifact manifest verification failed"
+          }
+
+      - name: Run regression gate
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m ruff check app tests --select F821,F601
+          python -m compileall -q app
+          python -m pytest -q
+
+      - name: Build application
+        shell: pwsh
+        run: |
+          .\build_windows.ps1 -Version "${{ steps.version.outputs.version }}" -NoInstaller -Clean
+          if (-not (Test-Path "dist\MindType\MindType.exe")) {
+            throw "PyInstaller output dist\MindType\MindType.exe was not created"
+          }
+
+      - name: Smoke test frozen application
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          & "dist\MindType\MindType.exe" --smoke-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "Frozen application smoke test failed"
+          }
+
+      - name: Require signing secrets for tag releases and sign application
+        id: signing
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          $IsTag = "${{ github.ref_type }}" -eq "tag"
+          $HasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64)
+          $HasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)
+          if (-not ($HasCertificate -and $HasPassword)) {
+            if ($IsTag) {
+              throw "Tagged releases require WINDOWS_SIGNING_CERT_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD"
+            }
+            "configured=false" >> $env:GITHUB_OUTPUT
+            Write-Host "Manual build will remain unsigned."
+            exit 0
+          }
+
+          $CertificatePath = Join-Path $env:RUNNER_TEMP "mindtype-signing.pfx"
+          "configured=true" >> $env:GITHUB_OUTPUT
+          [IO.File]::WriteAllBytes(
+            $CertificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_BASE64)
+          )
+          $SignTool = Get-ChildItem `
+            "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $SignTool) {
+            throw "signtool.exe was not found"
+          }
+          & $SignTool.FullName sign `
+            /f $CertificatePath `
+            /p $env:WINDOWS_SIGNING_CERT_PASSWORD `
+            /fd SHA256 `
+            /tr https://timestamp.digicert.com `
+            /td SHA256 `
+            "dist\MindType\MindType.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Application signing failed"
+          }
+          "signtool_path=$($SignTool.FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Install Inno Setup
-        run: |
-          choco install innosetup -y
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
 
-      - name: Create installer
+      - name: Build installer
+        shell: pwsh
         run: |
-          $env:VERSION = "${{ needs.prepare.outputs.version }}"
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$env:VERSION installer\windows.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "installer\windows.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed"
+          }
+          $Installer = "dist\MindType-${{ steps.version.outputs.version }}-Setup.exe"
+          if (-not (Test-Path $Installer)) {
+            throw "Expected installer $Installer was not created"
+          }
+
+      - name: Sign and verify installer
+        if: steps.signing.outputs.configured == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          MINDTYPE_UPDATE_AUTHENTICODE_SIGNER: ${{ vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER }}
+        run: |
+          $Installer = "dist\MindType-${{ steps.version.outputs.version }}-Setup.exe"
+          $CertificatePath = Join-Path $env:RUNNER_TEMP "mindtype-signing.pfx"
+          & "${{ steps.signing.outputs.signtool_path }}" sign `
+            /f $CertificatePath `
+            /p $env:WINDOWS_SIGNING_CERT_PASSWORD `
+            /fd SHA256 `
+            /tr https://timestamp.digicert.com `
+            /td SHA256 `
+            $Installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer signing failed"
+          }
+          foreach ($File in @("dist\MindType\MindType.exe", $Installer)) {
+            $Signature = Get-AuthenticodeSignature $File
+            if ($Signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for ${File}: $($Signature.Status)"
+            }
+            if ("${{ github.ref_type }}" -eq "tag") {
+              $ActualSigner = [string]$Signature.SignerCertificate.Subject
+              $ExpectedSigner = [string]$env:MINDTYPE_UPDATE_AUTHENTICODE_SIGNER
+              if ([string]::IsNullOrWhiteSpace($ExpectedSigner)) {
+                throw "Tagged releases require MINDTYPE_UPDATE_AUTHENTICODE_SIGNER"
+              }
+              $ExpectedSigner = $ExpectedSigner.Trim()
+              if ($ActualSigner -cne $ExpectedSigner) {
+                throw "Authenticode signer mismatch for ${File}: expected '$ExpectedSigner', got '$ActualSigner'"
+              }
+            }
+          }
+
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        run: |
+          $Installer = "dist\MindType-${{ steps.version.outputs.version }}-Setup.exe"
+          $Hash = (Get-FileHash $Installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$Hash  $(Split-Path $Installer -Leaf)" |
+            Set-Content -Encoding ascii "$Installer.sha256"
+
+      - name: Create signed staged update manifest
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          MINDTYPE_UPDATE_PRIVATE_KEY: ${{ secrets.MINDTYPE_UPDATE_PRIVATE_KEY }}
+          MINDTYPE_UPDATE_PUBLIC_KEY: ${{ vars.MINDTYPE_UPDATE_PUBLIC_KEY }}
+          MINDTYPE_UPDATE_AUTHENTICODE_SIGNER: ${{ vars.MINDTYPE_UPDATE_AUTHENTICODE_SIGNER }}
+          MINDTYPE_MINIMUM_SUPPORTED_VERSION: ${{ vars.MINDTYPE_MINIMUM_SUPPORTED_VERSION }}
+        run: |
+          foreach ($Required in @(
+            "MINDTYPE_UPDATE_PRIVATE_KEY",
+            "MINDTYPE_UPDATE_PUBLIC_KEY",
+            "MINDTYPE_UPDATE_AUTHENTICODE_SIGNER",
+            "MINDTYPE_MINIMUM_SUPPORTED_VERSION"
+          )) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "env:$Required").Value)) {
+              throw "Tagged releases require $Required"
+            }
+          }
+          $Version = "${{ steps.version.outputs.version }}"
+          $Installer = "dist\MindType-$Version-Setup.exe"
+          $Manifest = "dist\MindType-update-manifest.json"
+          $ReleaseUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MindType-$Version-Setup.exe"
+          python scripts/create_update_manifest.py `
+            --installer $Installer `
+            --output $Manifest `
+            --channel stable `
+            --version $Version `
+            --minimum-supported-version $env:MINDTYPE_MINIMUM_SUPPORTED_VERSION `
+            --url $ReleaseUrl `
+            --rollout-percentage 10 `
+            --authenticode-signer $env:MINDTYPE_UPDATE_AUTHENTICODE_SIGNER
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Manifest)) {
+            throw "Signed update manifest generation failed"
+          }
+
+      - name: Generate and validate CycloneDX SBOM
+        shell: pwsh
+        run: |
+          $Sbom = "dist\MindType-${{ steps.version.outputs.version }}.cdx.json"
+          python -m cyclonedx_py requirements requirements/base.lock `
+            --mc-type application `
+            --spec-version 1.6 `
+            --output-reproducible `
+            --output-format JSON `
+            --output-file $Sbom `
+            --validate
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Sbom)) {
+            throw "CycloneDX SBOM generation or validation failed"
+          }
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: dist/MindType-${{ steps.version.outputs.version }}-Setup.exe
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-artifacts
           path: |
-            dist/${{ env.APP_NAME }}-${{ needs.prepare.outputs.version }}-Setup.exe
+            dist/MindType-${{ steps.version.outputs.version }}-Setup.exe
+            dist/MindType-${{ steps.version.outputs.version }}-Setup.exe.sha256
+            dist/MindType-${{ steps.version.outputs.version }}.cdx.json
+            dist/MindType-update-manifest.json
+            requirements/*.in
+            requirements/*.lock
+            manifests/*.json
+          if-no-files-found: error
           retention-days: 30
 
-  # ==========================================================================
-  # Create GitHub Release
-  # ==========================================================================
-  create-release:
-    needs: [prepare, build-windows]
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          $CertificatePath = Join-Path $env:RUNNER_TEMP "mindtype-signing.pfx"
+          Remove-Item -LiteralPath $CertificatePath -Force -ErrorAction SilentlyContinue
+
+  release:
+    name: Publish GitHub Release
+    needs: test-build-sign
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: artifacts/
+          name: windows-artifacts
+          path: artifacts
 
-      - name: List artifacts
-        run: |
-          echo "Downloaded artifacts:"
-          find artifacts/ -type f -name "*" | head -50
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
+      - name: Publish signed Windows release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          name: MindType v${{ needs.prepare.outputs.version }}
-          body: |
-            ## MindType v${{ needs.prepare.outputs.version }}
-
-            ### Downloads
-
-            **Windows:**
-            - `MindType-${{ needs.prepare.outputs.version }}-Setup.exe` - Windows installer
-
-            **Linux & macOS:** Coming soon!
-
-            ### Installation
-
-            **Windows:** Download and run the setup executable.
-
+          name: MindType v${{ needs.test-build-sign.outputs.version }}
+          generate_release_notes: true
           draft: false
           prerelease: false
-          files: |
-            artifacts/windows-artifacts/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/**/*

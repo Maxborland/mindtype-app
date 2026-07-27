@@ -88,9 +88,21 @@ class BaseWindowManager(ABC):
         self._saved_window = self.get_foreground_window()
         self._saved_title = self.get_window_title(self._saved_window)
 
+    def is_window_valid(self, window) -> bool:
+        """Проверить, что сохранённая цель всё ещё существует."""
+        return bool(window)
+
+    def is_our_window(self, window) -> bool:
+        """Проверить, что цель не является окном MindType."""
+        return bool(self._our_window and window == self._our_window)
+
     def restore_window(self) -> bool:
         """Вернуть фокус на сохранённое окно."""
-        if not self._saved_window:
+        if (
+            not self._saved_window
+            or not self.is_window_valid(self._saved_window)
+            or self.is_our_window(self._saved_window)
+        ):
             return False
 
         # Сначала минимизируем наше окно
@@ -113,6 +125,10 @@ class BaseWindowManager(ABC):
     @property
     def has_saved_window(self) -> bool:
         return self._saved_window is not None
+
+    @property
+    def saved_window(self):
+        return self._saved_window
 
 
 class BaseTextInserter(ABC):
@@ -188,5 +204,4 @@ class BasePlatform(ABC):
     def create_text_inserter(self) -> BaseTextInserter:
         """Создать инструмент вставки текста."""
         pass
-
 

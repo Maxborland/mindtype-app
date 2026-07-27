@@ -235,6 +235,7 @@ class OpenRouterProvider(LLMProvider):
             "model": model,
             "input_audio": {"data": audio_b64, "format": audio_format},
             "temperature": temperature,
+            "provider": {"data_collection": "deny"},
         }
         if language and language != "auto":
             data["language"] = language

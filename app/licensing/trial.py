@@ -344,14 +344,36 @@ class TrialManager:
 
         return True
 
-    def add_transcription_time(self, seconds: float) -> None:
-        """Добавить использованное время транскрипции."""
+    def add_transcription_time(
+        self,
+        seconds: float,
+        *,
+        operation_id: Optional[str] = None,
+    ) -> bool:
+        """Atomically add trial usage once per durable operation."""
         if self._trial_data is None:
             self.start_trial()
 
+        charged_operations = list(
+            self._trial_data.get("charged_operation_ids", [])
+        )
+        if operation_id and operation_id in charged_operations:
+            return False
         current = self._trial_data.get("transcription_seconds_used", 0)
         self._trial_data["transcription_seconds_used"] = current + seconds
-        self._save_trial_data()
+        if operation_id:
+            charged_operations.append(operation_id)
+            self._trial_data["charged_operation_ids"] = charged_operations
+        try:
+            self._save_trial_data()
+        except Exception:
+            self._trial_data["transcription_seconds_used"] = current
+            if operation_id:
+                self._trial_data["charged_operation_ids"] = (
+                    charged_operations[:-1]
+                )
+            raise
+        return True
 
     def get_remaining_transcription_seconds(self) -> float:
         """Получить оставшееся время транскрипции в секундах."""
@@ -455,6 +477,5 @@ if __name__ == "__main__":
         print(f"Trial active: {is_active}")
         print(f"Remaining days: {remaining}")
         print(f"Start date: {start_date}")
-
 
 

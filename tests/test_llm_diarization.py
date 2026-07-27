@@ -197,7 +197,7 @@ class TestPipelineBackendSelection:
 
 
 class TestPostProcessOptionsAutoBackend:
-    """'auto' → openrouter при наличии ключа, иначе local."""
+    """auto selects only a backend that is actually available."""
 
     def _make_queue(self, **pp_kwargs):
         from pathlib import Path
@@ -218,10 +218,59 @@ class TestPostProcessOptionsAutoBackend:
         q = self._make_queue(diarization_backend="auto", diarization_api_key="sk-key")
         assert q.postprocessing_diarization_backend == "openrouter"
 
-    def test_auto_without_key(self):
-        q = self._make_queue(diarization_backend="auto", diarization_api_key="")
+    @patch("app.file_transcriber.local_diarization_available", return_value=True)
+    def test_auto_without_key(self, _available):
+        q = self._make_queue(
+            diarization_backend="auto",
+            diarization_api_key="",
+        )
         assert q.postprocessing_diarization_backend == "local"
 
-    def test_explicit_local_with_key(self):
-        q = self._make_queue(diarization_backend="local", diarization_api_key="sk-key")
+    @patch("app.file_transcriber.local_diarization_available", return_value=False)
+    def test_auto_without_key_or_optional_pack_is_disabled(self, _available):
+        q = self._make_queue(
+            diarization_backend="auto",
+            diarization_api_key="",
+        )
+        assert q.postprocessing_diarization_backend == "disabled"
+
+    @patch("app.file_transcriber.local_diarization_available", return_value=True)
+    def test_explicit_local_with_key(self, _available):
+        q = self._make_queue(
+            diarization_backend="local",
+            diarization_api_key="sk-key",
+        )
         assert q.postprocessing_diarization_backend == "local"
+
+    @patch("app.file_transcriber.local_diarization_available", return_value=False)
+    def test_explicit_local_without_optional_pack_is_disabled(self, _available):
+        q = self._make_queue(
+            diarization_backend="local",
+            diarization_api_key="sk-key",
+        )
+        assert q.postprocessing_diarization_backend == "disabled"
+
+
+def test_disabled_diarization_records_explicit_optional_pack_reason(tmp_path):
+    from app.text_processor import ProcessingConfig, TextProcessingPipeline
+
+    config = ProcessingConfig(
+        enable_diarization=True,
+        diarization_backend="disabled",
+        enable_punctuation=False,
+        enable_fillers=False,
+        enable_normalize=False,
+        enable_correct=False,
+    )
+    pipeline = TextProcessingPipeline(config)
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"not-read")
+
+    result = pipeline.process("исходный текст", audio_path=audio)
+
+    assert result.diarization is None
+    assert result.processing_stats["diarization_skipped"] is True
+    assert (
+        result.processing_stats["diarization_error"]
+        == "LOCAL_DIARIZATION_PACK_REQUIRED"
+    )

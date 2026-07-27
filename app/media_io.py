@@ -6,9 +6,12 @@
 """
 
 import logging
+import importlib.util
+import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -19,23 +22,90 @@ logger = logging.getLogger("file_transcriber")
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus'}
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.flv', '.m4v'}
 ALL_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+SOUNDFILE_AUDIO_EXTENSIONS = {
+    '.mp3',
+    '.wav',
+    '.flac',
+    '.ogg',
+    '.opus',
+}
+MAX_MEDIA_DURATION_SECONDS = 8 * 60 * 60
+
+
+class MediaDurationTooLong(ValueError):
+    """Raised before processing media outside the Windows GA limit."""
+
+
+class MediaDurationUnavailable(ValueError):
+    """Raised when the GA duration and entitlement gates cannot be enforced."""
+
+
+def enforce_media_duration_limit(duration_seconds: float) -> None:
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise MediaDurationUnavailable(
+            "media duration could not be measured safely"
+        )
+    if duration_seconds > MAX_MEDIA_DURATION_SECONDS:
+        raise MediaDurationTooLong(
+            "media duration exceeds the 8 hours Windows GA limit"
+        )
+
+
+def _media_binary(name: str) -> Optional[Path]:
+    executable = f"{name}.exe" if sys.platform == "win32" else name
+    discovered = shutil.which(executable)
+    if discovered:
+        return Path(discovered)
+    roots = [
+        Path(getattr(sys, "_MEIPASS", "")),
+        Path(sys.executable).resolve().parent / "_internal",
+        Path(__file__).resolve().parents[1],
+    ]
+    for root in roots:
+        if not str(root):
+            continue
+        candidate = root / "bin" / "win-x64" / executable
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def full_media_probe_available() -> bool:
+    """Whether the current runtime can safely inspect advertised video."""
+    if _media_binary("ffprobe") is not None:
+        return True
+    try:
+        return importlib.util.find_spec("av") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def supported_extensions() -> set[str]:
+    """Formats that this concrete installation can duration-gate."""
+    if full_media_probe_available():
+        return set(ALL_EXTENSIONS)
+    return set(SOUNDFILE_AUDIO_EXTENSIONS)
 
 
 def is_supported_file(path: Path) -> bool:
-    """Проверить, поддерживается ли формат файла."""
-    return path.suffix.lower() in ALL_EXTENSIONS
+    """Проверить, поддерживается ли формат файла в текущей установке."""
+    return path.suffix.lower() in supported_extensions()
 
 
 def get_file_duration(file_path: Path) -> float:
     """
     Получить длительность медиафайла в секундах.
-    Использует ffprobe если доступен, иначе возвращает 0.
+    Uses ffprobe, bundled SoundFile, or optional PyAV and fails closed when
+    none of them can measure a positive finite duration.
     """
     try:
         # Пробуем использовать ffprobe
+        ffprobe = _media_binary("ffprobe")
+        if ffprobe is None:
+            raise FileNotFoundError("ffprobe is unavailable")
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
+                str(ffprobe), "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(file_path)
@@ -45,8 +115,22 @@ def get_file_duration(file_path: Path) -> float:
             timeout=30
         )
         if result.returncode == 0:
-            return float(result.stdout.strip())
+            duration = float(result.stdout.strip())
+            if math.isfinite(duration) and duration > 0:
+                return duration
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
+
+    # SoundFile is part of the lightweight Windows base runtime and covers
+    # WAV, FLAC, OGG and the codecs available through bundled libsndfile.
+    try:
+        import soundfile
+
+        info = soundfile.info(str(file_path))
+        duration = float(info.duration)
+        if math.isfinite(duration) and duration > 0:
+            return duration
+    except Exception:
         pass
 
     # Пробуем PyAV как альтернативу
@@ -54,11 +138,15 @@ def get_file_duration(file_path: Path) -> float:
         import av
         with av.open(str(file_path)) as container:
             if container.duration:
-                return container.duration / 1000000.0  # microseconds to seconds
+                duration = container.duration / 1000000.0
+                if math.isfinite(duration) and duration > 0:
+                    return duration
     except Exception:
         pass
 
-    return 0.0
+    raise MediaDurationUnavailable(
+        "media duration could not be measured safely"
+    )
 
 
 def extract_audio_from_video(video_path: Path, output_path: Optional[Path] = None) -> Path:
@@ -93,7 +181,7 @@ def extract_audio_from_video(video_path: Path, output_path: Optional[Path] = Non
         output_path = Path(tmp_name)
 
     # Пробуем ffmpeg
-    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_path = _media_binary("ffmpeg")
     if ffmpeg_path:
         try:
             result = subprocess.run(

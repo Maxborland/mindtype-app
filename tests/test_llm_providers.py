@@ -271,9 +271,10 @@ class TestProviderFactory:
         """Тест списка провайдеров."""
         providers = list_providers()
 
-        assert len(providers) == 5
+        assert len(providers) == 6
         assert any(p[0] == ProviderType.OPENAI for p in providers)
         assert any(p[0] == ProviderType.ANTHROPIC for p in providers)
+        assert any(p[0] == ProviderType.MINDTYPE_CLOUD for p in providers)
 
     def test_requires_api_key(self):
         """Тест проверки необходимости API ключа."""

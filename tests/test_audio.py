@@ -5,12 +5,16 @@ Unit тесты для модуля audio.py
 используя mocking.
 """
 
+import queue
+import wave
+
 import numpy as np
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from app.audio import AudioRecorder
+from app.audio_sources import AudioCaptureStatus, AudioSourceKind
 
 
 class TestAudioRecorder:
@@ -88,6 +92,173 @@ class TestAudioRecorder:
         recorder = AudioRecorder()
         result = recorder.stop()
         assert result is None
+
+    def test_empty_microphone_wav_is_not_published(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "empty.wav"
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+        recorder._tmp_path = wav_path
+        recorder._started_at_monotonic_ns = 1
+
+        result = recorder.stop_capture()
+
+        assert result.status is AudioCaptureStatus.INTERRUPTED
+        assert result.track is None
+        assert "does not contain audio frames" in (result.error or "")
+        assert wav_path.exists() is False
+
+    def test_stop_does_not_return_path_while_writer_is_alive(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "unfinished.wav"
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+            audio.writeframes(b"\0\0")
+        recorder._tmp_path = wav_path
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = MagicMock()
+        recorder._writer_thread.is_alive.return_value = True
+
+        with pytest.raises(RuntimeError, match="ещё записывается"):
+            recorder.stop(timeout=0.01)
+
+        assert recorder.recording is False
+        assert recorder._tmp_path == wav_path
+
+    @patch("app.audio.sd.RawInputStream")
+    def test_writer_timeout_blocks_restart_until_pending_wav_is_finalized(
+        self,
+        mock_stream,
+        tmp_path,
+    ):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "unfinished.wav"
+        wav_path.touch()
+        pending_queue = MagicMock()
+        writer = MagicMock()
+        writer.is_alive.side_effect = [True, True, False]
+        recorder._tmp_path = wav_path
+        recorder._queue = pending_queue
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+
+        with pytest.raises(RuntimeError, match="ещё записывается"):
+            recorder.stop(timeout=0.01)
+
+        with pytest.raises(RuntimeError, match="[Пп]редыдущ"):
+            recorder.start()
+
+        assert recorder._queue is pending_queue
+        assert recorder._tmp_path == wav_path
+        mock_stream.assert_not_called()
+
+        assert recorder.stop(timeout=0.01) == wav_path
+        assert recorder._writer_thread is None
+        assert recorder._tmp_path is None
+
+    def test_typed_stop_retry_preserves_original_capture_timestamp(
+        self,
+        tmp_path,
+    ):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "unfinished.wav"
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+            audio.writeframes(b"\0\0")
+        writer = MagicMock()
+        writer.is_alive.side_effect = [True, True, True, False]
+        recorder._tmp_path = wav_path
+        recorder._queue = MagicMock()
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+        recorder._started_at_monotonic_ns = 123
+
+        unfinished = recorder.stop_capture(timeout=0.01)
+        finalized = recorder.stop_capture(timeout=0.01)
+
+        assert unfinished.status is AudioCaptureStatus.INTERRUPTED
+        assert unfinished.track is None
+        assert finalized.status is AudioCaptureStatus.COMPLETED
+        assert finalized.track is not None
+        assert finalized.track.started_at_monotonic_ns == 123
+
+    def test_full_queue_stop_retries_the_writer_sentinel(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "pending.wav"
+        wav_path.touch()
+        pending_queue = queue.Queue(maxsize=1)
+        pending_queue.put(b"audio")
+        writer = MagicMock()
+        writer.is_alive.side_effect = [True, False]
+        recorder._tmp_path = wav_path
+        recorder._queue = pending_queue
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+
+        with pytest.raises(RuntimeError, match="аудиобуфер переполнен"):
+            recorder.stop(timeout=0.01)
+
+        assert recorder._writer_stop_requested is False
+        assert pending_queue.get_nowait() == b"audio"
+        assert recorder.stop(timeout=0.01) == wav_path
+        assert recorder._writer_thread is None
+
+    def test_dead_writer_is_reaped_before_full_queue_sentinel(self, tmp_path):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "failed.wav"
+        wav_path.touch()
+        pending_queue = queue.Queue(maxsize=1)
+        pending_queue.put(b"audio")
+        writer = MagicMock()
+        writer.is_alive.return_value = False
+        recorder._tmp_path = wav_path
+        recorder._queue = pending_queue
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        recorder._writer_thread = writer
+        recorder._writer_error = OSError("disk full")
+
+        result = recorder.stop_capture(timeout=0.01)
+
+        assert result.status is AudioCaptureStatus.INTERRUPTED
+        assert result.track is None
+        assert "disk full" in (result.error or "")
+        assert recorder._writer_thread is None
+        assert recorder.finalizing is False
+        assert wav_path.exists() is False
+
+    def test_compatibility_stop_discards_finalized_interrupted_capture(
+        self,
+        tmp_path,
+    ):
+        recorder = AudioRecorder()
+        wav_path = tmp_path / "overflowed.wav"
+        wav_path.touch()
+        recorder._tmp_path = wav_path
+        recorder._running.set()
+        recorder._stream = MagicMock()
+        writer = MagicMock()
+        writer.is_alive.return_value = False
+        recorder._writer_thread = writer
+        recorder._overflowed.set()
+
+        with pytest.raises(RuntimeError, match="аудиобуфер был переполнен"):
+            recorder.stop(timeout=0.01)
+
+        assert recorder._tmp_path is None
+        assert recorder._writer_thread is None
+        assert not wav_path.exists()
+
 
     @patch('app.audio.sd.RawInputStream')
     def test_start_monitoring_success(self, mock_stream):
@@ -175,6 +346,35 @@ class TestAudioLevelCalculation:
 class TestErrorHandling:
     """Тесты обработки ошибок."""
 
+    @patch('app.audio.tempfile.NamedTemporaryFile')
+    @patch('app.audio.sd.RawInputStream')
+    def test_stream_start_failure_rolls_back_every_resource(
+        self,
+        mock_stream,
+        mock_tempfile,
+        tmp_path,
+    ):
+        import sounddevice as sd
+
+        wav_path = tmp_path / "failed-start.wav"
+        wav_path.touch()
+        mock_file = MagicMock(name=str(wav_path))
+        mock_file.name = str(wav_path)
+        mock_tempfile.return_value = mock_file
+        stream = MagicMock()
+        stream.start.side_effect = sd.PortAudioError("Device disconnected")
+        mock_stream.return_value = stream
+        recorder = AudioRecorder()
+
+        with pytest.raises(RuntimeError, match="запустить устройство записи"):
+            recorder.start()
+
+        assert recorder.recording is False
+        assert recorder._writer_thread is None
+        assert recorder._tmp_path is None
+        assert not wav_path.exists()
+        stream.close.assert_called_once()
+
     @patch('app.audio.sd.RawInputStream')
     def test_start_with_invalid_device(self, mock_stream):
         """start() с несуществующим устройством должен выбрасывать исключение."""
@@ -200,3 +400,50 @@ class TestErrorHandling:
 
         assert result is False
         assert recorder.monitoring is False
+
+    @patch("app.audio.sd.RawInputStream")
+    def test_typed_stop_preserves_completed_microphone_track(
+        self,
+        mock_stream,
+    ):
+        recorder = AudioRecorder()
+        recorder.start()
+        recorder._callback(
+            np.ones((10, 1), dtype=np.int16),
+            10,
+            None,
+            None,
+        )
+
+        result = recorder.stop_capture()
+
+        assert result.status is AudioCaptureStatus.COMPLETED
+        assert result.track is not None
+        assert result.track.source is AudioSourceKind.MICROPHONE
+        assert result.track.path.is_file()
+        result.track.path.unlink()
+
+    @patch("app.audio.sd.RawInputStream")
+    def test_typed_stop_preserves_partial_track_after_device_disconnect(
+        self,
+        mock_stream,
+    ):
+        stream = MagicMock()
+        stream.stop.side_effect = OSError("device disconnected")
+        mock_stream.return_value = stream
+        recorder = AudioRecorder()
+        recorder.start()
+        recorder._callback(
+            np.array([100, -100], dtype=np.int16).tobytes(),
+            2,
+            None,
+            None,
+        )
+
+        result = recorder.stop_capture()
+
+        assert result.status is AudioCaptureStatus.INTERRUPTED
+        assert result.track is not None
+        assert result.track.path.is_file()
+        assert "device disconnected" in (result.error or "")
+        result.track.path.unlink()

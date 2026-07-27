@@ -160,7 +160,7 @@ class CrashReportDialog(QDialog):
 
         # Checkbox
         self.send_checkbox = QCheckBox("Send anonymous report to developers")
-        self.send_checkbox.setChecked(True)
+        self.send_checkbox.setChecked(False)
         content_layout.addWidget(self.send_checkbox)
 
         content_layout.addStretch()

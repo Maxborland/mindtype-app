@@ -5,14 +5,20 @@
 
 import logging
 import os
+import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 import threading
 import queue
+import time
 
 from .text_processor.repetition_filter import (
     filter_hallucinated_segments,
     check_transcription_quality,
+)
+from .optional_features import (
+    effective_diarization_backend,
+    local_diarization_available,
 )
 
 # Настройка логирования в файл
@@ -45,7 +51,9 @@ from .media_io import (
     AUDIO_EXTENSIONS,
     VIDEO_EXTENSIONS,
     ALL_EXTENSIONS,
+    enforce_media_duration_limit,
     is_supported_file,
+    supported_extensions,
     get_file_duration,
     extract_audio_from_video,
 )
@@ -78,6 +86,11 @@ class FileTranscriptionQueue:
         on_progress: Optional[ProgressCallback] = None,
         on_completed: Optional[CompletedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,  # Callback для AI thinking
+        cloud_executor=None,
+        cloud_summary_executor=None,
+        cloud_transcribe_options: Optional[Dict] = None,
+        cloud_summary_options: Optional[Dict] = None,
+        cloud_poll_interval: float = 1.0,
     ):
         summary = summary or SummaryOptions()
         postprocess = postprocess or PostProcessOptions()
@@ -111,10 +124,11 @@ class FileTranscriptionQueue:
         # Настройки постобработки
         self.enable_postprocessing = postprocess.enable
         self.postprocessing_diarization = postprocess.diarization
-        # Разрешаем "auto": OpenRouter при наличии ключа, иначе локальная
-        backend = postprocess.diarization_backend
-        if backend == "auto":
-            backend = "openrouter" if postprocess.diarization_api_key.strip() else "local"
+        backend = effective_diarization_backend(
+            postprocess.diarization_backend,
+            api_key=postprocess.diarization_api_key,
+            local_available=local_diarization_available(),
+        )
         self.postprocessing_diarization_backend = backend
         self.postprocessing_diarization_api_key = postprocess.diarization_api_key
         self.postprocessing_diarization_model = postprocess.diarization_model
@@ -133,20 +147,42 @@ class FileTranscriptionQueue:
         self._on_progress = on_progress
         self._on_completed = on_completed
         self._on_thinking = on_thinking
+        self.cloud_executor = cloud_executor
+        self.cloud_summary_executor = cloud_summary_executor
+        self.cloud_transcribe_options = dict(
+            cloud_transcribe_options or {}
+        )
+        self.cloud_summary_options = (
+            dict(cloud_summary_options)
+            if cloud_summary_options is not None
+            else None
+        )
+        self.cloud_poll_interval = max(0.0, float(cloud_poll_interval))
 
         self._tasks: List[FileTask] = []
         self._queue: queue.Queue = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
         self._running = threading.Event()
         self._cancelled = threading.Event()
+        self._shutdown_requested = threading.Event()
+        self._cloud_wait_interrupted = threading.Event()
         self._temp_files: List[Path] = []
         self._summarizer = None  # Ленивая инициализация
         self._text_processor = None  # Ленивая инициализация
+        for executor in (self.cloud_executor, self.cloud_summary_executor):
+            client = getattr(executor, "client", None)
+            set_retry_wait = getattr(client, "set_retry_wait", None)
+            if callable(set_retry_wait):
+                set_retry_wait(self._wait_for_cloud_retry)
 
     @property
     def tasks(self) -> List[FileTask]:
         """Получить список задач."""
         return self._tasks.copy()
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancelled.is_set()
 
     def add_files(self, file_paths: List[Path]) -> List[FileTask]:
         """
@@ -181,77 +217,160 @@ class FileTranscriptionQueue:
 
     def start(self) -> None:
         """Запустить обработку очереди."""
-        if self._running.is_set():
+        if (
+            self._running.is_set()
+            or self._shutdown_requested.is_set()
+        ):
             return
 
         self._running.set()
         self._cancelled.clear()
+        self._cloud_wait_interrupted.clear()
 
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
 
-    def cancel(self) -> None:
+    def cancel(self) -> list[FileTask]:
         """Отменить обработку."""
         self._cancelled.set()
         self._running.clear()
+        self._cloud_wait_interrupted.set()
+        if self.uses_local_transcriber:
+            cancel_current = getattr(
+                self.transcriber,
+                "cancel_current",
+                None,
+            )
+            if callable(cancel_current):
+                try:
+                    cancel_current()
+                except Exception:
+                    pass
 
-        # Помечаем все pending задачи как отменённые
+        cancelled_tasks = []
         for task in self._tasks:
             if task.status == FileStatus.PENDING:
-                task.status = FileStatus.CANCELLED
+                self._cancel_pending_task(task)
+                cancelled_tasks.append(task)
+        return cancelled_tasks
+
+    def stop_for_shutdown(self, timeout_seconds: float = 5.0) -> bool:
+        """Stop and join work while preserving any durable cloud job."""
+        self._shutdown_requested.set()
+        self._running.clear()
+        self._cloud_wait_interrupted.set()
+        if self.uses_local_transcriber:
+            cancel_current = getattr(
+                self.transcriber,
+                "cancel_current",
+                None,
+            )
+            if callable(cancel_current):
+                try:
+                    cancel_current()
+                except Exception:
+                    logger.exception(
+                        "Could not stop local transcription for shutdown"
+                    )
+        worker = self._worker_thread
+        if worker is None or worker is threading.current_thread():
+            return True
+        worker.join(max(0.0, float(timeout_seconds)))
+        return not worker.is_alive()
 
     def _worker(self) -> None:
         """Рабочий поток для обработки очереди."""
-        # Загружаем модель один раз
+        local_model_ready = self.cloud_executor is not None
+        local_model_error: Optional[Exception] = None
         try:
-            self.transcriber.load_model(
-                model_size=self.model_size,
-                compute_type=self.compute_type,
-                device=self.device,
-                models_dir=str(self.models_dir),
-            )
-        except Exception as e:
-            # Помечаем все задачи как ошибочные
-            for task in self._tasks:
-                if task.status == FileStatus.PENDING:
-                    task.status = FileStatus.ERROR
-                    task.error_message = f"Ошибка загрузки модели: {e}"
+            while self._running.is_set():
+                try:
+                    task = self._queue.get(timeout=0.5)
+                except queue.Empty:
+                    remaining = [
+                        t for t in self._tasks if t.status == FileStatus.PENDING
+                    ]
+                    if not remaining:
+                        break
+                    continue
+
+                if self._cancelled.is_set():
+                    if task.status == FileStatus.PENDING:
+                        self._cancel_pending_task(task)
+                    continue
+
+                try:
+                    if (
+                        not local_model_ready
+                        and not self._has_persisted_cloud_summary(task)
+                    ):
+                        if local_model_error is not None:
+                            raise RuntimeError(
+                                f"Ошибка загрузки модели: {local_model_error}"
+                            )
+                        try:
+                            prepare_operation = getattr(
+                                self.transcriber,
+                                "prepare_operation",
+                                None,
+                            )
+                            if callable(prepare_operation):
+                                prepare_operation()
+                            self.transcriber.load_model(
+                                model_size=self.model_size,
+                                compute_type=self.compute_type,
+                                device=self.device,
+                                models_dir=str(self.models_dir),
+                            )
+                            local_model_ready = True
+                        except Exception as exc:
+                            local_model_error = exc
+                            raise RuntimeError(
+                                f"Ошибка загрузки модели: {exc}"
+                            ) from exc
+                    self._process_task(task)
+                except Exception as exc:
+                    if self._shutdown_requested.is_set():
+                        return
+                    task.status = (
+                        FileStatus.CANCELLED
+                        if self._cancelled.is_set()
+                        else FileStatus.ERROR
+                    )
+                    if task.status is FileStatus.ERROR:
+                        task.error_message = str(exc)
                     if self._on_completed:
                         self._on_completed(task)
+        finally:
+            for tmp in self._temp_files:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._temp_files.clear()
             self._running.clear()
-            return
-
-        while self._running.is_set():
-            try:
-                task = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                # Проверяем, есть ли ещё задачи
-                remaining = [t for t in self._tasks if t.status == FileStatus.PENDING]
-                if not remaining:
-                    break
-                continue
-
-            if self._cancelled.is_set():
-                task.status = FileStatus.CANCELLED
-                if self._on_completed:
-                    self._on_completed(task)
-                continue
-
-            self._process_task(task)
-
-        # Очистка временных файлов
-        for tmp in self._temp_files:
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-        self._temp_files.clear()
-
-        self._running.clear()
 
     def _process_task(self, task: FileTask) -> None:
         """Обработать одну задачу."""
-        audio_path = task.file_path
+        if self.cloud_executor is not None:
+            self._process_cloud_task(task)
+            return
+        if self._restore_persisted_cloud_summary(task):
+            self._resume_persisted_cloud_summary(task)
+            return
+        processing_path = task.processing_path
+        audio_path = processing_path
+
+        def finish_cancelled() -> bool:
+            if self._shutdown_requested.is_set():
+                return True
+            if not self._cancelled.is_set():
+                return False
+            task.status = FileStatus.CANCELLED
+            task.progress = 0
+            if self._on_completed:
+                self._on_completed(task)
+            return True
 
         try:
             # Если видео - извлекаем аудио
@@ -261,15 +380,14 @@ class FileTranscriptionQueue:
                 if self._on_progress:
                     self._on_progress(task)
 
-                if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                if finish_cancelled():
                     return
 
-                audio_path = extract_audio_from_video(task.file_path)
+                audio_path = extract_audio_from_video(processing_path)
                 self._temp_files.append(audio_path)
                 task.progress = 20
+                if finish_cancelled():
+                    return
 
             # Транскрибция
             task.status = FileStatus.TRANSCRIBING
@@ -277,14 +395,14 @@ class FileTranscriptionQueue:
             if self._on_progress:
                 self._on_progress(task)
 
-            if self._cancelled.is_set():
-                task.status = FileStatus.CANCELLED
-                if self._on_completed:
-                    self._on_completed(task)
+            if finish_cancelled():
                 return
 
             # Получаем длительность
-            duration = get_file_duration(task.file_path)
+            duration = get_file_duration(processing_path)
+            enforce_media_duration_limit(duration)
+            if finish_cancelled():
+                return
 
             # Транскрибируем
             segments_data, detected_lang, prob = self.transcriber.transcribe_with_timestamps(
@@ -293,6 +411,8 @@ class FileTranscriptionQueue:
                 beam_size=self.beam_size,
                 vad_filter=self.vad_filter,
             )
+            if finish_cancelled():
+                return
 
             if not segments_data:
                 logger.warning(f"Транскрипция вернула 0 сегментов для {task.file_path.name}")
@@ -333,7 +453,11 @@ class FileTranscriptionQueue:
 
             # Создаём результат
             task.result = TranscriptionResult(
-                file_path=task.file_path,
+                file_path=(
+                    Path(task.display_name)
+                    if task.display_name
+                    else task.file_path
+                ),
                 segments=segments,
                 detected_language=detected_lang,
                 language_probability=prob,
@@ -344,10 +468,7 @@ class FileTranscriptionQueue:
             # Постобработка транскрипции (если включена)
             logger.info(f"Проверка постобработки: enable={self.enable_postprocessing}, text_len={len(task.result.full_text) if task.result.full_text else 0}")
             if self.enable_postprocessing and task.result.full_text:
-                if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                if finish_cancelled():
                     return
 
                 task.status = FileStatus.PROCESSING
@@ -365,6 +486,8 @@ class FileTranscriptionQueue:
                         segments_data,
                         task,
                     )
+                    if finish_cancelled():
+                        return
                     logger.info(f"Постобработка завершена. Stats: {processed_result.processing_stats}")
                     task.result.processed_text = processed_result.processed_text
                     task.result.processing_stats = processed_result.processing_stats
@@ -419,10 +542,7 @@ class FileTranscriptionQueue:
 
             # Суммаризация (если включена)
             if self.enable_summary and task.result.text_for_summary:
-                if self._cancelled.is_set():
-                    task.status = FileStatus.CANCELLED
-                    if self._on_completed:
-                        self._on_completed(task)
+                if finish_cancelled():
                     return
 
                 task.status = FileStatus.SUMMARIZING
@@ -431,13 +551,42 @@ class FileTranscriptionQueue:
                     self._on_progress(task)
 
                 try:
-                    summary, metrics = self._summarize_text(task.result.text_for_summary, task)
-                    if not summary or len(summary) < 10:
-                        raise ValueError("Суммаризация вернула пустой или слишком короткий результат")
-                    task.result.summary = summary
-                    task.result.summary_metrics = metrics.to_dict() if metrics else None
-                    task.result.summary_preset_name = self.summary_preset_name or None
+                    if (
+                        self.summary_provider == "mindtype_cloud"
+                        and self.cloud_summary_executor is not None
+                    ):
+                        if not self._summarize_local_result_in_cloud(task):
+                            if self._shutdown_requested.is_set():
+                                return
+                            if finish_cancelled():
+                                return
+                            if task.status is FileStatus.PENDING:
+                                return
+                            raise RuntimeError(
+                                "MindType Cloud summary did not complete"
+                            )
+                    else:
+                        summary, metrics = self._summarize_text(
+                            task.result.text_for_summary,
+                            task,
+                        )
+                        if finish_cancelled():
+                            return
+                        if not summary or len(summary) < 10:
+                            raise ValueError(
+                                "Суммаризация вернула пустой или слишком "
+                                "короткий результат"
+                            )
+                        task.result.summary = summary
+                        task.result.summary_metrics = (
+                            metrics.to_dict() if metrics else None
+                        )
+                        task.result.summary_preset_name = (
+                            self.summary_preset_name or None
+                        )
                 except Exception as e:
+                    if finish_cancelled():
+                        return
                     logger.error(f"Ошибка суммаризации для {task.file_path.name}: {e}")
                     # Теперь мы считаем это ошибкой задачи, если саммаризация была включена и не удалась
                     task.status = FileStatus.ERROR
@@ -446,15 +595,331 @@ class FileTranscriptionQueue:
                         self._on_completed(task)
                     return
 
+            if finish_cancelled():
+                return
             task.status = FileStatus.COMPLETED
             task.progress = 100
 
         except Exception as e:
-            task.status = FileStatus.ERROR
-            task.error_message = str(e)
+            if self._shutdown_requested.is_set():
+                return
+            if self._cancelled.is_set():
+                task.status = FileStatus.CANCELLED
+                task.progress = 0
+            else:
+                task.status = FileStatus.ERROR
+                task.error_message = str(e)
 
         if self._on_completed:
             self._on_completed(task)
+
+    def _has_persisted_cloud_summary(self, task: FileTask) -> bool:
+        executor = self.cloud_summary_executor
+        if executor is None:
+            return False
+        operation = executor.coordinator.store.get(task.operation_id)
+        return bool(
+            operation is not None
+            and operation.server_job_ids.get("summary")
+        )
+
+    def _restore_persisted_cloud_summary(self, task: FileTask) -> bool:
+        if not self._has_persisted_cloud_summary(task):
+            return False
+        coordinator = self.cloud_summary_executor.coordinator
+        checkpoint = coordinator.load_canonical_checkpoint(
+            task.operation_id
+        )
+        if checkpoint is None:
+            raise RuntimeError(
+                "Cloud summary checkpoint is missing"
+            )
+        task.result = self._result_from_canonical(
+            checkpoint,
+            fallback_path=task.file_path,
+        )
+        return True
+
+    def _resume_persisted_cloud_summary(self, task: FileTask) -> None:
+        task.status = FileStatus.SUMMARIZING
+        task.progress = 70
+        if self._on_progress:
+            self._on_progress(task)
+        try:
+            if not self._summarize_local_result_in_cloud(task):
+                if (
+                    self._shutdown_requested.is_set()
+                    or task.status in {
+                        FileStatus.PENDING,
+                        FileStatus.CANCELLED,
+                    }
+                ):
+                    return
+                raise RuntimeError(
+                    "MindType Cloud summary did not complete"
+                )
+            task.status = FileStatus.COMPLETED
+            task.progress = 100
+        except Exception as exc:
+            if self._shutdown_requested.is_set():
+                return
+            if self._cancelled.is_set():
+                task.status = FileStatus.CANCELLED
+                task.progress = 0
+            else:
+                task.status = FileStatus.ERROR
+                task.error_message = f"Ошибка саммаризации: {exc}"
+        if self._on_completed:
+            self._on_completed(task)
+
+    @staticmethod
+    def _result_from_canonical(
+        payload: Dict,
+        *,
+        fallback_path: Path,
+    ) -> TranscriptionResult:
+        transcript = payload["transcript"]
+        source = payload["source"]
+        route = payload.get("route", {})
+        segments = [
+            TranscriptionSegment(
+                start=float(segment["start_ms"]) / 1000,
+                end=float(segment["end_ms"]) / 1000,
+                text=str(segment["text"]),
+                speaker=segment.get("speaker_id"),
+                words=list(segment.get("words") or []),
+            )
+            for segment in transcript["segments"]
+        ]
+        speaker_stats = [
+            SpeakerStats(
+                speaker_id=str(speaker["speaker_id"]),
+                speaker_name=str(
+                    speaker.get("display_name") or speaker["speaker_id"]
+                ),
+                total_duration=float(
+                    speaker.get("total_duration_ms", 0)
+                )
+                / 1000,
+                segment_count=int(speaker.get("segment_count", 0)),
+                word_count=int(speaker.get("word_count", 0)),
+            )
+            for speaker in payload.get("speakers", [])
+        ]
+        summary = payload.get("summary")
+        transcription_route = route.get("transcription", {})
+        result = TranscriptionResult(
+            file_path=Path(source.get("display_name") or fallback_path),
+            segments=segments,
+            detected_language=str(transcript.get("language") or "und"),
+            language_probability=float(
+                transcript.get("confidence")
+                if transcript.get("confidence") is not None
+                else 0.0
+            ),
+            duration=float(source.get("duration_ms", 0)) / 1000,
+            model_used=str(transcription_route.get("model") or "auto"),
+            summary=(
+                str(summary.get("text"))
+                if isinstance(summary, dict) and summary.get("text")
+                else None
+            ),
+            processed_text=transcript.get("processed_text"),
+            speaker_stats=speaker_stats or None,
+            num_speakers=len(speaker_stats),
+            speaker_names={
+                item.speaker_id: item.speaker_name
+                for item in speaker_stats
+            },
+            summary_preset_name=(
+                str(summary.get("preset"))
+                if isinstance(summary, dict) and summary.get("preset")
+                else None
+            ),
+        )
+        return result
+
+    def _process_cloud_task(self, task: FileTask) -> None:
+        from .operation_models import OperationStage, OperationStatus
+
+        while True:
+            if self._shutdown_requested.is_set():
+                return
+            if self._cancelled.is_set():
+                try:
+                    operation = self.cloud_executor.cancel(
+                        task.operation_id
+                    )
+                except Exception:
+                    task.cancellation_pending = True
+                    raise
+            else:
+                operation = self.cloud_executor.advance_transcription(
+                    task.operation_id,
+                    options=self.cloud_transcribe_options,
+                    summary_options=self.cloud_summary_options,
+                )
+                if self._cancelled.is_set():
+                    continue
+
+            if operation.status is OperationStatus.COMPLETED:
+                if (
+                    operation.canonical_result_path is None
+                    or not operation.canonical_result_path.is_file()
+                ):
+                    raise RuntimeError(
+                        "Cloud operation completed without a local result"
+                    )
+                payload = json.loads(
+                    operation.canonical_result_path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+                task.result = self._result_from_canonical(
+                    payload,
+                    fallback_path=task.file_path,
+                )
+                task.status = FileStatus.COMPLETED
+                task.progress = 100
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+            if operation.status is OperationStatus.CANCELLED:
+                task.status = FileStatus.CANCELLED
+                task.progress = 0
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+            if operation.status is OperationStatus.RETRYABLE:
+                task.status = FileStatus.PENDING
+                task.progress = 0
+                task.error_message = (
+                    operation.last_error_code or "CLOUD_RETRY_REQUIRED"
+                )
+                self._running.clear()
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+            if operation.status is OperationStatus.FAILED:
+                task.status = FileStatus.ERROR
+                task.error_message = (
+                    operation.last_error_code or "CLOUD_PROCESSING_FAILED"
+                )
+                if self._on_completed:
+                    self._on_completed(task)
+                return
+
+            if operation.stage is OperationStage.SUMMARIZE:
+                task.status = FileStatus.SUMMARIZING
+                task.progress = max(task.progress, 70)
+            else:
+                task.status = FileStatus.TRANSCRIBING
+                task.progress = max(task.progress, 25)
+            if self._on_progress:
+                self._on_progress(task)
+            self._wait_for_cloud_poll()
+
+    def _summarize_local_result_in_cloud(self, task: FileTask) -> bool:
+        """Poll one idempotent summary job without repeating local STT."""
+        from .operation_models import OperationStage, OperationStatus
+
+        canonical_transcript = (
+            self.cloud_summary_executor.coordinator
+            .canonical_payload_for_file_task(task)
+        )
+        while True:
+            if self._shutdown_requested.is_set():
+                return False
+            if self._cancelled.is_set():
+                try:
+                    operation = self.cloud_summary_executor.cancel(
+                        task.operation_id
+                    )
+                except Exception:
+                    task.cancellation_pending = True
+                    raise
+            else:
+                operation = self.cloud_summary_executor.advance_summary(
+                    task.operation_id,
+                    canonical_transcript=canonical_transcript,
+                    options=self.cloud_summary_options or {},
+                )
+                if self._cancelled.is_set():
+                    continue
+            if operation.status is OperationStatus.COMPLETED:
+                result_path = operation.canonical_result_path
+                if result_path is None or not result_path.is_file():
+                    raise RuntimeError(
+                        "Cloud summary completed without a local result"
+                    )
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                task.result = self._result_from_canonical(
+                    payload,
+                    fallback_path=task.file_path,
+                )
+                return True
+            if operation.status is OperationStatus.CANCELLED:
+                return False
+            if operation.status is OperationStatus.RETRYABLE:
+                task.status = FileStatus.PENDING
+                task.progress = 0
+                task.error_message = (
+                    operation.last_error_code or "CLOUD_SUMMARY_RETRY_REQUIRED"
+                )
+                self._running.clear()
+                if self._on_completed:
+                    self._on_completed(task)
+                return False
+            if operation.status is OperationStatus.FAILED:
+                raise RuntimeError(
+                    operation.last_error_code or "CLOUD_SUMMARY_FAILED"
+                )
+            task.status = FileStatus.SUMMARIZING
+            task.progress = max(task.progress, 70)
+            if operation.stage is OperationStage.SUMMARIZE:
+                task.progress = max(task.progress, 75)
+            if self._on_progress:
+                self._on_progress(task)
+            self._wait_for_cloud_poll()
+
+    def _wait_for_cloud_poll(self) -> None:
+        if self._shutdown_requested.is_set():
+            return
+        self._cloud_wait_interrupted.clear()
+        if self._shutdown_requested.is_set():
+            return
+        self._cloud_wait_interrupted.wait(self.cloud_poll_interval)
+
+    def _wait_for_cloud_retry(self, delay_seconds: float) -> bool:
+        """Return True when cancellation or shutdown interrupted a retry."""
+        return self._cloud_wait_interrupted.wait(max(0.0, delay_seconds))
+
+    def _cancel_pending_task(self, task: FileTask) -> None:
+        task.cancellation_pending = self._has_persisted_remote_job(task)
+        task.status = FileStatus.CANCELLED
+        if self._on_completed:
+            self._on_completed(task)
+
+    def _has_persisted_remote_job(self, task: FileTask) -> bool:
+        if not task.operation_id:
+            return False
+        for executor in (
+            self.cloud_summary_executor,
+            self.cloud_executor,
+        ):
+            coordinator = getattr(executor, "coordinator", None)
+            store = getattr(coordinator, "store", None)
+            if store is None:
+                continue
+            operation = store.get(task.operation_id)
+            if operation is None:
+                continue
+            if (
+                operation.server_job_ids.get("summary")
+                or operation.server_job_ids.get("transcription")
+            ):
+                return True
+        return False
 
     def _summarize_text(self, text: str, task: FileTask):
         """Выполнить суммаризацию текста."""
@@ -603,6 +1068,10 @@ class FileTranscriptionQueue:
         return self._running.is_set()
 
     @property
+    def uses_local_transcriber(self) -> bool:
+        return self.cloud_executor is None
+
+    @property
     def completed_count(self) -> int:
         """Количество завершённых задач."""
         return sum(1 for t in self._tasks if t.status == FileStatus.COMPLETED)
@@ -611,4 +1080,3 @@ class FileTranscriptionQueue:
     def total_count(self) -> int:
         """Общее количество задач."""
         return len(self._tasks)
-

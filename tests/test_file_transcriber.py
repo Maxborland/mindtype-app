@@ -8,19 +8,59 @@
 """
 
 import tempfile
+import wave
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 
+def test_windows_ga_media_limit_rejects_more_than_eight_hours() -> None:
+    from app.media_io import (
+        MediaDurationTooLong,
+        MediaDurationUnavailable,
+        enforce_media_duration_limit,
+    )
+
+    enforce_media_duration_limit(8 * 60 * 60)
+
+    with pytest.raises(MediaDurationUnavailable, match="measured"):
+        enforce_media_duration_limit(0)
+    with pytest.raises(MediaDurationTooLong, match="8 hours"):
+        enforce_media_duration_limit(8 * 60 * 60 + 0.001)
+
+
+def test_duration_uses_bundled_soundfile_when_ffprobe_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.media_io import get_file_duration
+
+    source = tmp_path / "duration.wav"
+    with wave.open(str(source), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16_000)
+        audio.writeframes(b"\0\0" * 8_000)
+    monkeypatch.setattr(
+        "app.media_io.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    assert get_file_duration(source) == pytest.approx(0.5)
+
+
 class TestIsSupportedFile:
     """Тесты для is_supported_file."""
 
-    def test_is_supported_file_audio(self):
+    def test_is_supported_file_audio(self, monkeypatch):
         """is_supported_file должен возвращать True для аудио файлов."""
         from app.file_transcriber import is_supported_file
 
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: True,
+        )
         audio_files = [
             Path("test.mp3"),
             Path("test.wav"),
@@ -35,10 +75,14 @@ class TestIsSupportedFile:
         for audio_file in audio_files:
             assert is_supported_file(audio_file) is True, f"Should support {audio_file.suffix}"
 
-    def test_is_supported_file_video(self):
+    def test_is_supported_file_video(self, monkeypatch):
         """is_supported_file должен возвращать True для видео файлов."""
         from app.file_transcriber import is_supported_file
 
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: True,
+        )
         video_files = [
             Path("test.mp4"),
             Path("test.mkv"),
@@ -69,13 +113,44 @@ class TestIsSupportedFile:
         for unsupported_file in unsupported_files:
             assert is_supported_file(unsupported_file) is False, f"Should not support {unsupported_file.suffix}"
 
-    def test_is_supported_file_case_insensitive(self):
+    def test_is_supported_file_case_insensitive(self, monkeypatch):
         """is_supported_file должен быть case-insensitive."""
         from app.file_transcriber import is_supported_file
 
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: True,
+        )
         assert is_supported_file(Path("test.MP3")) is True
         assert is_supported_file(Path("test.Mp4")) is True
         assert is_supported_file(Path("test.WAV")) is True
+
+    def test_base_runtime_does_not_advertise_unprobeable_media(
+        self,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            is_supported_file,
+            supported_extensions,
+        )
+
+        monkeypatch.setattr(
+            "app.media_io.full_media_probe_available",
+            lambda: False,
+        )
+
+        assert is_supported_file(Path("meeting.wav")) is True
+        assert is_supported_file(Path("meeting.mp3")) is True
+        assert is_supported_file(Path("meeting.mp4")) is False
+        assert is_supported_file(Path("meeting.m4a")) is False
+        assert not (supported_extensions() & {
+            ".mp4",
+            ".mkv",
+            ".mov",
+            ".m4a",
+            ".aac",
+            ".wma",
+        })
 
 
 class TestFileTask:
@@ -92,6 +167,9 @@ class TestFileTask:
         assert task.progress == 0
         assert task.error_message == ""
         assert task.result is None
+        assert task.output_files == {}
+        assert task.claim_trial_time_charge() is True
+        assert task.claim_trial_time_charge() is False
 
     def test_file_task_is_video(self):
         """is_video должен возвращать True для видео файлов."""
@@ -120,6 +198,22 @@ class TestFileTask:
         task = FileTask(file_path=Path("/path/to/test.mp3"))
 
         assert task.file_name == "test.mp3"
+
+    def test_file_task_uses_durable_asset_without_losing_display_name(
+        self,
+        tmp_path,
+    ):
+        from app.file_transcriber import FileTask
+
+        spool_source = tmp_path / "spool" / "operation-1" / "source.wav"
+        task = FileTask(
+            file_path=Path("C:/Users/customer/interview.wav"),
+            source_asset_path=spool_source,
+            display_name="customer interview.wav",
+        )
+
+        assert task.processing_path == spool_source
+        assert task.file_name == "customer interview.wav"
 
 
 class TestFileStatus:
@@ -159,6 +253,255 @@ class TestFileStatus:
         # Переход в completed
         task.status = FileStatus.COMPLETED
         assert task.status == FileStatus.COMPLETED
+
+
+class TestFileCancellation:
+    def test_cancel_returns_every_pending_task_for_durable_sync(self, tmp_path):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        completed = []
+        queue = FileTranscriptionQueue(
+            MagicMock(),
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=completed.append,
+        )
+        active = FileTask(file_path=tmp_path / "active.wav")
+        active.status = FileStatus.TRANSCRIBING
+        pending = [
+            FileTask(file_path=tmp_path / "second.wav"),
+            FileTask(file_path=tmp_path / "third.wav"),
+        ]
+        queue._tasks.extend([active, *pending])
+
+        cancelled = queue.cancel()
+
+        assert cancelled == pending
+        assert completed == pending
+        assert all(task.status is FileStatus.CANCELLED for task in pending)
+        assert active.status is FileStatus.TRANSCRIBING
+
+    def test_cancel_persists_every_prepared_batch_item(self, tmp_path):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+        from app.operation_coordinator import OperationCoordinator
+        from app.operation_models import OperationStatus
+        from app.operation_store import OperationStore
+        from app.spool import SpoolManager
+
+        coordinator = OperationCoordinator(
+            store=OperationStore(tmp_path / "operations.sqlite3"),
+            spool=SpoolManager(tmp_path / "spool"),
+        )
+        tasks = []
+        for index in range(2):
+            source = tmp_path / f"batch-{index}.wav"
+            source.write_bytes(f"audio-{index}".encode())
+            task = FileTask(file_path=source)
+            coordinator.prepare_file_task(
+                task,
+                route={"transcription": {"provider": "local", "model": "tiny"}},
+            )
+            tasks.append(task)
+
+        queue = FileTranscriptionQueue(
+            MagicMock(),
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=coordinator.sync_file_task,
+        )
+        queue._tasks.extend(tasks)
+
+        queue.cancel()
+
+        assert all(task.status is FileStatus.CANCELLED for task in tasks)
+        assert all(
+            coordinator.store.get(task.operation_id).status
+            is OperationStatus.CANCELLED
+            for task in tasks
+        )
+
+    def test_cancel_during_transcription_cannot_return_to_completed(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        class CancellingTranscriber:
+            queue = None
+
+            def transcribe_with_timestamps(self, **kwargs):
+                self.queue.cancel()
+                return ([{"start": 0.0, "end": 1.0, "text": "текст"}], "ru", 1.0)
+
+        transcriber = CancellingTranscriber()
+        completed = []
+        queue = FileTranscriptionQueue(
+            transcriber,
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=completed.append,
+        )
+        transcriber.queue = queue
+        task = FileTask(file_path=audio_path)
+        monkeypatch.setattr("app.file_transcriber.get_file_duration", lambda _: 1.0)
+
+        queue._process_task(task)
+
+        assert task.status is FileStatus.CANCELLED
+        assert completed == [task]
+
+
+class TestDurableFileSource:
+    def test_queue_reads_spool_asset_when_original_is_unavailable(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        class CapturingTranscriber:
+            def __init__(self):
+                self.audio_path = None
+
+            def transcribe_with_timestamps(self, *, audio_path, **_kwargs):
+                self.audio_path = audio_path
+                return (
+                    [{"start": 0.0, "end": 1.0, "text": "durable text"}],
+                    "en",
+                    0.9,
+                )
+
+        original = tmp_path / "deleted-original.wav"
+        spool_source = tmp_path / "spool" / "operation-1" / "source.wav"
+        spool_source.parent.mkdir(parents=True)
+        spool_source.write_bytes(b"audio")
+        duration_paths = []
+        monkeypatch.setattr(
+            "app.file_transcriber.get_file_duration",
+            lambda path: duration_paths.append(path) or 1.0,
+        )
+        transcriber = CapturingTranscriber()
+        queue = FileTranscriptionQueue(
+            transcriber,
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="en",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+        )
+        task = FileTask(
+            file_path=original,
+            source_asset_path=spool_source,
+            display_name="customer interview.wav",
+        )
+
+        queue._process_task(task)
+
+        assert task.status is FileStatus.COMPLETED
+        assert transcriber.audio_path == spool_source
+        assert duration_paths == [spool_source]
+        assert task.result.file_path.name == "customer interview.wav"
+
+    def test_worker_cleans_temporary_files_after_unexpected_failure(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.file_transcriber import (
+            FileStatus,
+            FileTask,
+            FileTranscriptionQueue,
+            TranscribeOptions,
+        )
+
+        class LoadedTranscriber:
+            def load_model(self, **kwargs):
+                return None
+
+        completed = []
+        queue = FileTranscriptionQueue(
+            LoadedTranscriber(),
+            TranscribeOptions(
+                model_size="tiny",
+                compute_type="int8",
+                device="cpu",
+                language="ru",
+                beam_size=1,
+                vad_filter=False,
+                models_dir=tmp_path,
+            ),
+            on_completed=completed.append,
+        )
+        source = tmp_path / "source.wav"
+        source.touch()
+        temporary = tmp_path / "extracted.wav"
+        temporary.touch()
+        task = FileTask(file_path=source)
+        queue._tasks.append(task)
+        queue._queue.put(task)
+        queue._temp_files.append(temporary)
+        queue._running.set()
+        monkeypatch.setattr(
+            queue,
+            "_process_task",
+            lambda _: (_ for _ in ()).throw(RuntimeError("unexpected")),
+        )
+
+        queue._worker()
+
+        assert not temporary.exists()
+        assert not queue.is_running
+        assert task.status is FileStatus.ERROR
+        assert completed == [task]
 
 
 class TestTranscriptionSegment:

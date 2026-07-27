@@ -2,7 +2,7 @@
 MindType Cloud LLM Provider.
 
 Прокси-провайдер через MindType Gateway с системой кредитов.
-Клиентам нужен только лицензионный ключ, не API ключи.
+Авторизация выполняется только короткоживущей cloud session.
 """
 
 import json
@@ -10,7 +10,7 @@ import logging
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Generator
+from typing import Callable, Dict, List, Optional, Union
 
 from .base import (
     LLMProvider,
@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 def get_api_url(endpoint: str = "") -> str:
     """Get the MindType API base URL."""
     try:
-        from ..env import API_URL
-        return API_URL + endpoint
+        from ..env import API_BASE_URL
+        return API_BASE_URL.rstrip("/") + endpoint
     except ImportError:
         return "https://mindtype.space" + endpoint
 
@@ -63,21 +63,45 @@ class MindTypeCloudProvider(LLMProvider):
     """
     Провайдер через MindType Gateway с кредитами.
 
-    Использует лицензионный ключ вместо API ключа.
-    Кредиты списываются за каждую уникальную встречу.
+    Perpetual license key никогда не используется как bearer credential.
     """
 
     PROVIDER_NAME = "MindType Cloud"
 
-    def __init__(self, license_key: str = "", timeout: int = 180):
+    def __init__(
+        self,
+        access_token: Union[str, Callable[[], Optional[str]]],
+        *,
+        refresh_access_token: Optional[Callable[[], None]] = None,
+        timeout: int = 180,
+    ):
         """
         Args:
-            license_key: Лицензионный ключ MindType
+            access_token: Короткоживущий токен или in-memory token source
+            refresh_access_token: Callback обновления cloud session
             timeout: Таймаут запросов в секундах
         """
-        super().__init__(api_key=license_key, timeout=timeout)
-        self.license_key = license_key
+        super().__init__(api_key="", timeout=timeout)
+        self._access_token = access_token
+        self._refresh_access_token = refresh_access_token
         self._credits_balance: Optional[int] = None
+
+    def _token(self) -> str:
+        token = (
+            self._access_token()
+            if callable(self._access_token)
+            else self._access_token
+        )
+        if not token and self._refresh_access_token is not None:
+            self._refresh_access_token()
+            token = (
+                self._access_token()
+                if callable(self._access_token)
+                else self._access_token
+            )
+        if not token:
+            raise LLMAuthError("MindType Cloud session is required")
+        return token
 
     @property
     def credits_balance(self) -> Optional[int]:
@@ -110,52 +134,81 @@ class MindTypeCloudProvider(LLMProvider):
         """
         url = get_api_url(endpoint)
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.license_key}",
-        }
-
         body = json.dumps(data).encode("utf-8") if data else None
-
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers=headers,
-            method=method,
-        )
-
-        try:
-            response = urlopen_with_ssl(request, timeout=self.timeout)
-            response_data = json.loads(response.read().decode("utf-8"))
-            return response_data
-
-        except urllib.error.HTTPError as e:
+        for attempt in range(2):
+            request = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._token()}",
+                },
+                method=method,
+            )
             try:
-                error_body = json.loads(e.read().decode("utf-8"))
-                error_code = error_body.get("error", "")
-                error_message = error_body.get("message", str(e))
-            except Exception:
-                error_code = ""
-                error_message = str(e)
-
-            if e.code == 401:
-                raise LLMAuthError(error_message)
-            elif e.code == 402:
-                # No credits
-                raise LLMNoCreditsError(
-                    credits_remaining=error_body.get("creditsRemaining", 0),
-                    buy_url=error_body.get("buyUrl", "https://mindtype.space/buy-credits"),
+                response = urlopen_with_ssl(request, timeout=self.timeout)
+                return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                if (
+                    error.code == 401
+                    and attempt == 0
+                    and self._refresh_access_token is not None
+                ):
+                    self._refresh_access_token()
+                    continue
+                self._raise_http_error(error)
+            except urllib.error.URLError as error:
+                raise LLMConnectionError(
+                    f"Connection error: {error.reason}"
                 )
-            elif e.code == 429:
-                raise LLMRateLimitError(error_message)
-            else:
-                raise LLMError(f"{error_code}: {error_message}")
+            except (
+                LLMAuthError,
+                LLMNoCreditsError,
+                LLMRateLimitError,
+            ):
+                raise
+            except Exception as error:
+                raise LLMError(f"Request failed: {error}")
+        raise LLMAuthError("MindType Cloud session refresh failed")
 
-        except urllib.error.URLError as e:
-            raise LLMConnectionError(f"Connection error: {e.reason}")
+    @staticmethod
+    def _raise_http_error(error: urllib.error.HTTPError) -> None:
+        try:
+            error_body = json.loads(error.read().decode("utf-8"))
+            raw_error = error_body.get("error")
+            details = raw_error if isinstance(raw_error, dict) else {}
+            error_code = str(
+                details.get("code")
+                or raw_error
+                or f"HTTP_{error.code}"
+            )
+            error_message = str(
+                details.get("message")
+                or error_body.get("message")
+                or error_code
+            )
+        except Exception:
+            error_body = {}
+            error_code = f"HTTP_{error.code}"
+            error_message = str(error)
 
-        except Exception as e:
-            raise LLMError(f"Request failed: {e}")
+        if error.code == 401:
+            raise LLMAuthError(error_message)
+        if error.code == 402:
+            raise LLMNoCreditsError(
+                credits_remaining=int(
+                    error_body.get("creditsRemaining", 0)
+                ),
+                buy_url=str(
+                    error_body.get(
+                        "buyUrl",
+                        "https://mindtype.space/buy-credits",
+                    )
+                ),
+            )
+        if error.code == 429:
+            raise LLMRateLimitError(error_message)
+        raise LLMError(f"{error_code}: {error_message}")
 
     def _fetch_models_from_api(self) -> List[LLMModel]:
         """
@@ -276,13 +329,15 @@ class MindTypeCloudProvider(LLMProvider):
         Raises:
             LLMAuthError: Неверный лицензионный ключ
         """
-        response = self._make_request("GET", "/api/credits/balance")
+        response = self._make_request("GET", "/v1/usage")
 
-        self._credits_balance = response.get("credits", 0)
+        self._credits_balance = int(
+            response.get("balance_microunits", 0)
+        )
 
         return CreditsInfo(
             credits=self._credits_balance,
-            history=response.get("history", []),
+            history=response.get("ledger", []),
         )
 
     def has_credits(self) -> bool:
