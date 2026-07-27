@@ -751,6 +751,15 @@ class MindTypeCloudExecutor:
         "running",
     }
 
+    @staticmethod
+    def _is_retryable_failure(job: Mapping[str, Any]) -> bool:
+        error = job.get("error")
+        return (
+            str(job.get("state") or "") == "failed"
+            and isinstance(error, Mapping)
+            and bool(error.get("retryable", False))
+        )
+
     def __init__(
         self,
         *,
@@ -1121,7 +1130,10 @@ class MindTypeCloudExecutor:
             summary_id = operation.server_job_ids.get("summary")
             if summary_id:
                 summary_job = self.client.get_summary(summary_id)
-                if str(summary_job.get("state") or "") == "awaiting_funds":
+                if (
+                    str(summary_job.get("state") or "") == "awaiting_funds"
+                    or self._is_retryable_failure(summary_job)
+                ):
                     summary_job = self.client.resume_summary(summary_id)
                 return self._handle_summary_job(
                     operation_id,
@@ -1135,7 +1147,7 @@ class MindTypeCloudExecutor:
                 if str(job.get("state") or "") in {
                     "awaiting_funds",
                     "awaiting_upload",
-                }:
+                } or self._is_retryable_failure(job):
                     job = self.client.resume_transcription(
                         transcription_id
                     )
@@ -1272,7 +1284,10 @@ class MindTypeCloudExecutor:
             summary_id = operation.server_job_ids.get("summary")
             if summary_id:
                 summary_job = self.client.get_summary(summary_id)
-                if str(summary_job.get("state") or "") == "awaiting_funds":
+                if (
+                    str(summary_job.get("state") or "") == "awaiting_funds"
+                    or self._is_retryable_failure(summary_job)
+                ):
                     summary_job = self.client.resume_summary(summary_id)
                 return self._handle_summary_job(
                     operation_id,
