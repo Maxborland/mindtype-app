@@ -13,7 +13,6 @@ from typing import Iterator, Optional, Tuple
 from uuid import uuid4
 
 from .transcription_models import (
-    FileStatus,
     FileTask,
     TranscriptionResult,
     TranscriptionSegment,
@@ -73,16 +72,27 @@ class TranscriptDocument:
     updated_at: datetime
     revisions: Tuple[TranscriptRevision, ...]
     summary_variants: Tuple[SummaryVariant, ...]
+    cloud_job_id: Optional[str] = None
+    cloud_summary_job_id: Optional[str] = None
+    cloud_cleanup_acknowledged: bool = False
+    cloud_summary_cleanup_acknowledged: bool = False
 
     @property
     def current_revision(self) -> TranscriptRevision:
         return self.revisions[-1]
 
 
+@dataclass(frozen=True)
+class PendingCloudCleanup:
+    document_id: str
+    job_id: str
+    kind: str
+
+
 class TranscriptStore:
     """Small public interface around MindType's durable transcript library."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
@@ -109,8 +119,11 @@ class TranscriptStore:
                 """
                 INSERT INTO transcript_documents (
                     id, source_path, detected_language, language_probability,
-                    duration, model_used, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    duration, model_used, created_at, updated_at,
+                    cloud_job_id, cloud_summary_job_id,
+                    cloud_cleanup_acknowledged,
+                    cloud_summary_cleanup_acknowledged
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document_id,
@@ -121,6 +134,10 @@ class TranscriptStore:
                     result.model_used,
                     created_at.isoformat(),
                     created_at.isoformat(),
+                    result.cloud_job_id,
+                    result.cloud_summary_job_id,
+                    int(result.cloud_cleanup_acknowledged),
+                    int(result.cloud_summary_cleanup_acknowledged),
                 ),
             )
             connection.execute(
@@ -326,12 +343,95 @@ class TranscriptStore:
             for row in rows
         )
         return tuple(document for document in documents if document is not None)
+    def register_cloud_summary_job(self, document_id: str, job_id: str) -> None:
+        """Persist a summary job before attempting remote cleanup."""
+        normalized_job_id = str(job_id).strip()
+        if not normalized_job_id:
+            raise ValueError("Cloud summary job id cannot be empty")
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE transcript_documents
+                SET cloud_summary_job_id = ?,
+                    cloud_summary_cleanup_acknowledged = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (normalized_job_id, datetime.now().isoformat(), document_id),
+            )
+            if updated.rowcount != 1:
+                raise KeyError(f"Расшифровка {document_id} не найдена")
+
+    def mark_cloud_cleanup_acknowledged(
+        self,
+        document_id: str,
+        job_id: str,
+        kind: str,
+    ) -> bool:
+        """Mark one remote artifact as acknowledged after a successful ACK."""
+        columns = {
+            "transcription": ("cloud_job_id", "cloud_cleanup_acknowledged"),
+            "summary": ("cloud_summary_job_id", "cloud_summary_cleanup_acknowledged"),
+        }
+        job_column, acknowledged_column = columns.get(kind, (None, None))
+        if job_column is None or acknowledged_column is None:
+            raise ValueError(f"Unknown Cloud cleanup kind: {kind}")
+        with self._connect() as connection:
+            updated = connection.execute(
+                f"""
+                UPDATE transcript_documents
+                SET {acknowledged_column} = 1,
+                    updated_at = ?
+                WHERE id = ? AND {job_column} = ?
+                """,
+                (datetime.now().isoformat(), document_id, str(job_id)),
+            )
+        return updated.rowcount == 1
+
+    def list_pending_cloud_cleanups(self) -> Tuple[PendingCloudCleanup, ...]:
+        """Return Cloud jobs whose local cleanup ACK is still pending."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, cloud_job_id, cloud_summary_job_id,
+                       cloud_cleanup_acknowledged,
+                       cloud_summary_cleanup_acknowledged
+                FROM transcript_documents
+                WHERE (cloud_job_id IS NOT NULL AND cloud_cleanup_acknowledged = 0)
+                   OR (cloud_summary_job_id IS NOT NULL
+                       AND cloud_summary_cleanup_acknowledged = 0)
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        pending = []
+        for row in rows:
+            if row["cloud_job_id"] and not row["cloud_cleanup_acknowledged"]:
+                pending.append(
+                    PendingCloudCleanup(
+                        document_id=row["id"],
+                        job_id=row["cloud_job_id"],
+                        kind="transcription",
+                    )
+                )
+            if row["cloud_summary_job_id"] and not row["cloud_summary_cleanup_acknowledged"]:
+                pending.append(
+                    PendingCloudCleanup(
+                        document_id=row["id"],
+                        job_id=row["cloud_summary_job_id"],
+                        kind="summary",
+                    )
+                )
+        return tuple(pending)
+
     def get_document(self, document_id: str) -> Optional[TranscriptDocument]:
         with self._connect() as connection:
             document_row = connection.execute(
                 """
                 SELECT id, source_path, detected_language, language_probability,
-                       duration, model_used, created_at, updated_at
+                       duration, model_used, created_at, updated_at,
+                       cloud_job_id, cloud_summary_job_id,
+                       cloud_cleanup_acknowledged,
+                       cloud_summary_cleanup_acknowledged
                 FROM transcript_documents
                 WHERE id = ?
                 """,
@@ -379,6 +479,12 @@ class TranscriptStore:
             updated_at=datetime.fromisoformat(document_row["updated_at"]),
             revisions=revisions,
             summary_variants=variants,
+            cloud_job_id=document_row["cloud_job_id"],
+            cloud_summary_job_id=document_row["cloud_summary_job_id"],
+            cloud_cleanup_acknowledged=bool(document_row["cloud_cleanup_acknowledged"]),
+            cloud_summary_cleanup_acknowledged=bool(
+                document_row["cloud_summary_cleanup_acknowledged"]
+            ),
         )
 
     def _initialize(self) -> None:
@@ -398,6 +504,23 @@ class TranscriptStore:
                     "INSERT INTO schema_info (version) VALUES (?)",
                     (self._SCHEMA_VERSION,),
                 )
+            elif version["version"] == 1:
+                connection.execute(
+                    "ALTER TABLE transcript_documents ADD COLUMN cloud_job_id TEXT"
+                )
+                connection.execute(
+                    "ALTER TABLE transcript_documents ADD COLUMN cloud_summary_job_id TEXT"
+                )
+                connection.execute(
+                    "ALTER TABLE transcript_documents ADD COLUMN cloud_cleanup_acknowledged INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    "ALTER TABLE transcript_documents ADD COLUMN cloud_summary_cleanup_acknowledged INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    "UPDATE schema_info SET version = ?",
+                    (self._SCHEMA_VERSION,),
+                )
             elif version["version"] != self._SCHEMA_VERSION:
                 raise UnsupportedSchemaVersion(
                     f"Неподдерживаемая версия схемы: {version['version']}"
@@ -413,7 +536,11 @@ class TranscriptStore:
                     duration REAL NOT NULL,
                     model_used TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    cloud_job_id TEXT,
+                    cloud_summary_job_id TEXT,
+                    cloud_cleanup_acknowledged INTEGER NOT NULL DEFAULT 0,
+                    cloud_summary_cleanup_acknowledged INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -520,7 +647,9 @@ def persist_completed_task(
     store: TranscriptStore,
     task: FileTask,
 ) -> Optional[TranscriptDocument]:
-    if task.status != FileStatus.COMPLETED or task.result is None:
+    # A transcript result remains valid when a downstream summary or report
+    # stage failed. Persist any task that reached a durable result object.
+    if task.result is None:
         return None
     try:
         document = store.save_result(task.result)

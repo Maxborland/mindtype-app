@@ -214,13 +214,27 @@ def test_trial_cloud_file_summary_persists_before_both_acks(tmp_path: Path, summ
     document = persist_completed_task(store, task)
     assert document is not None
     assert len(document.summary_variants) == 1
+    assert {
+        item.kind for item in store.list_pending_cloud_cleanups()
+    } == {"transcription", "summary"}
     transcriber.acknowledge_result(task.result.cloud_job_id or "")
+    store.mark_cloud_cleanup_acknowledged(
+        document.id,
+        task.result.cloud_job_id or "",
+        "transcription",
+    )
     transcriber.acknowledge_summary(task.result.cloud_summary_job_id or "")
+    store.mark_cloud_cleanup_acknowledged(
+        document.id,
+        task.result.cloud_summary_job_id or "",
+        "summary",
+    )
     assert _SummaryContractHandler.transcription_ack is True
     assert _SummaryContractHandler.summary_ack is True
+    assert store.list_pending_cloud_cleanups() == ()
 
 
-def test_failed_cloud_summary_does_not_ack_transcription_or_summary(tmp_path: Path, summary_server: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failed_cloud_summary_preserves_transcript_for_durable_save(tmp_path: Path, summary_server: str, monkeypatch: pytest.MonkeyPatch) -> None:
     _SummaryContractHandler.fail_summary = True
     source = tmp_path / "meeting.wav"
     source.write_bytes(b"audio")
@@ -235,7 +249,15 @@ def test_failed_cloud_summary_does_not_ack_transcription_or_summary(tmp_path: Pa
     )
     task = FileTask(source)
     queue._process_task(task)
-    assert task.status is FileStatus.ERROR
-    assert "summary unavailable" in task.error_message
+    assert task.status is FileStatus.COMPLETED
+    assert task.result is not None
+    assert "Саммари недоступно" in task.warning
+    assert task.error_message == ""
     assert _SummaryContractHandler.transcription_ack is False
     assert _SummaryContractHandler.summary_ack is False
+
+    store = TranscriptStore(tmp_path / "mindtype.db")
+    document = persist_completed_task(store, task)
+    assert document is not None
+    assert document.cloud_job_id == "transcription-1"
+    assert store.list_pending_cloud_cleanups()[0].kind == "transcription"

@@ -751,9 +751,73 @@ class MainWindow(QMainWindow):
             if hasattr(self, '_credits_widget'):
                 self._refresh_credits_balance()
 
+            self._retry_pending_cloud_acknowledgements()
             logger.info("MindType Cloud provider initialized")
         except Exception as e:
             logger.error(f"Failed to initialize MindType Cloud: {e}")
+
+    def _retry_pending_cloud_acknowledgements(self) -> None:
+        """Retry durable Cloud cleanup jobs after reopening the desktop."""
+        if self._transcript_store is None:
+            return
+        pending = self._transcript_store.list_pending_cloud_cleanups()
+        if not pending:
+            return
+        license_info = self.license_manager.get_license_info()
+        transcriber = MindTypeCloudTranscriber(
+            base_url=API_BASE_URL,
+            license_key=license_info.license_key or "",
+            device_id=self.license_manager.get_device_id(),
+            desktop_version=APP_VERSION,
+            platform=PLATFORM,
+        )
+        for cleanup in pending:
+            if cleanup.job_id in self._cloud_ack_workers:
+                continue
+            ack_method = (
+                "acknowledge_result"
+                if cleanup.kind == "transcription"
+                else "acknowledge_summary"
+            )
+            worker = CloudAcknowledgeWorker(
+                transcriber,
+                cleanup.job_id,
+                ack_method=ack_method,
+            )
+            worker.acknowledged.connect(
+                lambda job_id, error, item=cleanup: (
+                    self._on_pending_cloud_acknowledged(item, job_id, error)
+                )
+            )
+            worker.finished.connect(
+                lambda job_id=cleanup.job_id: self._cloud_ack_workers.pop(
+                    job_id,
+                    None,
+                )
+            )
+            worker.finished.connect(worker.deleteLater)
+            self._cloud_ack_workers[cleanup.job_id] = worker
+            worker.start()
+
+    def _on_pending_cloud_acknowledged(
+        self,
+        cleanup,
+        job_id: str,
+        error: str,
+    ) -> None:
+        if error:
+            logger.warning(
+                "Cloud cleanup retry failed for %s: %s",
+                job_id,
+                error,
+            )
+            return
+        if self._transcript_store is not None:
+            self._transcript_store.mark_cloud_cleanup_acknowledged(
+                cleanup.document_id,
+                job_id,
+                cleanup.kind,
+            )
 
     def _refresh_credits_balance(self) -> None:
         """Refresh credits balance from server."""
@@ -4272,30 +4336,40 @@ class MainWindow(QMainWindow):
             widget.update_status()
 
     def _on_file_task_completed(self, task: FileTask) -> None:
-        """Задача завершена."""
+        """Persist every valid transcript before handling Cloud cleanup."""
         key = self._task_key(task.file_path)
         widget = self._file_widgets.get(key)
-        if widget:
-            widget.update_status()
 
-        if task.status == FileStatus.COMPLETED:
-            if task.result is not None and task.library_document_id is None:
-                if self._transcript_store is not None:
-                    persist_completed_task(self._transcript_store, task)
-                else:
-                    warning = (
-                        "Не удалось сохранить расшифровку в библиотеку: "
-                        f"{self._transcript_store_error}"
-                    )
-                    task.warning = "\n".join(
-                        part for part in (task.warning, warning) if part
-                    )
+        persistable_statuses = {
+            FileStatus.COMPLETED,
+            FileStatus.ERROR,
+            FileStatus.GENERATING,
+        }
+        if (
+            task.result is not None
+            and task.status in persistable_statuses
+            and task.library_document_id is None
+        ):
+            if self._transcript_store is not None:
+                persist_completed_task(self._transcript_store, task)
+            else:
+                warning = (
+                    "Не удалось сохранить расшифровку в библиотеку: "
+                    f"{self._transcript_store_error}"
+                )
+                task.warning = "\n".join(
+                    part for part in (task.warning, warning) if part
+                )
 
-                if widget:
-                    widget.update_status()
-
-            if task.library_document_id is not None and (
-
+        # A downstream summary/report failure must not hide a valid transcript.
+        if (
+            task.result is not None
+            and task.status in persistable_statuses
+            and task.library_document_id is not None
+        ):
+            task.status = FileStatus.COMPLETED
+            task.error_message = ""
+            if (
                 (
                     task.result.cloud_job_id
                     and not task.result.cloud_cleanup_acknowledged
@@ -4307,13 +4381,16 @@ class MainWindow(QMainWindow):
             ):
                 self._start_cloud_acknowledgement(task)
 
-            if self.transcript_library is not None and task.library_document_id:
+            if self.transcript_library is not None:
                 self.transcript_library.refresh()
 
             self._last_completed_task = task
             # Если обрабатываем один файл — открываем отчёт автоматически
             if getattr(self, "_file_processing_batch_size", 0) == 1:
                 self._auto_open_transcription(task)
+
+        if widget:
+            widget.update_status()
 
     def _start_cloud_acknowledgement(self, task: FileTask) -> None:
         """Confirm Cloud cleanup only after the transcript/summary is durable locally."""
@@ -4370,8 +4447,20 @@ class MainWindow(QMainWindow):
             )
         elif job_id == task.result.cloud_job_id:
             task.result.cloud_cleanup_acknowledged = True
+            if self._transcript_store is not None and task.library_document_id:
+                self._transcript_store.mark_cloud_cleanup_acknowledged(
+                    task.library_document_id,
+                    job_id,
+                    "transcription",
+                )
         elif job_id == task.result.cloud_summary_job_id:
             task.result.cloud_summary_cleanup_acknowledged = True
+            if self._transcript_store is not None and task.library_document_id:
+                self._transcript_store.mark_cloud_cleanup_acknowledged(
+                    task.library_document_id,
+                    job_id,
+                    "summary",
+                )
 
         widget = self._file_widgets.get(self._task_key(task.file_path))
         if widget:

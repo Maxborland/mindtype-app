@@ -234,8 +234,20 @@ class FileTranscriptionWorker(QThread):
                     task.status = FileStatus.COMPLETED
                     task.progress = 100
                 except Exception as e:
-                    task.status = FileStatus.ERROR
-                    task.error_message = str(e)
+                    # Report generation is downstream of transcription. Keep
+                    # the durable transcript usable even when the selected
+                    # HTML/PDF writer fails.
+                    task.status = FileStatus.COMPLETED
+                    task.warning = "\n".join(
+                        part
+                        for part in (
+                            task.warning,
+                            f"Отчёт не создан: {str(e)}",
+                        )
+                        if part
+                    )
+                    task.error_message = ""
+                    task.progress = 100
 
             self.task_completed.emit(task)
 
@@ -397,7 +409,22 @@ class TranscriptSummaryWorker(QThread):
                 generate,
             )
             if cloud_summary is not None and pending_cloud_job:
-                cloud_summary.acknowledge(pending_cloud_job[0])
+                job_id = pending_cloud_job[0]
+                # The variant is already durable. Register the remote job
+                # before attempting cleanup so an ACK failure is retryable.
+                self.store.register_cloud_summary_job(self.document_id, job_id)
+                try:
+                    cloud_summary.acknowledge(job_id)
+                except Exception as ack_error:
+                    self.progress.emit(
+                        f"Cloud summary cleanup pending: {ack_error}"
+                    )
+                else:
+                    self.store.mark_cloud_cleanup_acknowledged(
+                        self.document_id,
+                        job_id,
+                        "summary",
+                    )
             self.succeeded.emit(self.document_id, variant.id)
         except Exception as exc:
             error = "".join(

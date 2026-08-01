@@ -37,10 +37,13 @@ class CloudSummaryOutcome:
     canonical_result: Dict[str, Any]
 
 
+MAX_CUSTOM_PROMPT_CHARS = 8_000
+
+
 def serialize_prompt_templates(prompts: Mapping[str, str]) -> str:
     """Serialize the four desktop template fields into one server prompt.
 
-    The Cloud API deliberately accepts one bounded custom prompt.  Keeping the
+    The Cloud API deliberately accepts one bounded custom prompt. Keeping the
     field labels makes the existing editable desktop templates unambiguous while
     avoiding a second provider-specific schema.
     """
@@ -50,13 +53,19 @@ def serialize_prompt_templates(prompts: Mapping[str, str]) -> str:
         value = str(prompts.get(key, ""))
         if value.strip():
             parts.append(f"{key.upper()} PROMPT:\n{value}")
-    return "\n\n".join(parts)
+    serialized = "\n\n".join(parts)
+    if len(serialized) > MAX_CUSTOM_PROMPT_CHARS:
+        raise ValueError(
+            f"Cloud summary prompts exceed {MAX_CUSTOM_PROMPT_CHARS} characters"
+        )
+    return serialized
 
 
 def canonical_from_transcription_result(
     result: Any,
     *,
     operation_id: Optional[str] = None,
+    prefer_existing: bool = True,
 ) -> Dict[str, Any]:
     """Build a valid canonical transcript from a saved desktop result.
 
@@ -67,7 +76,7 @@ def canonical_from_transcription_result(
     """
 
     existing = getattr(result, "cloud_canonical_result", None)
-    if isinstance(existing, dict):
+    if prefer_existing and isinstance(existing, dict):
         return deepcopy(existing)
 
     source_text = " ".join(
@@ -165,6 +174,11 @@ class CloudSummaryClient:
         prompt = str(custom_prompt or "").strip()
         if prompt:
             normalized_preset = "custom"
+        elif normalized_preset not in {"pm", "student", "generic"}:
+            # The desktop may store a localized display label or an empty
+            # user-preset id. Keep an empty-prompt request within the Cloud
+            # enum instead of sending a guaranteed 400.
+            normalized_preset = "generic"
         body: Dict[str, Any] = {
             "operation_id": operation,
             "preset": normalized_preset,
@@ -198,41 +212,51 @@ class CloudSummaryClient:
             ) from error
 
         deadline = time.monotonic() + self.poll_timeout_seconds
-        while True:
-            self.client._check_cancelled()  # noqa: SLF001
-            state = self.client._request_json(  # noqa: SLF001
+        try:
+            while True:
+                self.client._check_cancelled()  # noqa: SLF001
+                state = self.client._request_json(  # noqa: SLF001
+                    "GET",
+                    f"/v1/summaries/{quote(job_id, safe='')}",
+                    token=self.client._access_token(),  # noqa: SLF001
+                )
+                state_name = str(state.get("state", ""))
+                if state_name == "succeeded":
+                    break
+                if state_name in {"failed", "cancelled", "awaiting_funds", "expired"}:
+                    error_data = state.get("error") or {}
+                    raise CloudTranscriptionError(
+                        str(error_data.get("code", state_name.upper())),
+                        str(error_data.get("message", f"Cloud summary {state_name}")),
+                        retryable=bool(error_data.get("retryable", False)),
+                    )
+                if state_name not in self._ACTIVE_STATES:
+                    raise CloudTranscriptionError(
+                        "INVALID_RESPONSE",
+                        f"MindType Cloud returned unknown summary state: {state_name}",
+                    )
+                if time.monotonic() >= deadline:
+                    raise CloudTranscriptionError(
+                        "TIMEOUT",
+                        "MindType Cloud summary timed out",
+                        retryable=True,
+                    )
+                self.client._sleep(self.poll_interval_seconds)  # noqa: SLF001
+
+            payload = self.client._request_json(  # noqa: SLF001
                 "GET",
-                f"/v1/summaries/{quote(job_id, safe='')}" ,
+                f"/v1/summaries/{quote(job_id, safe='')}/result",
                 token=self.client._access_token(),  # noqa: SLF001
             )
-            state_name = str(state.get("state", ""))
-            if state_name == "succeeded":
-                break
-            if state_name in {"failed", "cancelled", "awaiting_funds", "expired"}:
-                error_data = state.get("error") or {}
-                raise CloudTranscriptionError(
-                    str(error_data.get("code", state_name.upper())),
-                    str(error_data.get("message", f"Cloud summary {state_name}")),
-                    retryable=bool(error_data.get("retryable", False)),
-                )
-            if state_name not in self._ACTIVE_STATES:
-                raise CloudTranscriptionError(
-                    "INVALID_RESPONSE",
-                    f"MindType Cloud returned unknown summary state: {state_name}",
-                )
-            if time.monotonic() >= deadline:
-                raise CloudTranscriptionError(
-                    "TIMEOUT",
-                    "MindType Cloud summary timed out",
-                    retryable=True,
-                )
-            self.client._sleep(self.poll_interval_seconds)  # noqa: SLF001
-
-        payload = self.client._request_json(  # noqa: SLF001
-            "GET",
-            f"/v1/summaries/{quote(job_id, safe='')}/result",
-            token=self.client._access_token(),  # noqa: SLF001
-        )
+        except CloudTranscriptionError as error:
+            if error.code == "CANCELLED":
+                try:
+                    self.cancel(job_id)
+                except Exception:
+                    # Preserve the user cancellation as the primary outcome;
+                    # the durable ACK/retry path handles cleanup failures.
+                    pass
+            raise
         canonical = self.client._validate_canonical(  # noqa: SLF001
             payload.get("result"),
             operation,

@@ -517,9 +517,21 @@ class FileTranscriptionQueue:
                     task.result.summary_preset_name = self.summary_preset_name or None
                 except Exception as e:
                     logger.error(f"Ошибка суммаризации для {task.file_path.name}: {e}")
-                    # Теперь мы считаем это ошибкой задачи, если саммаризация была включена и не удалась
-                    task.status = FileStatus.ERROR
-                    task.error_message = f"Ошибка саммаризации: {str(e)}"
+                    # Расшифровка уже готова. Ошибка downstream-саммари не
+                    # должна превращать валидный transcript в потерянную
+                    # задачу: MainWindow сохранит его в библиотеку и
+                    # подтвердит Cloud-транскрипцию после durable save.
+                    task.status = FileStatus.COMPLETED
+                    task.warning = "\n".join(
+                        part
+                        for part in (
+                            task.warning,
+                            f"Саммари недоступно: {str(e)}",
+                        )
+                        if part
+                    )
+                    task.error_message = ""
+                    task.progress = 100
                     if self._on_completed:
                         self._on_completed(task)
                     return
@@ -554,11 +566,16 @@ class FileTranscriptionQueue:
                 )
             if task.result is None:
                 raise RuntimeError("Cloud summary requires a transcription result")
-            canonical = task.result.cloud_canonical_result
-            if not isinstance(canonical, dict):
-                from .cloud_summary import canonical_from_transcription_result
+            from .cloud_summary import canonical_from_transcription_result
 
-                canonical = canonical_from_transcription_result(task.result)
+            # Hallucination filtering, post-processing and diarization may have
+            # changed the local segments after the Cloud transcription. Never
+            # summarize the stale remote artifact in that case; send the
+            # canonical payload built from the transcript that will be saved.
+            canonical = canonical_from_transcription_result(
+                task.result,
+                prefer_existing=False,
+            )
             operation_id = task.result.cloud_operation_id or None
             custom_prompt = serialize_prompt_templates(self.custom_prompts or {})
             outcome = CloudSummaryClient(client).summarize(
@@ -566,7 +583,6 @@ class FileTranscriptionQueue:
                 preset=self.summary_preset_name or "generic",
                 custom_prompt=custom_prompt or None,
                 operation_id=operation_id,
-                source_artifact_id=task.result.cloud_transcript_artifact_id,
                 input_token_estimate=max(1, len(text.split())),
                 max_output_tokens=2_000,
             )
