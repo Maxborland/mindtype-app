@@ -214,6 +214,8 @@ def test_trial_cloud_file_summary_persists_before_both_acks(tmp_path: Path, summ
     document = persist_completed_task(store, task)
     assert document is not None
     assert len(document.summary_variants) == 1
+    assert document.summary_variants[0].provider == "mindtype_cloud"
+    assert document.summary_variants[0].model == "auto"
     assert {
         item.kind for item in store.list_pending_cloud_cleanups()
     } == {"transcription", "summary"}
@@ -261,3 +263,53 @@ def test_failed_cloud_summary_preserves_transcript_for_durable_save(tmp_path: Pa
     assert document is not None
     assert document.cloud_job_id == "transcription-1"
     assert store.list_pending_cloud_cleanups()[0].kind == "transcription"
+
+def test_cloud_summary_canonical_uses_processed_text(tmp_path):
+    from app.cloud_summary import canonical_from_transcription_result
+    from app.transcription_models import TranscriptionResult, TranscriptionSegment
+
+    result = TranscriptionResult(
+        file_path=tmp_path / "meeting.wav",
+        segments=[
+            TranscriptionSegment(start=0.0, end=1.0, text="raw filler"),
+            TranscriptionSegment(start=1.0, end=2.0, text="raw facts"),
+        ],
+        detected_language="ru",
+        language_probability=0.9,
+        duration=2.0,
+        model_used="mindtype_cloud/nova-3",
+        processed_text="  Очищенный итог без лишнего текста  ",
+    )
+
+    canonical = canonical_from_transcription_result(
+        result,
+        prefer_existing=False,
+    )
+
+    assert canonical["transcript"]["segments"] == [
+        {
+            "segment_id": "processed-text",
+            "start_ms": 0,
+            "end_ms": 2000,
+            "text": "  Очищенный итог без лишнего текста  ",
+            "speaker_id": None,
+            "words": [],
+        }
+    ]
+
+
+def test_cloud_summary_canonical_uses_text_for_summary_fallback():
+    from types import SimpleNamespace
+    from app.cloud_summary import canonical_from_transcription_result
+    from app.transcription_models import TranscriptionSegment
+
+    result = SimpleNamespace(
+        segments=[TranscriptionSegment(start=0.0, end=1.0, text="raw")],
+        text_for_summary="CUSTOM EXACT",
+        processed_text=None,
+        duration=1.0,
+    )
+
+    canonical = canonical_from_transcription_result(result, prefer_existing=False)
+
+    assert canonical["transcript"]["segments"][0]["text"] == "CUSTOM EXACT"

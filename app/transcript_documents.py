@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Union
 
 from .transcript_store import SummaryVariant, TranscriptDocument, TranscriptStore
 
 
+@dataclass(frozen=True)
+class GeneratedSummary:
+    """Summary content plus the provider/model that actually generated it."""
+
+    content: str
+    metrics: Optional[dict]
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+SummaryGeneration = Union[GeneratedSummary, Tuple[str, Optional[dict]]]
+
 SummaryGenerator = Callable[
     [str, dict[str, str]],
-    Tuple[str, Optional[dict]],
+    SummaryGeneration,
 ]
 
 
@@ -51,7 +63,16 @@ def create_summary_document(
     if not source_text:
         raise ValueError("В расшифровке нет текста для создания документа")
 
-    content, metrics = generate(source_text, dict(template.prompts))
+    generated = generate(source_text, dict(template.prompts))
+    if isinstance(generated, GeneratedSummary):
+        content = generated.content
+        metrics = generated.metrics
+        provider = generated.provider or template.provider
+        model = generated.model or template.model
+    else:
+        content, metrics = generated
+        provider = template.provider
+        model = template.model
     if not content.strip():
         raise ValueError("Генерация вернула пустой документ")
 
@@ -63,7 +84,7 @@ def create_summary_document(
         template_version=template.version,
         template_prompts=template.prompts,
         content=content,
-        provider=template.provider,
-        model=template.model,
+        provider=provider,
+        model=model,
         metrics=metrics,
     )

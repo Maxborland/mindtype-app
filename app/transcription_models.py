@@ -96,6 +96,9 @@ class TranscriptionResult:
     speaker_names: Dict[str, str] = field(default_factory=dict)
     # Имя пресета промптов, которым делалось саммари (для отчёта)
     summary_preset_name: Optional[str] = None
+    # Provider provenance for the generated summary.
+    summary_provider: Optional[str] = None
+    summary_model: Optional[str] = None
     # Cloud lifecycle metadata. A result is acknowledged only after SQLite save.
     cloud_job_id: Optional[str] = None
     cloud_operation_id: Optional[str] = None

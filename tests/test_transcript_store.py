@@ -141,6 +141,8 @@ def test_existing_result_summary_is_imported_as_first_variant(tmp_path):
     result.summary = "## Решения\n- Запустить пилот"
     result.summary_metrics = {"input_tokens": 120}
     result.summary_preset_name = "Созвон"
+    result.summary_provider = "mindtype_cloud"
+    result.summary_model = "nova-3"
 
     saved = TranscriptStore(tmp_path / "mindtype.db").save_result(result)
 
@@ -149,6 +151,8 @@ def test_existing_result_summary_is_imported_as_first_variant(tmp_path):
     assert imported.content == result.summary
     assert imported.template_id == "legacy"
     assert imported.template_name == "Созвон"
+    assert imported.provider == "mindtype_cloud"
+    assert imported.model == "nova-3"
     assert imported.metrics == {"input_tokens": 120}
 
 def test_summary_variant_keeps_its_template_snapshot(tmp_path):
@@ -296,3 +300,26 @@ def test_store_releases_database_file_after_operations_on_windows(tmp_path):
     store_path.replace(moved_path)
 
     assert moved_path.exists()
+
+def test_pending_cleanup_keeps_multiple_summary_jobs(tmp_path):
+    from app.transcript_store import TranscriptStore
+
+    store = TranscriptStore(tmp_path / "mindtype.db")
+    saved = store.save_result(make_result(tmp_path / "meeting.mp3"))
+
+    store.register_cloud_summary_job(saved.id, "summary-1")
+    store.register_cloud_summary_job(saved.id, "summary-2")
+
+    pending = store.list_pending_cloud_cleanups()
+    assert [(item.job_id, item.kind) for item in pending] == [
+        ("summary-1", "summary"),
+        ("summary-2", "summary"),
+    ]
+
+    assert store.mark_cloud_cleanup_acknowledged(
+        saved.id, "summary-2", "summary"
+    )
+    pending = store.list_pending_cloud_cleanups()
+    assert [(item.job_id, item.kind) for item in pending] == [
+        ("summary-1", "summary"),
+    ]

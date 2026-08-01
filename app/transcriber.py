@@ -4,6 +4,7 @@ import sys
 import logging
 
 from .text_processor import remove_repetitions, HallucinationDetector
+from .cudnn import ensure_cudnn_on_windows
 
 logger = logging.getLogger("transcriber")
 
@@ -13,7 +14,7 @@ try:
     import ctranslate2
     from faster_whisper import WhisperModel
     HAS_FASTER_WHISPER = True
-except ImportError:
+except (ImportError, OSError):
     HAS_FASTER_WHISPER = False
 
 ProgressCallback = Callable[[str, int, int], None]  # (status, current, total)
@@ -67,10 +68,13 @@ class FasterWhisperTranscriber:
         self.models_dir: Optional[Path] = None
 
     def load_model(self, model_size, compute_type, device, cpu_threads=4, num_workers=1, models_dir=None, progress_callback=None):
-        if not HAS_FASTER_WHISPER:
-            raise RuntimeError("faster-whisper не установлен")
-
-        from faster_whisper import WhisperModel
+        # Import only after cuDNN discovery so an explicit local backend can
+        # recover from a native DLL that was not discoverable at startup.
+        ensure_cudnn_on_windows()
+        try:
+            from faster_whisper import WhisperModel
+        except (ImportError, OSError) as exc:
+            raise RuntimeError("faster-whisper не установлен") from exc
 
         # ... (логика загрузки из оригинального transcriber.py) ...
         # Для краткости я перенесу сюда основной функционал

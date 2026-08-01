@@ -589,6 +589,8 @@ class FileTranscriptionQueue:
             task.result.cloud_summary_job_id = outcome.job_id
             task.result.cloud_summary_operation_id = outcome.operation_id
             task.result.cloud_canonical_result = outcome.canonical_result
+            task.result.summary_provider = outcome.provider
+            task.result.summary_model = outcome.model
             metrics = SummarizationMetrics(
                 input_tokens=outcome.input_tokens,
                 input_chunks=1,

@@ -92,7 +92,7 @@ class PendingCloudCleanup:
 class TranscriptStore:
     """Small public interface around MindType's durable transcript library."""
 
-    _SCHEMA_VERSION = 2
+    _SCHEMA_VERSION = 3
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
@@ -175,8 +175,8 @@ class TranscriptStore:
                         1,
                         "{}",
                         result.summary,
-                        "legacy",
-                        "",
+                        result.summary_provider or "legacy",
+                        result.summary_model or "",
                         (
                             json.dumps(result.summary_metrics, ensure_ascii=False)
                             if result.summary_metrics is not None
@@ -185,6 +185,29 @@ class TranscriptStore:
                         created_at.isoformat(),
                     ),
                 )
+
+            cleanup_rows = (
+                ("transcription", result.cloud_job_id, result.cloud_cleanup_acknowledged),
+                ("summary", result.cloud_summary_job_id, result.cloud_summary_cleanup_acknowledged),
+            )
+            for kind, job_id, acknowledged in cleanup_rows:
+                if job_id:
+                    connection.execute(
+                        """
+                        INSERT INTO cloud_cleanup_jobs (
+                            id, document_id, job_id, kind, acknowledged, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(job_id, kind) DO NOTHING
+                        """,
+                        (
+                            str(uuid4()),
+                            document_id,
+                            str(job_id),
+                            kind,
+                            int(acknowledged),
+                            created_at.isoformat(),
+                        ),
+                    )
 
         document = self.get_document(document_id)
         if document is None:  # pragma: no cover - guarded by the transaction above
@@ -348,6 +371,7 @@ class TranscriptStore:
         normalized_job_id = str(job_id).strip()
         if not normalized_job_id:
             raise ValueError("Cloud summary job id cannot be empty")
+        now = datetime.now().isoformat()
         with self._connect() as connection:
             updated = connection.execute(
                 """
@@ -357,10 +381,19 @@ class TranscriptStore:
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (normalized_job_id, datetime.now().isoformat(), document_id),
+                (normalized_job_id, now, document_id),
             )
             if updated.rowcount != 1:
                 raise KeyError(f"Расшифровка {document_id} не найдена")
+            connection.execute(
+                """
+                INSERT INTO cloud_cleanup_jobs (
+                    id, document_id, job_id, kind, acknowledged, created_at
+                ) VALUES (?, ?, ?, 'summary', 0, ?)
+                ON CONFLICT(job_id, kind) DO NOTHING
+                """,
+                (str(uuid4()), document_id, normalized_job_id, now),
+            )
 
     def mark_cloud_cleanup_acknowledged(
         self,
@@ -369,60 +402,60 @@ class TranscriptStore:
         kind: str,
     ) -> bool:
         """Mark one remote artifact as acknowledged after a successful ACK."""
-        columns = {
-            "transcription": ("cloud_job_id", "cloud_cleanup_acknowledged"),
-            "summary": ("cloud_summary_job_id", "cloud_summary_cleanup_acknowledged"),
-        }
-        job_column, acknowledged_column = columns.get(kind, (None, None))
-        if job_column is None or acknowledged_column is None:
+        if kind not in {"transcription", "summary"}:
             raise ValueError(f"Unknown Cloud cleanup kind: {kind}")
+        normalized_job_id = str(job_id)
+        now = datetime.now().isoformat()
         with self._connect() as connection:
             updated = connection.execute(
-                f"""
-                UPDATE transcript_documents
-                SET {acknowledged_column} = 1,
-                    updated_at = ?
-                WHERE id = ? AND {job_column} = ?
+                """
+                UPDATE cloud_cleanup_jobs
+                SET acknowledged = 1
+                WHERE document_id = ? AND job_id = ? AND kind = ?
                 """,
-                (datetime.now().isoformat(), document_id, str(job_id)),
+                (document_id, normalized_job_id, kind),
             )
-        return updated.rowcount == 1
+            if updated.rowcount != 1:
+                return False
+            if kind == "transcription":
+                connection.execute(
+                    """
+                    UPDATE transcript_documents
+                    SET cloud_cleanup_acknowledged = 1, updated_at = ?
+                    WHERE id = ? AND cloud_job_id = ?
+                    """,
+                    (now, document_id, normalized_job_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE transcript_documents
+                    SET cloud_summary_cleanup_acknowledged = 1, updated_at = ?
+                    WHERE id = ? AND cloud_summary_job_id = ?
+                    """,
+                    (now, document_id, normalized_job_id),
+                )
+        return True
 
     def list_pending_cloud_cleanups(self) -> Tuple[PendingCloudCleanup, ...]:
-        """Return Cloud jobs whose local cleanup ACK is still pending."""
+        """Return every Cloud job whose local cleanup ACK is still pending."""
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, cloud_job_id, cloud_summary_job_id,
-                       cloud_cleanup_acknowledged,
-                       cloud_summary_cleanup_acknowledged
-                FROM transcript_documents
-                WHERE (cloud_job_id IS NOT NULL AND cloud_cleanup_acknowledged = 0)
-                   OR (cloud_summary_job_id IS NOT NULL
-                       AND cloud_summary_cleanup_acknowledged = 0)
-                ORDER BY updated_at, id
+                SELECT document_id, job_id, kind
+                FROM cloud_cleanup_jobs
+                WHERE acknowledged = 0
+                ORDER BY created_at, id
                 """
             ).fetchall()
-        pending = []
-        for row in rows:
-            if row["cloud_job_id"] and not row["cloud_cleanup_acknowledged"]:
-                pending.append(
-                    PendingCloudCleanup(
-                        document_id=row["id"],
-                        job_id=row["cloud_job_id"],
-                        kind="transcription",
-                    )
-                )
-            if row["cloud_summary_job_id"] and not row["cloud_summary_cleanup_acknowledged"]:
-                pending.append(
-                    PendingCloudCleanup(
-                        document_id=row["id"],
-                        job_id=row["cloud_summary_job_id"],
-                        kind="summary",
-                    )
-                )
-        return tuple(pending)
-
+        return tuple(
+            PendingCloudCleanup(
+                document_id=row["document_id"],
+                job_id=row["job_id"],
+                kind=row["kind"],
+            )
+            for row in rows
+        )
     def get_document(self, document_id: str) -> Optional[TranscriptDocument]:
         with self._connect() as connection:
             document_row = connection.execute(
@@ -499,12 +532,13 @@ class TranscriptStore:
             version = connection.execute(
                 "SELECT version FROM schema_info LIMIT 1"
             ).fetchone()
-            if version is None:
+            stored_version = None if version is None else int(version["version"])
+            if stored_version is None:
                 connection.execute(
                     "INSERT INTO schema_info (version) VALUES (?)",
                     (self._SCHEMA_VERSION,),
                 )
-            elif version["version"] == 1:
+            elif stored_version == 1:
                 connection.execute(
                     "ALTER TABLE transcript_documents ADD COLUMN cloud_job_id TEXT"
                 )
@@ -517,13 +551,9 @@ class TranscriptStore:
                 connection.execute(
                     "ALTER TABLE transcript_documents ADD COLUMN cloud_summary_cleanup_acknowledged INTEGER NOT NULL DEFAULT 0"
                 )
-                connection.execute(
-                    "UPDATE schema_info SET version = ?",
-                    (self._SCHEMA_VERSION,),
-                )
-            elif version["version"] != self._SCHEMA_VERSION:
+            elif stored_version not in (2, self._SCHEMA_VERSION):
                 raise UnsupportedSchemaVersion(
-                    f"Неподдерживаемая версия схемы: {version['version']}"
+                    f"Неподдерживаемая версия схемы: {stored_version}"
                 )
 
             connection.execute(
@@ -579,6 +609,58 @@ class TranscriptStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cloud_cleanup_jobs (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL
+                        REFERENCES transcript_documents(id) ON DELETE CASCADE,
+                    job_id TEXT NOT NULL,
+                    kind TEXT NOT NULL
+                        CHECK(kind IN ('transcription', 'summary')),
+                    acknowledged INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(job_id, kind)
+                )
+                """
+            )
+            if stored_version in (1, 2):
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO cloud_cleanup_jobs (
+                        id, document_id, job_id, kind, acknowledged, created_at
+                    )
+                    SELECT
+                        'legacy-transcription-' || id,
+                        id,
+                        cloud_job_id,
+                        'transcription',
+                        cloud_cleanup_acknowledged,
+                        updated_at
+                    FROM transcript_documents
+                    WHERE cloud_job_id IS NOT NULL
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO cloud_cleanup_jobs (
+                        id, document_id, job_id, kind, acknowledged, created_at
+                    )
+                    SELECT
+                        'legacy-summary-' || id,
+                        id,
+                        cloud_summary_job_id,
+                        'summary',
+                        cloud_summary_cleanup_acknowledged,
+                        updated_at
+                    FROM transcript_documents
+                    WHERE cloud_summary_job_id IS NOT NULL
+                    """
+                )
+                connection.execute(
+                    "UPDATE schema_info SET version = ?",
+                    (self._SCHEMA_VERSION,),
+                )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

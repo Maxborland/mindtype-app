@@ -7,7 +7,7 @@ durable reopening—uses the production implementation.
 
 from pathlib import Path
 
-from app.transcript_documents import SummaryTemplate, create_summary_document
+from app.transcript_documents import GeneratedSummary, SummaryTemplate, create_summary_document
 from app.transcript_store import TranscriptStore
 from app.transcription_models import TranscriptionResult, TranscriptionSegment
 
@@ -101,3 +101,40 @@ def test_transcript_to_speakers_templates_and_multiple_documents(tmp_path):
     assert "Анна: Начинаем встречу" in reopened.summary_variants[0].content
     assert "Ben: Let us confirm the next step" in reopened.summary_variants[1].content
     assert len(generation_calls) == 2
+
+
+def test_generated_summary_preserves_actual_provider_and_model(tmp_path):
+    source = tmp_path / "meeting.wav"
+    source.write_bytes(b"fixture-media")
+    store = TranscriptStore(tmp_path / "mindtype.db")
+    saved = store.save_result(
+        TranscriptionResult(
+            file_path=source,
+            segments=[TranscriptionSegment(start=0.0, end=1.0, text="Hello")],
+            detected_language="en",
+            language_probability=1.0,
+            duration=1.0,
+            model_used="fixture-stt",
+        )
+    )
+    template = SummaryTemplate(
+        id="notes",
+        name="Notes",
+        version=1,
+        prompts={},
+        provider="template-provider",
+        model="template-model",
+    )
+    variant = create_summary_document(
+        store,
+        saved.id,
+        template,
+        lambda _text, _prompts: GeneratedSummary(
+            content="Generated",
+            metrics={"output_tokens": 1},
+            provider="actual-provider",
+            model="actual-model",
+        ),
+    )
+
+    assert (variant.provider, variant.model) == ("actual-provider", "actual-model")

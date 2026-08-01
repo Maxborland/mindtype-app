@@ -325,7 +325,7 @@ class TranscriptSummaryWorker(QThread):
                 serialize_prompt_templates,
             )
             from ..summarizer import Summarizer
-            from ..transcript_documents import create_summary_document
+            from ..transcript_documents import GeneratedSummary, create_summary_document
 
             cloud_summary = (
                 CloudSummaryClient(self.cloud_client)
@@ -354,6 +354,7 @@ class TranscriptSummaryWorker(QThread):
                             language_probability=document.language_probability,
                             duration=document.duration,
                             model_used=document.model_used,
+                            processed_text=revision.processed_text,
                         )
                     )
                     outcome = cloud_summary.summarize(
@@ -367,18 +368,23 @@ class TranscriptSummaryWorker(QThread):
                         max_output_tokens=2_000,
                     )
                     pending_cloud_job.append(outcome.job_id)
-                    return outcome.text, {
-                        "input": {
-                            "tokens": outcome.input_tokens,
-                            "chunks": 1,
+                    return GeneratedSummary(
+                        content=outcome.text,
+                        metrics={
+                            "input": {
+                                "tokens": outcome.input_tokens,
+                                "chunks": 1,
+                            },
+                            "processing": {
+                                "llm_calls": 1,
+                                "time_sec": 0.0,
+                            },
+                            "quality": {"language_retries": 0},
+                            "output_tokens": outcome.output_tokens,
                         },
-                        "processing": {
-                            "llm_calls": 1,
-                            "time_sec": 0.0,
-                        },
-                        "quality": {"language_retries": 0},
-                        "output_tokens": outcome.output_tokens,
-                    }
+                        provider=outcome.provider,
+                        model=outcome.model,
+                    )
 
                 assert summarizer is not None
                 summarizer.config.custom_prompts = prompts

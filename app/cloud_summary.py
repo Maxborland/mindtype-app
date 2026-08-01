@@ -79,25 +79,57 @@ def canonical_from_transcription_result(
     if prefer_existing and isinstance(existing, dict):
         return deepcopy(existing)
 
-    source_text = " ".join(
+    raw_source_text = " ".join(
         str(getattr(segment, "text", ""))
         for segment in getattr(result, "segments", ())
         if str(getattr(segment, "text", "")).strip()
     )
+    explicit_processed_text = getattr(result, "processed_text", None)
+    summary_text = getattr(result, "text_for_summary", None)
+    if not isinstance(summary_text, str) or not summary_text.strip():
+        summary_text = explicit_processed_text
+    use_processed_payload = (
+        isinstance(summary_text, str)
+        and bool(summary_text.strip())
+        and (
+            bool(
+                isinstance(explicit_processed_text, str)
+                and explicit_processed_text.strip()
+            )
+            or summary_text != raw_source_text
+        )
+    )
+    processed_text = summary_text if use_processed_payload else ""
+    source_text = summary_text if isinstance(summary_text, str) and summary_text.strip() else raw_source_text
     digest = sha256(source_text.encode("utf-8")).hexdigest()
     operation = operation_id or str(uuid4())
-    segments = []
-    for index, segment in enumerate(getattr(result, "segments", ()), start=1):
-        segments.append(
+    if processed_text:
+        # The Cloud summary worker consumes transcript.segments. Use one
+        # synthetic segment so post-processing is represented exactly rather
+        # than silently falling back to the raw segment text.
+        segments = [
             {
-                "segment_id": f"segment-{index:04d}",
-                "start_ms": max(0, int(float(getattr(segment, "start", 0)) * 1000)),
-                "end_ms": max(0, int(float(getattr(segment, "end", 0)) * 1000)),
-                "text": str(getattr(segment, "text", "")),
-                "speaker_id": getattr(segment, "speaker", None),
+                "segment_id": "processed-text",
+                "start_ms": 0,
+                "end_ms": max(0, int(float(getattr(result, "duration", 0)) * 1000)),
+                "text": processed_text,
+                "speaker_id": None,
                 "words": [],
             }
-        )
+        ]
+    else:
+        segments = []
+        for index, segment in enumerate(getattr(result, "segments", ()), start=1):
+            segments.append(
+                {
+                    "segment_id": f"segment-{index:04d}",
+                    "start_ms": max(0, int(float(getattr(segment, "start", 0)) * 1000)),
+                    "end_ms": max(0, int(float(getattr(segment, "end", 0)) * 1000)),
+                    "text": str(getattr(segment, "text", "")),
+                    "speaker_id": getattr(segment, "speaker", None),
+                    "words": [],
+                }
+            )
     speaker_names = getattr(result, "speaker_names", {}) or {}
     speakers = [
         {"speaker_id": str(speaker_id), "display_name": str(name)}
