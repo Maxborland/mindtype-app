@@ -57,6 +57,8 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QPen, QBrush,
 
 from .audio import AudioRecorder
 from .config import ConfigManager, DEFAULT_MODELS_DIR, BUNDLED_MODELS_DIR
+from .cloud_transcription import CloudTranscriptionClient, MindTypeCloudTranscriber
+from .env import API_BASE_URL, APP_VERSION, PLATFORM
 from .accelerator import has_npu, detect_available_providers
 from .file_transcriber import (
     FileTranscriptionQueue,
@@ -75,7 +77,9 @@ from .licensing.activation_dialog import LicenseActivationDialog, LicenseStatusW
 from .ui.setup_wizard import SetupWizard
 from .ui.credits_widget import CreditsBalanceWidget, CreditsRefreshWorker, CreditsHistoryDialog, CreditsHistoryWorker
 from .overlay import OverlayWidget
+from .provider_catalog import visible_summary_providers
 from .report_generator import ReportGenerator
+from .transcript_store import TranscriptStore, persist_completed_task
 from .transcriber import Transcriber
 from .dictation_state import DictationState
 from .translations import (
@@ -112,6 +116,8 @@ from .ui.workers import (
     UpdateCheckWorker,
     UpdateDownloadWorker,
     FileTranscriptionWorker,
+    CloudAcknowledgeWorker,
+    TranscriptSummaryWorker,
 )
 from .ui.widgets import (
     TranscriptionEntry,
@@ -126,6 +132,7 @@ from .ui.file_widgets import (
     FileQueueItemWidget,
 )
 from .ui.layouts import (
+    # TranscriptLibraryWidget is imported after this grouped layout import.
     FormRow,
     FormLayout,
     TwoColumnLayout,
@@ -133,6 +140,7 @@ from .ui.layouts import (
     ScrollableContent,
     ActionBar,
 )
+from .ui.transcript_library import TranscriptLibraryWidget
 from .ui.components import Separator, EmptyState
 
 
@@ -553,6 +561,15 @@ class MainWindow(QMainWindow):
         self.resize(1060, 600)
 
         self.config = ConfigManager()
+        try:
+            self._transcript_store: Optional[TranscriptStore] = TranscriptStore(
+                self.config.config_dir / "transcripts.db"
+            )
+            self._transcript_store_error = ""
+        except Exception as error:
+            logger.exception("Не удалось открыть библиотеку расшифровок")
+            self._transcript_store = None
+            self._transcript_store_error = str(error)
         self.audio = AudioRecorder()
         backend = self.config.config.get("transcriber_backend", "auto")
         self._transcriber_backend = backend
@@ -651,6 +668,8 @@ class MainWindow(QMainWindow):
         self._file_widgets: dict[Path, "FileQueueItemWidget"] = {}
         self._file_queue: Optional[FileTranscriptionQueue] = None
         self._file_worker: Optional[FileTranscriptionWorker] = None
+        self._library_summary_worker: Optional[TranscriptSummaryWorker] = None
+        self._cloud_ack_workers: dict[str, CloudAcknowledgeWorker] = {}
         self._output_dir = Path.home() / "Documents" / "MindType Transcriptions"
 
         self._build_ui()
@@ -1470,9 +1489,31 @@ class MainWindow(QMainWindow):
 
         # Вкладки - порядок: Основные, Саммари, Настройки
         self.tabs = QTabWidget()
+        if self._transcript_store is not None:
+            self.transcript_library: Optional[TranscriptLibraryWidget] = (
+                TranscriptLibraryWidget(self._transcript_store, self._t)
+            )
+            library_tab = self.transcript_library
+        else:
+            self.transcript_library = None
+            library_tab = EmptyState(
+                icon="▦",
+                title=self._t("library_unavailable_title"),
+                hint=self._t("library_unavailable_hint"),
+            )
+
+        self.tabs.addTab(library_tab, self._t("library_tab"))
         self.tabs.addTab(self._build_basic_tab(), self._t("basic"))
-        self.tabs.addTab(self._build_files_tab(), self._t("files_tab"))
+        self._files_tab_widget = self._build_files_tab()
+        self.tabs.addTab(self._files_tab_widget, self._t("files_tab"))
         self.tabs.addTab(self._build_additional_tab(), self._t("additional"))
+        if self.transcript_library is not None:
+            self.transcript_library.new_transcription_requested.connect(
+                lambda: self.tabs.setCurrentWidget(self._files_tab_widget)
+            )
+            self.transcript_library.document_generation_requested.connect(
+                self._on_library_document_generation_requested
+            )
 
         # Угол таб-бара: кредиты (нужны только для MindType Cloud) + кнопка журнала.
         # ponytail: simple/advanced режим удалён (мёртвый — ничего не скрывал); журнал вынесен в окно.
@@ -1591,16 +1632,14 @@ class MainWindow(QMainWindow):
         # === Секция AI Provider ===
         ai_section = SectionBox(self._t("ai_provider"), label_width=140)
         self.ai_section_label = ai_section  # Для совместимости
+        cfg = self.config.config
 
         # Выбор провайдера
         self.provider_combo = QComboBox()
         self.provider_combo.setMinimumWidth(120)
-        self.provider_combo.addItem("MindType Cloud", "mindtype_cloud")
-        self.provider_combo.addItem("OpenAI", "openai")
-        self.provider_combo.addItem("Claude (Anthropic)", "anthropic")
-        self.provider_combo.addItem("Gemini (Google)", "gemini")
-        self.provider_combo.addItem("Ollama (Local)", "ollama")
-        self.provider_combo.addItem("OpenRouter (Private)", "openrouter")
+        saved_provider = cfg.get("llm_provider", "mindtype_cloud")
+        for label, provider_id in visible_summary_providers(saved_provider):
+            self.provider_combo.addItem(label, provider_id)
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         self._provider_row = ai_section.form.add_row(self._t("llm_provider"), self.provider_combo)
         self.provider_label = self._provider_row.label
@@ -1672,7 +1711,7 @@ class MainWindow(QMainWindow):
 
         # Загрузка сохранённых настроек провайдера
         cfg = self.config.config
-        saved_provider = cfg.get("llm_provider", "openrouter")
+        saved_provider = cfg.get("llm_provider", "mindtype_cloud")
         provider_idx = self.provider_combo.findData(saved_provider)
         if provider_idx >= 0:
             self.provider_combo.setCurrentIndex(provider_idx)
@@ -2780,9 +2819,10 @@ class MainWindow(QMainWindow):
     def _update_ui_texts(self) -> None:
         """Обновить все тексты интерфейса."""
         # Вкладки (порядок: Основные, Саммари, Настройки)
-        self.tabs.setTabText(0, self._t("basic"))
-        self.tabs.setTabText(1, self._t("files_tab"))
-        self.tabs.setTabText(2, self._t("additional"))
+        self.tabs.setTabText(0, self._t("library_tab"))
+        self.tabs.setTabText(1, self._t("basic"))
+        self.tabs.setTabText(2, self._t("files_tab"))
+        self.tabs.setTabText(3, self._t("additional"))
 
         # Основная вкладка
         self.audio_input_label.setText(self._t("audio_input"))
@@ -3935,6 +3975,131 @@ class MainWindow(QMainWindow):
             # При ошибке сети — разрешаем продолжить (сервер проверит)
             return True
 
+    def _on_library_document_generation_requested(
+        self,
+        document_id: str,
+    ) -> None:
+        if (
+            self._library_summary_worker is not None
+            and self._library_summary_worker.isRunning()
+        ):
+            return
+        if self._transcript_store is None or self.transcript_library is None:
+            return
+
+        from .summarizer import SummarizerConfig
+        from .summary_presets import PRESETS, get_preset_prompts
+        from .transcript_documents import SummaryTemplate
+
+        cfg = self.config.config
+        preset_id = cfg.get("summary_preset", "pm")
+        user_presets = cfg.get("user_presets", {})
+        preset_prompts = get_preset_prompts(preset_id, user_presets)
+        prompt_overrides = cfg.get("custom_prompts", {})
+        prompts = {**preset_prompts, **prompt_overrides}
+
+        if preset_id in user_presets:
+            preset_data = user_presets.get(preset_id) or {}
+            template_name = preset_data.get("name", preset_id)
+            template_version = int(preset_data.get("version", 1))
+        else:
+            template_name = self._t(
+                PRESETS.get(preset_id, {}).get("name_key", preset_id)
+            )
+            template_version = 1
+
+        provider = cfg.get("llm_provider", "mindtype_cloud")
+        api_key = ""
+        model = ""
+        base_url = ""
+        reasoning = bool(cfg.get("llm_reasoning_enabled", True))
+        reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
+        cloud_client = None
+
+        if provider == "mindtype_cloud":
+            license_info = self.license_manager.get_license_info()
+            cloud_client = CloudTranscriptionClient(
+                base_url=API_BASE_URL,
+                license_key=license_info.license_key or "",
+                device_id=self.license_manager.get_device_id(),
+                desktop_version=APP_VERSION,
+                platform=PLATFORM,
+            )
+            # Session auth is owned by CloudTranscriptionClient; no legacy LLM key.
+            model = "auto"
+            reasoning = False
+        elif provider == "ollama":
+            base_url = cfg.get("ollama_base_url", "http://localhost:11434")
+            model = cfg.get("ollama_model", "")
+        else:
+            api_key = cfg.get(f"{provider}_api_key", "")
+            model = cfg.get(f"{provider}_model", "")
+
+        summarizer_config = SummarizerConfig(
+            enable_thinking=True,
+            custom_prompts=prompts,
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            reasoning_enabled=reasoning,
+            reasoning_effort=reasoning_effort,
+            openrouter_api_key=cfg.get("openrouter_api_key", ""),
+            openrouter_model=cfg.get("openrouter_model", ""),
+            openrouter_reasoning=bool(
+                cfg.get("openrouter_reasoning", reasoning)
+            ),
+            openrouter_reasoning_effort=cfg.get(
+                "openrouter_reasoning_effort",
+                reasoning_effort,
+            ),
+        )
+        template = SummaryTemplate(
+            id=preset_id,
+            name=template_name,
+            version=template_version,
+            prompts=prompts,
+            provider=provider,
+            model=model or "auto",
+        )
+
+        worker = TranscriptSummaryWorker(
+            self._transcript_store,
+            document_id,
+            template,
+            summarizer_config,
+            cloud_client=cloud_client,
+        )
+        worker.succeeded.connect(self._on_library_document_generated)
+        worker.failed.connect(self._on_library_document_generation_failed)
+        self._library_summary_worker = worker
+        self.transcript_library.set_document_generation_busy(True)
+        worker.start()
+
+    def _on_library_document_generated(
+        self,
+        document_id: str,
+        variant_id: str,
+    ) -> None:
+        if self.transcript_library is not None:
+            self.transcript_library.set_document_generation_busy(False)
+            self.transcript_library.show_generated_document(
+                document_id,
+                variant_id,
+            )
+        self._library_summary_worker = None
+
+    def _on_library_document_generation_failed(self, error: str) -> None:
+        if self.transcript_library is not None:
+            self.transcript_library.set_document_generation_busy(False)
+        self._library_summary_worker = None
+        QMessageBox.warning(
+            self,
+            self._t("library_document_error"),
+            error,
+        )
+
+
     def _on_start_processing(self) -> None:
         """Начать обработку файлов."""
         from .crash_reporter import add_breadcrumb
@@ -4002,14 +4167,23 @@ class MainWindow(QMainWindow):
             summary_reasoning = bool(cfg.get("llm_reasoning_enabled", True))
             summary_reasoning_effort = cfg.get("llm_reasoning_effort", "medium")
 
-        # Pre-flight проверка кредитов для MindType Cloud
-        enable_summary = self.enable_summary_checkbox.isChecked()
-        if enable_summary and llm_provider == "mindtype_cloud":
-            if not self._check_cloud_credits_before_processing():
-                return
+        # The file journey follows the Cloud-first product contract. Dictation keeps
+        # its existing low-latency transcriber and is intentionally independent.
+        use_cloud_transcription = bool(cfg.get("use_mindtype_cloud", True))
+        file_transcriber = self.transcriber
+        if use_cloud_transcription:
+            license_info = self.license_manager.get_license_info()
+            license_key = license_info.license_key or ""
+            file_transcriber = MindTypeCloudTranscriber(
+                base_url=API_BASE_URL,
+                license_key=license_key,
+                device_id=self.license_manager.get_device_id(),
+                desktop_version=APP_VERSION,
+                platform=PLATFORM,
+            )
 
         self._file_queue = FileTranscriptionQueue(
-            transcriber=self.transcriber,
+            transcriber=file_transcriber,
             transcribe=TranscribeOptions(
                 model_size=cfg.get("model_size", "large-v3"),
                 compute_type=cfg.get("compute_type", "int8"),
@@ -4038,7 +4212,11 @@ class MainWindow(QMainWindow):
             ),
             postprocess=PostProcessOptions(
                 enable=cfg.get("enable_postprocessing", True),
-                diarization=cfg.get("postprocessing_diarization", True),
+                diarization=(
+                    False
+                    if use_cloud_transcription
+                    else cfg.get("postprocessing_diarization", True)
+                ),
                 punctuation=cfg.get("postprocessing_punctuation", True),
                 fillers=cfg.get("postprocessing_fillers", True),
                 normalize=cfg.get("postprocessing_normalize", True),
@@ -4101,11 +4279,103 @@ class MainWindow(QMainWindow):
             widget.update_status()
 
         if task.status == FileStatus.COMPLETED:
+            if task.result is not None and task.library_document_id is None:
+                if self._transcript_store is not None:
+                    persist_completed_task(self._transcript_store, task)
+                else:
+                    warning = (
+                        "Не удалось сохранить расшифровку в библиотеку: "
+                        f"{self._transcript_store_error}"
+                    )
+                    task.warning = "\n".join(
+                        part for part in (task.warning, warning) if part
+                    )
+
+                if widget:
+                    widget.update_status()
+
+            if task.library_document_id is not None and (
+
+                (
+                    task.result.cloud_job_id
+                    and not task.result.cloud_cleanup_acknowledged
+                )
+                or (
+                    task.result.cloud_summary_job_id
+                    and not task.result.cloud_summary_cleanup_acknowledged
+                )
+            ):
+                self._start_cloud_acknowledgement(task)
+
+            if self.transcript_library is not None and task.library_document_id:
+                self.transcript_library.refresh()
+
             self._last_completed_task = task
             # Если обрабатываем один файл — открываем отчёт автоматически
             if getattr(self, "_file_processing_batch_size", 0) == 1:
                 self._auto_open_transcription(task)
 
+    def _start_cloud_acknowledgement(self, task: FileTask) -> None:
+        """Confirm Cloud cleanup only after the transcript/summary is durable locally."""
+        if task.result is None:
+            return
+        transcriber = self._file_queue.transcriber if self._file_queue else None
+        if transcriber is None:
+            return
+        pending = []
+        if task.result.cloud_job_id and not task.result.cloud_cleanup_acknowledged:
+            pending.append((task.result.cloud_job_id, "acknowledge_result"))
+        if task.result.cloud_summary_job_id and not task.result.cloud_summary_cleanup_acknowledged:
+            pending.append((task.result.cloud_summary_job_id, "acknowledge_summary"))
+        for job_id, ack_method in pending:
+            if job_id in self._cloud_ack_workers:
+                continue
+            if not hasattr(transcriber, ack_method):
+                continue
+            worker = CloudAcknowledgeWorker(transcriber, job_id, ack_method=ack_method)
+            worker.acknowledged.connect(
+                lambda completed_job_id, error, completed_task=task: self._on_cloud_acknowledged(
+                    completed_task,
+                    completed_job_id,
+                    error,
+                )
+            )
+            worker.finished.connect(
+                lambda completed_job_id=job_id: self._cloud_ack_workers.pop(
+                    completed_job_id,
+                    None,
+                )
+            )
+            worker.finished.connect(worker.deleteLater)
+            self._cloud_ack_workers[job_id] = worker
+            worker.start()
+    def _on_cloud_acknowledged(
+        self,
+        task: FileTask,
+        job_id: str,
+        error: str,
+    ) -> None:
+        if task.result is None:
+            return
+        known_job = job_id in {
+            task.result.cloud_job_id,
+            task.result.cloud_summary_job_id,
+        }
+        if not known_job:
+            return
+        if error:
+            warning = f"{self._t('cloud_cleanup_failed')}: {error}"
+            task.warning = "\n".join(
+                part for part in (task.warning, warning) if part
+            )
+        elif job_id == task.result.cloud_job_id:
+            task.result.cloud_cleanup_acknowledged = True
+        elif job_id == task.result.cloud_summary_job_id:
+            task.result.cloud_summary_cleanup_acknowledged = True
+
+        widget = self._file_widgets.get(self._task_key(task.file_path))
+        if widget:
+            widget.update_status()
     def _on_all_files_completed(self) -> None:
         """Все файлы обработаны."""
         self.start_processing_btn.setVisible(True)
@@ -4270,7 +4540,7 @@ class MainWindow(QMainWindow):
             self._update_download_worker,
             getattr(self, '_credits_worker', None),
             getattr(self, '_history_worker', None),
-        ]:
+        ] + list(self._cloud_ack_workers.values()):
             if worker and worker.isRunning():
                 worker.quit()
                 if not worker.wait(2000):  # 2 секунды на завершение

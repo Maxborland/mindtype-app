@@ -96,6 +96,16 @@ class TranscriptionResult:
     speaker_names: Dict[str, str] = field(default_factory=dict)
     # Имя пресета промптов, которым делалось саммари (для отчёта)
     summary_preset_name: Optional[str] = None
+    # Cloud lifecycle metadata. A result is acknowledged only after SQLite save.
+    cloud_job_id: Optional[str] = None
+    cloud_operation_id: Optional[str] = None
+    cloud_transcript_artifact_id: Optional[str] = None
+    cloud_cleanup_acknowledged: bool = False
+    # Cloud summary lifecycle metadata. Summary ACK follows the same durable-save contract.
+    cloud_summary_job_id: Optional[str] = None
+    cloud_summary_operation_id: Optional[str] = None
+    cloud_summary_cleanup_acknowledged: bool = False
+    cloud_canonical_result: Optional[dict] = None
 
     @property
     def full_text(self) -> str:
@@ -148,6 +158,7 @@ class FileTask:
     error_message: str = ""
     warning: str = ""  # Предупреждение о качестве (не блокирует, но показывается)
     result: Optional[TranscriptionResult] = None
+    library_document_id: Optional[str] = None
 
     @property
     def is_video(self) -> bool:

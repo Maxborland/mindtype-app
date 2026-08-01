@@ -328,6 +328,8 @@ class FileQueueItemWidget(QFrame):
         if self.task.status == FileStatus.ERROR and self.task.error_message:
             status_text += f": {self.task.error_message[:50]}"
 
+        elif self.task.warning:
+            status_text += f": [!] {self.task.warning[:80]}"
         self._status_label.setText(status_text)
         self._status_label.setObjectName(object_name)
         # Force style refresh

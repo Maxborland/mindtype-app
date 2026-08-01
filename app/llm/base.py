@@ -201,7 +201,7 @@ class LLMProvider(ABC):
         Returns:
             Список моделей
         """
-        if self._cached_models and not force_refresh and not self._cache_expired():
+        if self._cached_models is not None and not force_refresh and not self._cache_expired():
             return self._cached_models
 
         logger.info(f"Загрузка моделей от {self.PROVIDER_NAME}...")

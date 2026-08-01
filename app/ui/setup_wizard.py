@@ -5,10 +5,9 @@ System 7 Style - Classic Mac OS.
 
 Шаги:
 1. Выбор языка интерфейса
-2. Выбор AI провайдера (MindType Cloud / свой API ключ)
-3. Если MindType Cloud - выбор пакета кредитов
-3b. Если свой ключ - ввод API ключа
-4. Загрузка модели распознавания
+2. Активация MindType Cloud или ознакомительный режим
+3. Активация лицензии (опционально)
+4. Подготовка распознавания речи
 5. Завершение
 """
 
@@ -442,12 +441,13 @@ class KeyOrDemoPage(QWizardPage):
         self.choice_group = QButtonGroup(self)
 
         # License key option
-        self.key_frame = create_card_frame(selected=False)
+        self.key_frame = create_card_frame(selected=True)
         key_layout = QVBoxLayout(self.key_frame)
         key_layout.setSpacing(8)
         key_layout.setContentsMargins(16, 12, 16, 12)
 
         self.key_radio = QRadioButton(self._t("setup_option_license_key"))
+        self.key_radio.setChecked(True)
         self.key_radio.setStyleSheet("font-weight: bold; font-size: 13px; background: transparent;")
         self.key_radio.toggled.connect(self._update_card_styles)
         self.choice_group.addButton(self.key_radio, 0)
@@ -463,14 +463,14 @@ class KeyOrDemoPage(QWizardPage):
         layout.addSpacing(8)
 
         # Demo option
-        self.demo_frame = create_card_frame(selected=True)
+        self.demo_frame = create_card_frame(selected=False)
         demo_layout = QVBoxLayout(self.demo_frame)
         demo_layout.setSpacing(8)
         demo_layout.setContentsMargins(16, 12, 16, 12)
 
         self.demo_radio = QRadioButton(self._t("setup_option_demo"))
         self.demo_radio.setStyleSheet("font-weight: bold; font-size: 13px; background: transparent;")
-        self.demo_radio.setChecked(True)
+        self.demo_radio.setChecked(False)
         self.demo_radio.toggled.connect(self._update_card_styles)
         self.choice_group.addButton(self.demo_radio, 1)
         demo_layout.addWidget(self.demo_radio)
@@ -945,7 +945,7 @@ class CreditPackPage(QWizardPage):
 
 
 class ApiKeyPage(QWizardPage):
-    """Step 3b: Enter own API key."""
+    """Dormant legacy BYOK page kept for migration compatibility, not registered."""
 
     def __init__(self, parent=None):
         super().__init__(parent)

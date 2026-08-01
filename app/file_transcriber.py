@@ -142,6 +142,8 @@ class FileTranscriptionQueue:
         self._temp_files: List[Path] = []
         self._summarizer = None  # Ленивая инициализация
         self._text_processor = None  # Ленивая инициализация
+        if hasattr(self.transcriber, "set_cancel_check"):
+            self.transcriber.set_cancel_check(self._cancelled.is_set)
 
     @property
     def tasks(self) -> List[FileTask]:
@@ -285,6 +287,8 @@ class FileTranscriptionQueue:
 
             # Получаем длительность
             duration = get_file_duration(task.file_path)
+            if hasattr(self.transcriber, "validate_media"):
+                self.transcriber.validate_media(audio_path, duration)
 
             # Транскрибируем
             segments_data, detected_lang, prob = self.transcriber.transcribe_with_timestamps(
@@ -293,6 +297,9 @@ class FileTranscriptionQueue:
                 beam_size=self.beam_size,
                 vad_filter=self.vad_filter,
             )
+            cloud_outcome = None
+            if hasattr(self.transcriber, "consume_last_outcome"):
+                cloud_outcome = self.transcriber.consume_last_outcome()
 
             if not segments_data:
                 logger.warning(f"Транскрипция вернула 0 сегментов для {task.file_path.name}")
@@ -326,6 +333,7 @@ class FileTranscriptionQueue:
                     start=s["start"],
                     end=s["end"],
                     text=s["text"],
+                    speaker=s.get("speaker") or s.get("speaker_id"),
                     words=s.get("words", [])
                 )
                 for s in segments_data
@@ -337,9 +345,79 @@ class FileTranscriptionQueue:
                 segments=segments,
                 detected_language=detected_lang,
                 language_probability=prob,
-                duration=duration if duration > 0 else (segments[-1].end if segments else 0),
-                model_used=self.model_size,
+                duration=(
+                    cloud_outcome.duration_seconds
+                    if cloud_outcome and cloud_outcome.duration_seconds > 0
+                    else duration if duration > 0
+                    else (segments[-1].end if segments else 0)
+                ),
+                model_used=(
+                    f"{cloud_outcome.provider}/{cloud_outcome.model}"
+                    if cloud_outcome
+                    else self.model_size
+                ),
+                cloud_job_id=cloud_outcome.job_id if cloud_outcome else None,
+                cloud_operation_id=(
+                    cloud_outcome.operation_id if cloud_outcome else None
+                ),
+                cloud_transcript_artifact_id=(
+                    cloud_outcome.transcript_artifact_id if cloud_outcome else None
+                ),
+                cloud_canonical_result=(
+                    cloud_outcome.canonical_result if cloud_outcome else None
+                ),
             )
+            if cloud_outcome:
+                task.result.speaker_names = dict(cloud_outcome.speaker_names)
+                speaker_ids = sorted(
+                    {
+                        segment.speaker
+                        for segment in segments
+                        if segment.speaker is not None
+                    }
+                )
+                task.result.num_speakers = len(speaker_ids)
+                if speaker_ids:
+                    task.result.speaker_stats = []
+                    for index, speaker_id in enumerate(speaker_ids, start=1):
+                        speaker_segments = [
+                            segment
+                            for segment in segments
+                            if segment.speaker == speaker_id
+                        ]
+                        speaker_name = task.result.speaker_names.setdefault(
+                            speaker_id,
+                            f"Speaker {index}",
+                        )
+                        task.result.speaker_stats.append(
+                            SpeakerStats(
+                                speaker_id=speaker_id,
+                                speaker_name=speaker_name,
+                                total_duration=sum(
+                                    max(0.0, segment.end - segment.start)
+                                    for segment in speaker_segments
+                                ),
+                                segment_count=len(speaker_segments),
+                                word_count=sum(
+                                    len(segment.text.split())
+                                    for segment in speaker_segments
+                                ),
+                            )
+                        )
+                cloud_warnings = [
+                    str(warning)
+                    for warning in cloud_outcome.warnings
+                    if str(warning).strip()
+                ]
+                if cloud_warnings:
+                    task.warning = "\n".join(
+                        part
+                        for part in (
+                            task.warning,
+                            "\n".join(cloud_warnings),
+                        )
+                        if part
+                    )
 
             # Постобработка транскрипции (если включена)
             logger.info(f"Проверка постобработки: enable={self.enable_postprocessing}, text_len={len(task.result.full_text) if task.result.full_text else 0}")
@@ -457,7 +535,52 @@ class FileTranscriptionQueue:
             self._on_completed(task)
 
     def _summarize_text(self, text: str, task: FileTask):
-        """Выполнить суммаризацию текста."""
+        """Выполнить суммаризацию текста.
+
+        MindType Cloud is the canonical summary route.  The legacy local/remote
+        Summarizer remains available for explicitly selected non-Cloud providers.
+        """
+        if self.summary_provider == "mindtype_cloud":
+            from .cloud_summary import (
+                CloudSummaryClient,
+                serialize_prompt_templates,
+            )
+            from .summarizer import SummarizationMetrics
+
+            client = getattr(self.transcriber, "client", None)
+            if client is None:
+                raise RuntimeError(
+                    "MindType Cloud summary requires the Cloud session client"
+                )
+            if task.result is None:
+                raise RuntimeError("Cloud summary requires a transcription result")
+            canonical = task.result.cloud_canonical_result
+            if not isinstance(canonical, dict):
+                from .cloud_summary import canonical_from_transcription_result
+
+                canonical = canonical_from_transcription_result(task.result)
+            operation_id = task.result.cloud_operation_id or None
+            custom_prompt = serialize_prompt_templates(self.custom_prompts or {})
+            outcome = CloudSummaryClient(client).summarize(
+                canonical_transcript=canonical,
+                preset=self.summary_preset_name or "generic",
+                custom_prompt=custom_prompt or None,
+                operation_id=operation_id,
+                source_artifact_id=task.result.cloud_transcript_artifact_id,
+                input_token_estimate=max(1, len(text.split())),
+                max_output_tokens=2_000,
+            )
+            task.result.cloud_summary_job_id = outcome.job_id
+            task.result.cloud_summary_operation_id = outcome.operation_id
+            task.result.cloud_canonical_result = outcome.canonical_result
+            metrics = SummarizationMetrics(
+                input_tokens=outcome.input_tokens,
+                input_chunks=1,
+                llm_calls=1,
+                output_tokens=outcome.output_tokens,
+            )
+            return outcome.text, metrics
+
         from .summarizer import get_summarizer, SummarizerConfig
 
         # Определяем параметры: универсальные или legacy openrouter

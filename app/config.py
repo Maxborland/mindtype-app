@@ -110,7 +110,7 @@ def _default_config() -> Dict[str, Any]:
         # Setup wizard state
         "setup_completed": False,            # True после завершения визарда
         "simple_mode": True,                 # True = Simple, False = Advanced
-        "use_mindtype_cloud": False,         # True = MindType Cloud, False = свой API ключ
+        "use_mindtype_cloud": True,          # MindType Cloud is the ordinary product route
         # Model settings
         "model_size": _get_default_model(),
         "compute_type": "int8",
@@ -135,7 +135,7 @@ def _default_config() -> Dict[str, Any]:
         "overlay_wave_gain": 1.5,            # Усиление волн (1.0 - 10.0)
         "overlay_opacity": 230,              # Прозрачность фона (0-255)
         # Саммаризация (мульти-провайдер)
-        "llm_provider": "openrouter",        # openai, anthropic, gemini, ollama, openrouter
+        "llm_provider": "mindtype_cloud",    # Legacy providers remain load-compatible
         "llm_reasoning_enabled": True,       # Включить reasoning mode
         "llm_reasoning_effort": "medium",    # low / medium / high
         "summary_preset": "pm",              # Пресет промптов: pm, student, generic, call или user-<id>
